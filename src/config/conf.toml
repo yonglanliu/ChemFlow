@@ -1,0 +1,20 @@
+[uniprot]
+url = "https://rest.uniprot.org/uniprotkb/search"
+timeout = 60
+
+fields = [
+    "accession",
+    "id",
+    "protein_name",
+    "gene_names",
+    "organism_name",
+    "length"
+]
+
+[chembl]
+target_query_fields = [
+    "target_chembl_id",
+    "organism",
+    "pref_name",
+    "target_type",
+]

@@ -1,0 +1,113 @@
+/* Main Title */
+
+.home-main-title {
+    background-color:#0f172a;
+    color:rgb(255, 255, 255);
+    padding:15px;
+    border-radius:10px;
+    font-size:clamp(1rem, 2vw, 2.0rem);
+    font-weight:bold;
+    text-align:center;
+    margin-top:25px;
+    margin-bottom:25px;
+}
+
+/* Subtitle */
+
+.subtitle {
+    text-align: center;
+    font-size: clamp(1rem, 2vw, 1.4rem);
+    color: #6c757d;
+    margin-bottom: 2rem;
+}
+
+/* Cards */
+
+.card {
+    padding: 1.5rem;
+    border-radius: 18px;
+    background: linear-gradient(145deg,#ffffff,#f5f7fa);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    height: 100%;
+}
+
+/* Workflow Ribbon */
+
+.workflow-band {
+    background: linear-gradient(
+        90deg,
+        #2563eb,
+        #0ea5e9,
+        #10b981
+    );
+
+    color: white;
+
+    padding: 1rem;
+
+    border-radius: 14px;
+
+    font-size: clamp(1rem,1.5vw,1.3rem);
+
+    text-align: center;
+
+    font-weight: 700;
+
+    margin-top: 1rem;
+    margin-bottom: 1rem;
+}
+
+/* Section Header */
+
+.section-header {
+
+    background-color: #0f172a;
+
+    color: white;
+
+    padding: 15px;
+
+    border-radius: 10px;
+
+    font-size: 1.6rem;
+
+    font-weight: 700;
+
+    text-align: center;
+
+    margin: 20px 0;
+}
+
+.intro-card {
+    background: #f8fafc;
+    padding: 24px;
+    border-radius: 20px;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.06);
+}
+
+.intro-card h3 {
+    color: #0f172a;
+    font-size: clamp(1.0rem, 2vw, 2rem);
+    font-weight: 800;
+    margin-bottom: 14px;
+}
+
+.intro-card p {
+    color: #334155;
+    font-size: clamp(0.9rem, 1.5vw, 1.1rem);
+    line-height: 1.6;
+}
+
+.intro-card li {
+    color: #334155;
+    font-size: clamp(0.9rem, 1.5vw, 1.1rem);
+    line-height: 1.7;
+    margin-bottom: 6px;
+}
+
+/* .p{
+    font-size: clamp(0.9rem, 1.5vw, 1.1rem);
+    line-height: 1.6;
+    color: #333;
+} */
