@@ -1,0 +1,22 @@
+[project]
+name = "chemflow"
+version = "0.1.0"
+description = "End-to-end cheminformatics and AI drug discovery platform"
+requires-python = ">=3.11"
+
+dependencies = [
+    "streamlit",
+    "pandas",
+    "numpy",
+    "scikit-learn",
+    "scipy",
+    "matplotlib",
+    "plotly",
+    "requests",
+    "rdkit",
+    "chembl-webresource-client",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
