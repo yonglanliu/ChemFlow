@@ -9,10 +9,10 @@ import streamlit as st
 
 from src.utils.style import load_css as inject_css
 
-import src.tabs.page_data_extraction.tab1 as tab1
-import src.tabs.page_data_extraction.tab2 as tab2
-import src.tabs.page_data_extraction.tab3 as tab3
-import src.tabs.page_data_extraction.tab4 as tab4
+import src.streamlit.tabs.page_data_extraction.tab1 as tab1
+import src.streamlit.tabs.page_data_extraction.tab2 as tab2
+import src.streamlit.tabs.page_data_extraction.tab3 as tab3
+import src.streamlit.tabs.page_data_extraction.tab4 as tab4
 
 
 # ============================================================

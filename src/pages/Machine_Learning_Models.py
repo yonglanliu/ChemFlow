@@ -38,11 +38,11 @@ tab_1, tab_2, tab_3 = st.tabs(
 )
 
 with tab_1:
-    from src.tabs.page_machine_learning import tab1_setup
+    from src.streamlit.tabs.page_machine_learning import tab1_setup
     workdir = tab1_setup.design()
 
 with tab_2:
-    from src.tabs.page_machine_learning import tab2_analysis
+    from src.streamlit.tabs.page_machine_learning import tab2_analysis
     tab2_analysis.design(workdir)
 
 with tab_3:

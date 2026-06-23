@@ -7,7 +7,7 @@ from pathlib import Path
 from src.config import CONFIG
 from src.streamlit.data_extraction import add_quality_flags, show_bioactivity_table
 from src.utils import safe_mol_wt
-from src.data.extract_pubchem_data import (
+from src.chemflow.curation.extract_pubchem_data import (
     fetch_pubchem_target_assays,
     add_compounds,
     PipelineConfig,

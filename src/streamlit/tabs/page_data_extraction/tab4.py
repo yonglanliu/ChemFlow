@@ -13,7 +13,7 @@ from rdkit.Chem import Draw, Descriptors
 from src.config import CONFIG
 from src.utils.chem import safe_mol_wt
 from src.streamlit.data_extraction import add_quality_flags, show_bioactivity_table
-from src.data.extract_bindingdb_data import (
+from src.chemflow.curation.extract_bindingdb_data import (
     fetch_bindingdb_by_uniprot,
     BDBConfig,
     get_default_index,

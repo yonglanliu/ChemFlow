@@ -134,7 +134,7 @@ def design():
 
     st.divider()
 
-    import src.tabs.page_machine_learning.model_selection as model_selection
+    import src.streamlit.tabs.page_machine_learning.model_selection as model_selection
 
     models, task_type, search_seed, hyperparameter_tuning = model_selection.design(
         workdir
@@ -147,7 +147,7 @@ def design():
     st.subheader("Molecular Representation")
 
     from src.utils.select_file import file_picker
-    import src.tabs.page_machine_learning.molecular_representation as mol_rep
+    import src.streamlit.tabs.page_machine_learning.molecular_representation as mol_rep
 
     data_file = file_picker(
         start_dir=workdir,
@@ -183,7 +183,7 @@ def design():
 
     st.divider()
 
-    from src.tabs.page_machine_learning import data_split
+    from src.streamlit.tabs.page_machine_learning import data_split
 
     st.subheader("Dataset Splitting")
 

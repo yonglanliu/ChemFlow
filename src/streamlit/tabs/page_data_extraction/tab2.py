@@ -9,7 +9,7 @@ import streamlit as st
 from rdkit import Chem
 from rdkit.Chem import Draw, Descriptors
 from src.config import CONFIG
-from src.data.extract_chembl_data import (
+from src.chemflow.curation.extract_chembl_data import (
     fetch_bioactivity_data, 
     add_doi_data, 
     add_compounds,
