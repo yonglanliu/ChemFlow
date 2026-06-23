@@ -32,13 +32,27 @@ machine_learning_page = st.Page(
     icon=":material/smart_toy:",
 )
 
+predictor_page = st.Page(
+    "src/pages/Predictor.py",
+    title="Activity/Property Predictor",
+    icon=":material/analytics:",
+)
+
+molecular_generator_page = st.Page(
+    "src/pages/Molecular_Generator.py",
+    title="Molecular Generator",
+    icon=":material/biotech:",
+)
 
 pg = st.navigation(
     {
         "Main": [home_page],
         "Data": [data_extraction_page, database_combine],
         "Clustering":[],
-        "Machine Learning":[machine_learning_page]
+        "Machine Learning":[machine_learning_page],
+        "Predictor":[predictor_page],
+        "Molecular Generator":[molecular_generator_page],
+        "Molecular Optimization":[],
     }
 )
 

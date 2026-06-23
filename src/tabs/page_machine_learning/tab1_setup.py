@@ -183,7 +183,7 @@ def design():
 
     st.divider()
 
-    from src.tabs.page_tmachine_learning import data_split
+    from src.tabs.page_machine_learning import data_split
 
     st.subheader("Dataset Splitting")
 
