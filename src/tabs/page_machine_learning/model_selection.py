@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Yonglan Liu
+# Licensed under the MIT License.
+
 import json
 from pathlib import Path
 

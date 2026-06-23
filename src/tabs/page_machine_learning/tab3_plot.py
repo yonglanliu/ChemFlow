@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Yonglan Liu
+# Licensed under the MIT License.
+
 from src.utils.select_dir import directory_picker
 import streamlit as st
 import pandas as pd

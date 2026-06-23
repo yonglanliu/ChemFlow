@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Yonglan Liu
+# Licensed under the MIT License.
+
 from rdkit import Chem
 from rdkit.Chem import Draw, Descriptors
 

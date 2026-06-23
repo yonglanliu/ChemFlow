@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Yonglan Liu
+# Licensed under the MIT License.
+
 import streamlit as st
 from src.utils.design import thick_divider
 from src.utils.style import load_css
