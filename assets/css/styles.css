@@ -1,18 +1,61 @@
-/* Main Title */
+/* ==========================================================
+   Global Elements
+   ========================================================== */
 
-.home-main-title {
-    background-color:#0f172a;
-    color:rgb(255, 255, 255);
-    padding:15px;
-    border-radius:10px;
-    font-size:clamp(1rem, 2vw, 2.0rem);
-    font-weight:bold;
-    text-align:center;
-    margin-top:25px;
-    margin-bottom:25px;
+hr {
+    margin-top: 1.2rem;
+    margin-bottom: 1.2rem;
+    border: none;
+    height: 4px;
+    background-color: #c9c9c9;
 }
 
-/* Subtitle */
+/* ==========================================================
+   Buttons
+   ========================================================== */
+
+.stButton > button {
+    height: 3rem;
+    font-size: 1rem;
+    font-weight: 600;
+    border-radius: 10px;
+}
+
+/* ==========================================================
+   Typography
+   ========================================================== */
+
+.home-main-title {
+    background-color: #0f172a;
+    color: white;
+    padding: 15px;
+    border-radius: 10px;
+    font-size: clamp(1rem, 2vw, 2rem);
+    font-weight: bold;
+    text-align: center;
+    margin: 25px 0;
+}
+
+.page-title {
+    text-align: center;
+    background: linear-gradient(
+        90deg,
+        #005388,
+        #00A6D6
+    );
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 800;
+    font-size: clamp(1.8rem, 3vw, 3rem);
+    margin: 1rem 0;
+}
+
+.page-subtitle {
+    text-align: center;
+    color: #64748b;
+    font-size: clamp(1rem, 1.5vw, 1.2rem);
+    margin-bottom: 2rem;
+}
 
 .subtitle {
     text-align: center;
@@ -21,61 +64,20 @@
     margin-bottom: 2rem;
 }
 
-/* Cards */
+/* ==========================================================
+   Cards
+   ========================================================== */
 
 .card {
     padding: 1.5rem;
     border-radius: 18px;
-    background: linear-gradient(145deg,#ffffff,#f5f7fa);
+    background: linear-gradient(
+        145deg,
+        #ffffff,
+        #f5f7fa
+    );
     box-shadow: 0 4px 15px rgba(0,0,0,0.08);
     height: 100%;
-}
-
-/* Workflow Ribbon */
-
-.workflow-band {
-    background: linear-gradient(
-        90deg,
-        #2563eb,
-        #0ea5e9,
-        #10b981
-    );
-
-    color: white;
-
-    padding: 1rem;
-
-    border-radius: 14px;
-
-    font-size: clamp(1rem,1.5vw,1.3rem);
-
-    text-align: center;
-
-    font-weight: 700;
-
-    margin-top: 1rem;
-    margin-bottom: 1rem;
-}
-
-/* Section Header */
-
-.section-header {
-
-    background-color: #0f172a;
-
-    color: white;
-
-    padding: 15px;
-
-    border-radius: 10px;
-
-    font-size: 1.6rem;
-
-    font-weight: 700;
-
-    text-align: center;
-
-    margin: 20px 0;
 }
 
 .intro-card {
@@ -88,26 +90,49 @@
 
 .intro-card h3 {
     color: #0f172a;
-    font-size: clamp(1.0rem, 2vw, 2rem);
+    font-size: clamp(1rem, 2vw, 2rem);
     font-weight: 800;
     margin-bottom: 14px;
 }
 
-.intro-card p {
-    color: #334155;
-    font-size: clamp(0.9rem, 1.5vw, 1.1rem);
-    line-height: 1.6;
-}
-
+.intro-card p,
 .intro-card li {
     color: #334155;
     font-size: clamp(0.9rem, 1.5vw, 1.1rem);
-    line-height: 1.7;
-    margin-bottom: 6px;
+    line-height: 1.6;
 }
 
-/* .p{
-    font-size: clamp(0.9rem, 1.5vw, 1.1rem);
-    line-height: 1.6;
-    color: #333;
-} */
+/* ==========================================================
+   Workflow
+   ========================================================== */
+
+.workflow-band {
+    background: linear-gradient(
+        90deg,
+        #2563eb,
+        #0ea5e9,
+        #10b981
+    );
+    color: white;
+    padding: 1rem;
+    border-radius: 14px;
+    font-size: clamp(1rem, 1.5vw, 1.3rem);
+    text-align: center;
+    font-weight: 700;
+    margin: 1rem 0;
+}
+
+/* ==========================================================
+   Section Headers
+   ========================================================== */
+
+.section-header {
+    background-color: #0f172a;
+    color: white;
+    padding: 15px;
+    border-radius: 10px;
+    font-size: clamp(1.2rem, 2vw, 1.6rem);
+    font-weight: 700;
+    text-align: center;
+    margin: 20px 0;
+}

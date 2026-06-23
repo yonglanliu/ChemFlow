@@ -3,9 +3,11 @@
 from pathlib import Path
 import tomllib
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-with open(PROJECT_ROOT / "conf.toml", "rb") as f:
+CURRENT_DIR = Path(__file__).resolve().parent
+
+with open(CURRENT_DIR / "conf.toml", "rb") as f:
     CONFIG = tomllib.load(f)
 
 

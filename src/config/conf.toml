@@ -18,3 +18,50 @@ target_query_fields = [
     "pref_name",
     "target_type",
 ]
+
+bioactivity_query_fields = [
+    "activity_id",
+    "assay_chembl_id",
+    "assay_description",
+    "assay_type",
+    "molecule_chembl_id",
+    "type",
+    "standard_units",
+    "relation",
+    "standard_value",
+    "target_chembl_id",
+    "target_organism",
+    "document_chembl_id",
+]
+
+default_bioactivity_query_fields = [
+            "assay_description",
+            "assay_type",
+            "molecule_chembl_id",
+            "type",
+            "standard_units",
+            "standard_value",
+            "target_chembl_id",
+            "target_organism",
+            "document_chembl_id",
+        ]
+assay_types = ["B", "F"]
+default_assay_types = ["B"]
+bioactivity_query_types = ["IC50", "EC50", "Ki"]
+
+[pubchem]
+activity_types = ["IC50", "EC50", "Ki", "Kd", "All"]
+base_url = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+default_query_fields = [
+                "CID",
+                "Activity Name",
+                "Activity Value [uM]",
+                "Activity Value",
+                "Activity Unit",
+                "Target Accession",
+                "Target Name",
+                "query_uniprot",
+            ]
+
+[BindingDB]
+api_url = "https://www.bindingdb.org/rest/getLigandsByUniprots"

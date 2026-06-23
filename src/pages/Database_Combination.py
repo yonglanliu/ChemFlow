@@ -1,30 +1,39 @@
-import streamlit as st
-from src.utils.select_file import file_picker
 from pathlib import Path
-import pandas as pd
 import sqlite3
 
+import pandas as pd
+import streamlit as st
+
+from src.utils.select_file import file_picker
+from src.utils.style import load_css as inject_css
+
+
+# ============================================================
+# Page setup
+# ============================================================
+
+inject_css()
 
 st.markdown(
     """
-    <h1 style="
-        text-align:center;
-        background: linear-gradient(90deg,#005388,#00A6D6);
-        -webkit-background-clip:text;
-        -webkit-text-fill-color:transparent;
-        font-weight:800;
-    ">
+    <div class="page-title">
         Database Combination
-    </h1>
+    </div>
     """,
     unsafe_allow_html=True,
 )
 
-tab_1, tab_2 = st.tabs([
-    "DB Combination",
-    "Add Data",
-])
+tab_1, tab_2 = st.tabs(
+    [
+        "DB Combination",
+        "Add Data",
+    ]
+)
 
+
+# ============================================================
+# Session state
+# ============================================================
 
 def init_file_picker_state():
     if "file_picker_blocks" not in st.session_state:
@@ -45,13 +54,18 @@ def add_file_picker_block():
 
 def remove_file_picker_block(picker_id):
     st.session_state["file_picker_blocks"] = [
-        p for p in st.session_state["file_picker_blocks"]
+        p
+        for p in st.session_state["file_picker_blocks"]
         if p["id"] != picker_id
     ]
 
     st.session_state["database_df"].pop(picker_id, None)
     st.session_state["raw_database_df"].pop(picker_id, None)
 
+
+# ============================================================
+# File loading
+# ============================================================
 
 def load_database_file(file_path):
     file_path = Path(file_path)
@@ -61,29 +75,26 @@ def load_database_file(file_path):
         if suffix == ".csv":
             return pd.read_csv(file_path)
 
-        elif suffix == ".tsv":
+        if suffix == ".tsv":
             return pd.read_csv(file_path, sep="\t")
 
-        elif suffix == ".txt":
+        if suffix == ".txt":
             return pd.read_csv(file_path, sep=None, engine="python")
 
-        elif suffix in [".pkl", ".pickle"]:
+        if suffix in [".pkl", ".pickle"]:
             return pd.read_pickle(file_path)
 
-        elif suffix in [".db", ".sqlite", ".sqlite3"]:
-            conn = sqlite3.connect(file_path)
-
-            tables = pd.read_sql_query(
-                """
-                SELECT name
-                FROM sqlite_master
-                WHERE type='table'
-                ORDER BY name
-                """,
-                conn,
-            )
-
-            conn.close()
+        if suffix in [".db", ".sqlite", ".sqlite3"]:
+            with sqlite3.connect(file_path) as conn:
+                tables = pd.read_sql_query(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type='table'
+                    ORDER BY name
+                    """,
+                    conn,
+                )
 
             return {
                 "type": "sqlite",
@@ -91,24 +102,27 @@ def load_database_file(file_path):
                 "path": str(file_path),
             }
 
+        st.warning(f"Unsupported file type: {suffix}")
+        return None
+
     except Exception as e:
         st.error(f"Failed to load file:\n{e}")
-
-    return None
+        return None
 
 
 def read_sqlite_table(db_path, table_name):
-    conn = sqlite3.connect(db_path)
-
-    df = pd.read_sql_query(
-        f'SELECT * FROM "{table_name}"',
-        conn,
-    )
-
-    conn.close()
+    with sqlite3.connect(db_path) as conn:
+        df = pd.read_sql_query(
+            f'SELECT * FROM "{table_name}"',
+            conn,
+        )
 
     return df
 
+
+# ============================================================
+# UI blocks
+# ============================================================
 
 def render_file_picker_block(picker_id, workdir):
     with st.container(border=True):
@@ -177,24 +191,24 @@ def render_file_picker_block(picker_id, workdir):
             return
 
         st.session_state["raw_database_df"][picker_id] = df.copy()
+        st.session_state["database_df"][picker_id] = df.copy()
 
-        working_df = df.copy()
-
-        st.markdown("#### Filter Activity Type")
-
-        cols = working_df.columns.tolist()
+        st.markdown("#### Preview")
 
         st.dataframe(
-            working_df.head(10),
-            use_container_width=True,
+            df.head(10),
+            width="stretch",
         )
-        
 
 
 def database_picker_builder(workdir):
     init_file_picker_state()
 
-    if st.button("+ Add Database", type="primary", use_container_width=True):
+    if st.button(
+        "+ Add Database",
+        type="primary",
+        width="stretch",
+    ):
         add_file_picker_block()
         st.rerun()
 
@@ -205,20 +219,18 @@ def database_picker_builder(workdir):
         )
 
 
+# ============================================================
+# Main design
+# ============================================================
+
 def design():
     workdir = Path.cwd()
 
     st.markdown(
         """
-        <h3 style="
-            text-align:left;
-            background: linear-gradient(90deg,#005388,#00A6D6);
-            -webkit-background-clip:text;
-            -webkit-text-fill-color:transparent;
-            font-weight:800;
-        ">
+        <div class="subsection-title">
             Select Databases
-        </h3>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -234,6 +246,10 @@ def design():
                 f"{df.shape[0]} rows × {df.shape[1]} columns"
             )
 
+
+# ============================================================
+# Tabs
+# ============================================================
 
 with tab_1:
     design()
