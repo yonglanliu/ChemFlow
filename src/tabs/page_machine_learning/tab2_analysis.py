@@ -1,62 +1,74 @@
-from src.utils.select_dir import directory_picker
-import streamlit as st
-import pandas as pd
+from __future__ import annotations
+
 import json
 from pathlib import Path
-import plotly.express as px
-import plotly.graph_objects as go
 
-import numpy as np
-
+import pandas as pd
 import streamlit as st
+
+from src.utils.select_dir import directory_picker
+from src.streamlit.plot_widgets import (
+    st_radar_chart,
+    st_roc_auc_plot,
+    st_distribution_with_boxplot,
+    st_metric_bar_plot,
+)
 
 
 PLOT_OPTIONS = [
     "bar",
     "radar",
     "distribution",
-    "confusion matrix",
     "ROC-AUC",
 ]
 
 
-def init_plot_state():
+# ============================================================
+# Session state
+# ============================================================
+
+def init_plot_state() -> None:
     if "plot_blocks" not in st.session_state:
         st.session_state["plot_blocks"] = []
 
 
-def add_plot_block():
-    st.session_state["plot_blocks"].append({
-        "id": len(st.session_state["plot_blocks"]),
-    })
+def add_plot_block() -> None:
+    existing_ids = [p["id"] for p in st.session_state["plot_blocks"]]
+    new_id = max(existing_ids) + 1 if existing_ids else 0
+
+    st.session_state["plot_blocks"].append(
+        {
+            "id": new_id,
+        }
+    )
 
 
-def remove_plot_block(plot_id):
+def remove_plot_block(plot_id: int) -> None:
     st.session_state["plot_blocks"] = [
-        p for p in st.session_state["plot_blocks"]
+        p
+        for p in st.session_state["plot_blocks"]
         if p["id"] != plot_id
     ]
 
-def select_column_pair(results, plot_id, x_label="X Column", y_label="Y Column"):
-    c1, c2 = st.columns(2)
 
-    with c1:
-        x_col = st.selectbox(
-            x_label,
-            results.columns,
-            key=f"x_col_{plot_id}",
-        )
+# ============================================================
+# Helpers
+# ============================================================
 
-    with c2:
-        y_col = st.selectbox(
-            y_label,
-            results.columns,
-            key=f"y_col_{plot_id}",
-        )
+def get_numeric_columns(df: pd.DataFrame) -> list[str]:
+    numeric_cols = []
 
-    return x_col, y_col
+    for col in df.columns:
+        try:
+            pd.to_numeric(df[col], errors="raise")
+            numeric_cols.append(col)
+        except Exception:
+            continue
 
-def has_roc_data(df):
+    return numeric_cols
+
+
+def has_roc_data(df: pd.DataFrame) -> bool:
     cols = [str(c) for c in df.columns]
 
     if "roc_curve" in cols:
@@ -73,7 +85,55 @@ def has_roc_data(df):
 
     return False
 
-def render_plot_block(results, model_col, plot_id):
+
+def extract_model_summaries(
+    json_dir: str | Path,
+    output_tsv: str | Path,
+) -> pd.DataFrame:
+    json_dir = Path(json_dir)
+    output_tsv = Path(output_tsv)
+
+    dfs = []
+
+    for json_file in json_dir.rglob("*summary.json"):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            df = pd.json_normalize(data)
+            df["file"] = str(json_file)
+            df["model_file"] = json_file.name
+
+            if "confusion_matrix" in data:
+                df["confusion_matrix"] = [data["confusion_matrix"]]
+
+            if "confusion_matrix_labels" in data:
+                df["confusion_matrix_labels"] = [data["confusion_matrix_labels"]]
+
+            dfs.append(df)
+
+        except Exception as e:
+            st.warning(f"Failed to read {json_file}: {e}")
+
+    if not dfs:
+        return pd.DataFrame()
+
+    results = pd.concat(dfs, ignore_index=True)
+    output_tsv.parent.mkdir(parents=True, exist_ok=True)
+    results.to_csv(output_tsv, sep="\t", index=False)
+
+    return results
+
+
+# ============================================================
+# Plot block
+# ============================================================
+
+def render_plot_block(
+    results: pd.DataFrame,
+    model_col: str,
+    plot_id: int,
+) -> None:
     with st.container(border=True):
         c1, c2, c3 = st.columns([2, 2, 1], vertical_alignment="bottom")
 
@@ -96,20 +156,46 @@ def render_plot_block(results, model_col, plot_id):
                 remove_plot_block(plot_id)
                 st.rerun()
 
-        row = results[
-            results[model_col].astype(str) == selected_model
+        row_df = results[
+            results[model_col].astype(str) == str(selected_model)
         ]
 
-        if row.empty:
+        if row_df.empty:
             st.warning("No matching model found.")
             return
 
-        row = row.iloc[0]
+        row = row_df.iloc[0]
+        if plot_type == "bar":
 
-        if plot_type == "radar":
+            numeric_cols = get_numeric_columns(results)
+
             metric_cols = st.multiselect(
                 "Metrics",
-                results.columns,
+                numeric_cols,
+                key=f"bar_metrics_{plot_id}",
+            )
+
+            bar_data = {}
+
+            for col in metric_cols:
+                try:
+                    bar_data[col] = float(row[col])
+                except Exception:
+                    pass
+
+            if len(bar_data) > 0:
+                st_metric_bar_plot(
+                    metric_dict=bar_data,
+                    key=f"bar_{plot_id}",
+                )
+            else:
+                st.info("Select at least one numeric metric.")
+        elif plot_type == "radar":
+            numeric_cols = get_numeric_columns(results)
+
+            metric_cols = st.multiselect(
+                "Metrics",
+                numeric_cols,
                 key=f"radar_metrics_{plot_id}",
             )
 
@@ -117,91 +203,61 @@ def render_plot_block(results, model_col, plot_id):
 
             for col in metric_cols:
                 try:
-                    radar_data[col] = float(row[col])
+                    value = float(row[col])
+                    radar_data[col] = value
                 except Exception:
-                    pass
+                    continue
 
             if len(radar_data) >= 3:
-                from src.plot import plot_radar_chart
-
-                plot_radar_chart(
+                st_radar_chart(
                     data=radar_data,
-                    name=selected_model,
+                    name=str(selected_model),
                     key=f"radar_{plot_id}",
                 )
             else:
                 st.info("Select at least 3 numeric metrics.")
 
-        # elif plot_type == "bar":
-        #     metric_cols = st.multiselect(
-        #         "Metrics",
-        #         results.columns,
-        #         key=f"bar_metrics_{plot_id}",
-        #     )
+        elif plot_type == "distribution":
+            numeric_cols = get_numeric_columns(results)
 
-        #     if metric_cols:
-        #         bar_data = {}
+            if not numeric_cols:
+                st.warning("No numeric columns found for distribution plot.")
+                return
 
-        #         for col in metric_cols:
-        #             try:
-        #                 bar_data[col] = float(row[col])
-        #             except Exception:
-        #                 pass
+            metric_col = st.selectbox(
+                "Metric",
+                numeric_cols,
+                key=f"dist_metric_{plot_id}",
+            )
 
-        #         st.bar_chart(bar_data)
-
-        # elif plot_type == "distribution":
-        #     metric_col = st.selectbox(
-        #         "Metric",
-        #         results.columns,
-        #         key=f"dist_metric_{plot_id}",
-        #     )
-
-        #     try:
-        #         values = results[metric_col].astype(float)
-        #         st.line_chart(values)
-        #     except Exception:
-        #         st.warning(f"{metric_col} is not numeric.")
-
-        # elif plot_type == "confusion matrix":
-        #     if "confusion_matrix" not in results.columns:
-        #         st.warning("No confusion_matrix column found.")
-        #         return
-
-        #     from src.plot import plot_confusion_matrix_from_row
-
-        #     plot_confusion_matrix_from_row(
-        #         row=row,
-        #         key=f"cm_{plot_id}",
-        #     )
+            st_distribution_with_boxplot(
+                df=results,
+                x_col=metric_col,
+                key=f"dist_{plot_id}",
+            )
 
         elif plot_type == "ROC-AUC":
             if not has_roc_data(results):
                 st.warning("No ROC curve data found.")
                 return
 
-            selected_model = st.selectbox(
-                "Model",
-                results[model_col].astype(str).unique(),
-                key=f"roc_model_{plot_id}",
-            )
-
-            row = results[
-                results[model_col].astype(str) == selected_model
-            ].iloc[0]
-
-            from src.plot import plot_roc_auc
-
-            plot_roc_auc(
+            st_roc_auc_plot(
                 results=row.to_dict(),
                 key=f"roc_{plot_id}",
             )
 
 
-def plot_builder(results, model_col):
+def plot_builder(
+    results: pd.DataFrame,
+    model_col: str,
+) -> None:
     init_plot_state()
 
-    if st.button("+ Add Plot", type="primary", use_container_width=True):
+    if st.button(
+        "+ Add Plot",
+        type="primary",
+        width="stretch",
+    ):
         add_plot_block()
         st.rerun()
 
@@ -212,44 +268,12 @@ def plot_builder(results, model_col):
             plot_id=plot_block["id"],
         )
 
-def extract_model_summaries(json_dir, output_tsv):
-    json_dir = Path(json_dir)
-    output_tsv = Path(output_tsv)
 
-    dfs = []
+# ============================================================
+# Main page
+# ============================================================
 
-    for json_file in json_dir.rglob("*summary.json"):
-        try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            df = pd.json_normalize(data)
-            df["file"] = str(json_file)
-            df["model_file"] = json_file.name
-
-            # Keep nested confusion matrix as object if present
-            if "confusion_matrix" in data:
-                df["confusion_matrix"] = [data["confusion_matrix"]]
-
-            if "confusion_matrix_labels" in data:
-                df["confusion_matrix_labels"] = [data["confusion_matrix_labels"]]
-
-            dfs.append(df)
-
-        except Exception as e:
-            st.warning(f"Failed to read {json_file}: {e}")
-
-    if not dfs:
-        return pd.DataFrame()
-
-    results = pd.concat(dfs, ignore_index=True)
-    output_tsv.parent.mkdir(parents=True, exist_ok=True)
-    results.to_csv(output_tsv, sep="\t", index=False)
-
-    return results
-
-
-def design(workdir):
+def design(workdir: str | Path | None = None) -> None:
     if workdir is None:
         workdir = Path.cwd()
     else:
@@ -261,16 +285,28 @@ def design(workdir):
         key="result_dir_picker",
     )
 
+    if not result_dir:
+        st.info("Please select a result directory.")
+        return
+
     outdir = Path(workdir) / "data"
     outdir.mkdir(parents=True, exist_ok=True)
 
     output_file = outdir / "summary_results.tsv"
 
-    if st.button("Extract summaries", type="primary", use_container_width=True):
+    if st.button(
+        "Extract summaries",
+        type="primary",
+        width="stretch",
+    ):
         results = extract_model_summaries(
             json_dir=result_dir,
             output_tsv=output_file,
         )
+
+        if results.empty:
+            st.warning("No summary JSON files found.")
+            return
 
         st.session_state["model_summary_results"] = results
         st.success(f"Saved summary results to: {output_file}")
@@ -281,13 +317,17 @@ def design(workdir):
 
     results = st.session_state["model_summary_results"]
 
-    st.dataframe(results, use_container_width=True)
+    if results is None or results.empty:
+        st.warning("Summary results are empty.")
+        return
+
+    st.dataframe(results, width="stretch")
     st.divider()
 
     c1, c2 = st.columns(2, vertical_alignment="bottom")
 
     with c1:
-        task_type = st.selectbox(
+        st.selectbox(
             "Task Type",
             [
                 "regression",
@@ -314,11 +354,3 @@ def design(workdir):
         results=results,
         model_col=model_col,
     )
-
-
-    # if task_type == "regression":
-    #     pass
-    # elif task_type == "classification (binary)":
-    #     pass
-    # elif task_type == "classification (multi-class)":
-    #     pass

@@ -226,15 +226,6 @@ def database_picker_builder(workdir):
 def design():
     workdir = Path.cwd()
 
-    st.markdown(
-        """
-        <div class="subsection-title">
-            Select Databases
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     database_picker_builder(workdir)
 
     if st.session_state.get("database_df"):
