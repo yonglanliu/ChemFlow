@@ -10,36 +10,36 @@ st.set_page_config(
 )
 
 home_page = st.Page(
-    "src/pages/home.py",
+    "src/streamlit/pages/home.py",
     title="Home",
     icon=":material/home:",
 )
 
 data_extraction_page = st.Page(
-    "src/pages/Data_Extraction.py",
+    "src/streamlit/pages/Data_Extraction/data_extraction_main_page.py",
     title="Data Extraction",
     icon=":material/database:",
 )
 database_combine = st.Page(
-    "src/pages/Database_Combination.py",
+    "src/streamlit/pages/Database_Combination.py",
     title="Database Combination",
     icon=":material/hub:",
 )
 
 machine_learning_page = st.Page(
-    "src/pages/Machine_Learning_Models.py",
+    "src/streamlit/pages/Machine_Learning/machine_learning_main_page.py",
     title="Machine Learning",
     icon=":material/smart_toy:",
 )
 
 predictor_page = st.Page(
-    "src/pages/Predictor.py",
+    "src/streamlit/pages/Predictor.py",
     title="Activity/Property Predictor",
     icon=":material/analytics:",
 )
 
 molecular_generator_page = st.Page(
-    "src/pages/Molecular_Generator.py",
+    "src/streamlit/pages/Molecular_Generator.py",
     title="Molecular Generator",
     icon=":material/biotech:",
 )
