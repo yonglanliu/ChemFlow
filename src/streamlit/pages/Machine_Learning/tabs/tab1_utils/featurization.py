@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import pickle
 import sqlite3
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -12,8 +13,11 @@ import streamlit as st
 
 from src.streamlit.utils.design import temp_error, temp_info, temp_success
 from src.chemflow.machine_learning.data import MOL_REP_NAMES
-from typing import Dict, Any, Optional
 
+
+# ============================================================
+# File loading
+# ============================================================
 
 def load_file(file_path):
     file_path = Path(file_path)
@@ -72,6 +76,51 @@ def get_dataframe_from_loaded_object(obj):
     return None
 
 
+def load_dataframe_to_session(data_file):
+    data_file = str(data_file)
+
+    if (
+        st.session_state.get("ml_loaded_data_file") == data_file
+        and "ml_df" in st.session_state
+    ):
+        return st.session_state["ml_df"]
+
+    obj = load_file(data_file)
+
+    if isinstance(obj, sqlite3.Connection):
+        tables = pd.read_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'",
+            obj,
+        )
+
+        if tables.empty:
+            temp_error("No tables found in this SQLite database.")
+            return None
+
+        table_name = st.selectbox(
+            "Select table",
+            tables["name"].tolist(),
+            key="db_table_select",
+        )
+
+        df = pd.read_sql(f"SELECT * FROM {table_name}", obj)
+
+    else:
+        df = get_dataframe_from_loaded_object(obj)
+
+    if df is None:
+        return None
+
+    st.session_state["ml_loaded_data_file"] = data_file
+    st.session_state["ml_df"] = df.copy()
+
+    return st.session_state["ml_df"]
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
 def safe_eval_formula(formula, x):
     allowed = {
         "x": x,
@@ -115,45 +164,39 @@ def show_xy_preview(df, smiles_col=None, x_col=None, y_col=None, class_col=None)
             temp_info("No valid input columns selected.")
 
 
-def load_dataframe_to_session(data_file):
-    data_file = str(data_file)
+def create_class_id_from_class_labels(
+    df: pd.DataFrame,
+    class_col: str,
+    class_id_col: str,
+    class_names: list[str],
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """
+    Create numeric class IDs from an existing text class column.
 
-    if (
-        st.session_state.get("ml_loaded_data_file") == data_file
-        and "ml_df" in st.session_state
-    ):
-        return st.session_state["ml_df"]
+    Example:
+    class_col:
+        inactive, moderate, active
 
-    obj = load_file(data_file)
+    class_id_col:
+        0, 1, 2
+    """
 
-    if isinstance(obj, sqlite3.Connection):
-        tables = pd.read_sql(
-            "SELECT name FROM sqlite_master WHERE type='table'",
-            obj,
-        )
+    clean_class = (
+        df[class_col]
+        .astype("string")
+        .str.strip()
+    )
 
-        if tables.empty:
-            temp_error("No tables found in this SQLite database.")
-            return None
+    class_mapping = {
+        str(name).strip(): idx
+        for idx, name in enumerate(class_names)
+    }
 
-        table_name = st.selectbox(
-            "Select table",
-            tables["name"].tolist(),
-            key="db_table_select",
-        )
+    df[class_id_col] = clean_class.map(class_mapping)
 
-        df = pd.read_sql(f"SELECT * FROM {table_name}", obj)
+    df.loc[df[class_col].isna(), class_id_col] = np.nan
 
-    else:
-        df = get_dataframe_from_loaded_object(obj)
-
-    if df is None:
-        return None
-
-    st.session_state["ml_loaded_data_file"] = data_file
-    st.session_state["ml_df"] = df.copy()
-
-    return st.session_state["ml_df"]
+    return df, class_mapping
 
 
 def save_training_dataframe(
@@ -217,6 +260,10 @@ def save_training_dataframe(
     return output_file
 
 
+# ============================================================
+# Main design
+# ============================================================
+
 def design(data_file, workdir, task_type):
     task_type = str(task_type).lower()
 
@@ -274,6 +321,12 @@ def design(data_file, workdir, task_type):
     y_col = activity_col
     class_col = None
     class_id_col = None
+    class_mapping = None
+    n_classes = None
+
+    # ============================================================
+    # Regression
+    # ============================================================
 
     if task_type == "regression":
         c5, c6, c7 = st.columns(3, vertical_alignment="bottom")
@@ -307,20 +360,17 @@ def design(data_file, workdir, task_type):
                 except Exception as e:
                     temp_error(f"Invalid conversion formula: {e}")
 
-        if y_col in df.columns:
-            show_xy_preview(
-                df=df,
-                smiles_col=structure_col,
-                x_col=activity_col,
-                y_col=y_col,
-            )
-        else:
-            show_xy_preview(
-                df=df,
-                smiles_col=structure_col,
-                x_col=activity_col,
-            )
-        n_classes = None
+        show_xy_preview(
+            df=df,
+            smiles_col=structure_col,
+            x_col=activity_col,
+            y_col=y_col if y_col in df.columns else None,
+        )
+
+    # ============================================================
+    # Classification
+    # ============================================================
+
     elif task_type == "classification":
         c5, c6 = st.columns(2, vertical_alignment="bottom")
 
@@ -355,7 +405,7 @@ def design(data_file, workdir, task_type):
             with c8:
                 y_col = st.text_input(
                     "Converted Y Column Name",
-                    value=f"pIC50",
+                    value="pIC50",
                     key="ml_classification_y_col",
                 )
 
@@ -388,6 +438,12 @@ def design(data_file, workdir, task_type):
             key="ml_class_col",
         )
 
+        class_id_col = f"{class_col}_id"
+
+        # ------------------------------------------------------------
+        # Step 1: Create text class labels
+        # ------------------------------------------------------------
+
         if classification_mode == "Binary: active/inactive by threshold":
             c10, c11, c12 = st.columns(3, vertical_alignment="bottom")
 
@@ -409,9 +465,12 @@ def design(data_file, workdir, task_type):
                     key="ml_active_direction",
                 )
 
+            class_names = ["inactive", "active"]
+            n_classes = len(class_names)
+
             with c12:
                 if st.button(
-                    "Create Binary Class",
+                    "Step 1: Create Binary Classes",
                     key="ml_create_binary_class",
                     use_container_width=True,
                     type="primary",
@@ -422,9 +481,13 @@ def design(data_file, workdir, task_type):
                         df[class_col] = np.where(y <= threshold, "active", "inactive")
 
                     df.loc[y.isna(), class_col] = np.nan
+
+                    if class_id_col in df.columns:
+                        df = df.drop(columns=[class_id_col])
+
                     st.session_state["ml_df"] = df
-                    temp_success(f"Created class column: {class_col}")
-            n_classes = 2
+                    temp_success(f"Created class label column: {class_col}")
+
         else:
             c10, c11, c12, c13 = st.columns(4, vertical_alignment="bottom")
 
@@ -441,19 +504,21 @@ def design(data_file, workdir, task_type):
                     value="inactive,weak,moderate,strong",
                     key="ml_class_names",
                 )
+
+            class_names = [
+                x.strip()
+                for x in class_names_text.split(",")
+                if x.strip()
+            ]
+
+            n_classes = len(class_names)
+
             with c12:
-                class_names = [
-                    x.strip()
-                    for x in class_names_text.split(",")
-                    if x.strip()
-                ]
+                st.metric("Number of classes", n_classes)
 
-                n_classes = len(class_names)
-
-                st.text_input("Number of classes:", n_classes)
             with c13:
                 if st.button(
-                    "Create Multiclass",
+                    "Step 1: Create Multiclass",
                     key="ml_create_multiclass",
                     use_container_width=True,
                     type="primary",
@@ -476,65 +541,112 @@ def design(data_file, workdir, task_type):
                                 "Number of class names must equal number of thresholds + 1."
                             )
                         else:
-                            class_id_col = f"{class_col}_id"
-
                             df[class_col] = pd.cut(
                                 y,
                                 bins=[-np.inf] + thresholds + [np.inf],
                                 labels=class_names,
                             )
 
-                            class_mapping = {
-                                name: idx for idx, name in enumerate(class_names)
-                            }
+                            df.loc[y.isna(), class_col] = np.nan
 
-                            df[class_id_col] = df[class_col].map(class_mapping)
-                            df[class_id_col] = pd.to_numeric(
-                                df[class_id_col],
-                                errors="coerce",
-                            )
+                            if class_id_col in df.columns:
+                                df = df.drop(columns=[class_id_col])
 
                             st.session_state["ml_df"] = df
-
-                            temp_success(f"Created class column: {class_col}")
-                            temp_success(f"Created class ID column: {class_id_col}")
+                            temp_success(f"Created class label column: {class_col}")
 
                     except Exception as e:
                         temp_error(f"Failed to create multiclass labels: {e}")
 
-        if class_col in df.columns:
-            class_id_col = f"{class_col}_id"
+        # ------------------------------------------------------------
+        # Step 2: Map class labels to digital IDs
+        # ------------------------------------------------------------
 
-            if class_id_col not in df.columns:
-                if pd.api.types.is_numeric_dtype(df[class_col]):
-                    df[class_id_col] = df[class_col]
-                else:
-                    temp_error(
-                        f"{class_col} is not numeric and {class_id_col} was not created. "
-                        "Please recreate the class labels."
-                    )
-                    return None
+        st.markdown("#### Step 2: Map Classes to Digital IDs")
 
-            df.loc[df[class_col].isna(), class_id_col] = np.nan
-            st.session_state["ml_df"] = df
-
+        if class_col not in df.columns:
+            temp_info("Create the class label column first, then map it to digital IDs.")
+        else:
             st.write("Class distribution:")
             st.write(df[class_col].value_counts(dropna=False))
 
-            st.write("Class ID distribution:")
-            st.write(df[class_id_col].value_counts(dropna=False).sort_index())
+            if classification_mode == "Binary: active/inactive by threshold":
+                default_class_order = ["inactive", "active"]
+            else:
+                default_class_order = class_names
 
-            st.write("Class mapping preview:")
-            st.dataframe(
-                df[[class_col, class_id_col]].drop_duplicates().sort_values(class_id_col),
-                use_container_width=True,
-                hide_index=True,
+            class_order_text = st.text_input(
+                "Class order for digital IDs",
+                value=",".join(default_class_order),
+                help="The first class becomes 0, second becomes 1, etc.",
+                key="ml_class_order_text",
             )
 
-            st.session_state["ml_df"] = df
+            selected_class_order = [
+                x.strip()
+                for x in class_order_text.split(",")
+                if x.strip()
+            ]
 
-            st.write("Class distribution:")
-            st.write(df[class_col].value_counts(dropna=False))
+            if st.button(
+                "Step 2: Create Digital Class IDs",
+                key="ml_create_class_ids",
+                use_container_width=True,
+                type="primary",
+            ):
+                existing_labels = (
+                    df[class_col]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .unique()
+                    .tolist()
+                )
+
+                missing_labels = [
+                    label for label in existing_labels
+                    if label not in selected_class_order
+                ]
+
+                if missing_labels:
+                    temp_error(
+                        f"These labels exist in `{class_col}` but are missing from class order: "
+                        f"{missing_labels}"
+                    )
+                else:
+                    df, class_mapping = create_class_id_from_class_labels(
+                        df=df,
+                        class_col=class_col,
+                        class_id_col=class_id_col,
+                        class_names=selected_class_order,
+                    )
+
+                    if df[class_id_col].dropna().empty:
+                        temp_error(f"No valid class IDs were created for `{class_id_col}`.")
+                    else:
+                        df[class_id_col] = pd.to_numeric(
+                            df[class_id_col],
+                            errors="coerce",
+                        )
+
+                        st.session_state["ml_df"] = df
+
+                        temp_success(f"Created digital class ID column: {class_id_col}")
+                        st.write("Class mapping:")
+                        st.json(class_mapping)
+
+            if class_id_col in df.columns:
+                st.write("Class ID distribution:")
+                st.write(df[class_id_col].value_counts(dropna=False).sort_index())
+
+                st.write("Class mapping preview:")
+                st.dataframe(
+                    df[[class_col, class_id_col]]
+                    .drop_duplicates()
+                    .sort_values(class_id_col),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
         show_xy_preview(
             df=df,

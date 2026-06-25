@@ -9,7 +9,8 @@ Pipeline:
 2. Clean SMILES and target columns.
 3. Split raw SMILES array.
 4. Featurize X_train / X_test / X_valid using featurize_array().
-5. Train models.
+5. Save feature metadata with model package.
+6. Train models.
 """
 
 import json
@@ -95,6 +96,35 @@ def write_log(job_dir: str | Path, message: str) -> None:
 
 def _to_json_safe_list(x):
     return pd.Series(x).tolist()
+
+
+def _json_safe(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    if isinstance(obj, np.integer):
+        return int(obj)
+
+    if isinstance(obj, np.floating):
+        return float(obj)
+
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+
+    if isinstance(obj, Path):
+        return str(obj)
+
+    try:
+        json.dumps(obj)
+        return obj
+    except TypeError:
+        return str(obj)
 
 
 def _merge_parent_config(
@@ -193,6 +223,129 @@ def load_training_data(training_data_file: str | Path) -> Dict[str, Any]:
         return {"data": pd.read_csv(training_data_file)}
 
     raise ValueError(f"Unsupported training data format: {ext}")
+
+
+def build_feature_config(
+    mol_cfg: Dict[str, Any],
+    split_config: Dict[str, Any],
+    smiles_col: str,
+    y_col: str,
+    feature_types,
+    n_bits: Optional[int],
+    X_train=None,
+    X_test=None,
+    X_valid=None,
+) -> Dict[str, Any]:
+    return {
+        "feature_types": feature_types,
+        "representations": feature_types,
+        "n_bits": n_bits,
+        "fp_bits": n_bits,
+        "desc_names": DESC_NAMES,
+        "smiles_col": smiles_col,
+        "target_col": y_col,
+        "y_col": y_col,
+        "split_method": split_config.get("split_method"),
+        "split_name": split_config.get("split_name"),
+        "feature_array_shapes": {
+            "X_train": None if X_train is None else list(X_train.shape),
+            "X_test": None if X_test is None else list(X_test.shape),
+            "X_valid": None if X_valid is None else list(X_valid.shape),
+        },
+        "featurizer": "featurize_array",
+        "mol_config": _json_safe(mol_cfg),
+    }
+
+
+def write_model_info(
+    output_dir: str | Path,
+    model_name: str,
+    task_type: str,
+    feature_config: Dict[str, Any],
+    training_config: Dict[str, Any],
+    metrics: Dict[str, Any],
+) -> None:
+    output_dir = Path(output_dir)
+
+    model_info = {
+        "model_name": model_name,
+        "task_type": task_type,
+        "feature_types": feature_config.get("feature_types"),
+        "n_bits": feature_config.get("n_bits"),
+        "desc_names": feature_config.get("desc_names"),
+        "smiles_col": feature_config.get("smiles_col"),
+        "target_col": feature_config.get("target_col"),
+        "split_method": feature_config.get("split_method"),
+        "split_name": feature_config.get("split_name"),
+        "feature_array_shapes": feature_config.get("feature_array_shapes"),
+        "best_params": metrics.get("best_params"),
+        "refit_metric": metrics.get("refit_metric"),
+        "metrics_summary": {
+            k: v
+            for k, v in metrics.items()
+            if k.startswith("test_") or k.startswith("best_cv_")
+        },
+        "training_config": _json_safe(training_config),
+    }
+
+    model_tag = safe_name(model_name)
+
+    with open(output_dir / f"{model_tag}_model_info.json", "w", encoding="utf-8") as f:
+        json.dump(_json_safe(model_info), f, indent=4)
+
+
+# ============================================================
+# Model loading helper
+# ============================================================
+
+def load_pickle_model(model_path: str | Path) -> Dict[str, Any]:
+    """
+    Load either:
+    1. A ChemFlow model package dict, or
+    2. A raw sklearn/XGBoost pickle model.
+
+    Returns a normalized package dict.
+    """
+    model_path = Path(model_path)
+
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+
+    with open(model_path, "rb") as f:
+        obj = pickle.load(f)
+
+    if isinstance(obj, dict) and "model" in obj:
+        return obj
+
+    return {
+        "model": obj,
+        "model_name": None,
+        "task_type": None,
+        "feature_config": None,
+        "training_config": None,
+        "metrics": None,
+    }
+
+
+def get_loaded_model_info(model_package: Dict[str, Any]) -> Dict[str, Any]:
+    feature_config = model_package.get("feature_config") or {}
+    training_config = model_package.get("training_config") or {}
+    metrics = model_package.get("metrics") or {}
+
+    return {
+        "model_name": model_package.get("model_name") or training_config.get("model_name"),
+        "task_type": model_package.get("task_type") or training_config.get("task_type"),
+        "feature_types": feature_config.get("feature_types"),
+        "n_bits": feature_config.get("n_bits"),
+        "desc_names": feature_config.get("desc_names"),
+        "smiles_col": feature_config.get("smiles_col"),
+        "target_col": feature_config.get("target_col"),
+        "split_method": feature_config.get("split_method"),
+        "split_name": feature_config.get("split_name"),
+        "feature_array_shapes": feature_config.get("feature_array_shapes"),
+        "best_params": metrics.get("best_params"),
+        "refit_metric": metrics.get("refit_metric"),
+    }
 
 
 # ============================================================
@@ -420,7 +573,7 @@ def tune_hyperparameters(
                     results["auc_error"] = str(e)
 
         with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=4)
+            json.dump(_json_safe(results), f, indent=4)
 
         cv_results.to_csv(cv_path, index=False)
 
@@ -434,10 +587,22 @@ def tune_hyperparameters(
             "feature_config": feature_config,
             "training_config": config,
             "metrics": results,
+            "chemflow_package_type": "model_package",
+            "chemflow_version": "0.1.0",
+            "created_at_unix": time.time(),
         }
 
         with open(package_path, "wb") as f:
             pickle.dump(model_package, f)
+
+        write_model_info(
+            output_dir=output_dir,
+            model_name=model_name,
+            task_type=task_type,
+            feature_config=feature_config or {},
+            training_config=config,
+            metrics=results,
+        )
 
         return best_model, results, cv_results
 
@@ -450,7 +615,7 @@ def tune_hyperparameters(
         }
 
         with open(error_path, "w", encoding="utf-8") as f:
-            json.dump(error_info, f, indent=4)
+            json.dump(_json_safe(error_info), f, indent=4)
 
         raise e
 
@@ -501,7 +666,7 @@ def train(config: Dict[str, Any]) -> None:
 
     write_status(job_dir, "running", 0)
     write_log(job_dir, "Training started.")
-    write_log(job_dir, f"Config: {json.dumps(config, indent=2)}")
+    write_log(job_dir, f"Config: {json.dumps(_json_safe(config), indent=2)}")
 
     try:
         mol_cfg = config["featurization"]
@@ -537,10 +702,6 @@ def train(config: Dict[str, Any]) -> None:
         write_status(job_dir, "running", 10)
         write_log(job_dir, f"Checking split feature data: {split_npz_path}")
 
-        # ============================================================
-        # Case 1: Load existing featurized split data
-        # ============================================================
-
         if split_npz_path.exists():
             write_log(job_dir, "Existing featurized split data found. Loading NPZ...")
 
@@ -554,19 +715,11 @@ def train(config: Dict[str, Any]) -> None:
             X_valid = data["X_valid"] if "X_valid" in data.files else None
             y_valid = data["y_valid"] if "y_valid" in data.files else None
 
-            train_indices = data["train_indices"] if "train_indices" in data.files else None
-            test_indices = data["test_indices"] if "test_indices" in data.files else None
-            valid_indices = data["valid_indices"] if "valid_indices" in data.files else None
-
             write_log(job_dir, f"Loaded X_train shape: {X_train.shape}")
             write_log(job_dir, f"Loaded X_test shape: {X_test.shape}")
 
             if X_valid is not None:
                 write_log(job_dir, f"Loaded X_valid shape: {X_valid.shape}")
-
-        # ============================================================
-        # Case 2: Load raw data, split SMILES, then featurize arrays
-        # ============================================================
 
         else:
             write_log(job_dir, "No existing split data found. Loading raw training data...")
@@ -591,7 +744,7 @@ def train(config: Dict[str, Any]) -> None:
 
             write_status(job_dir, "running", 25)
             write_log(job_dir, f"Splitting raw SMILES using {split_config['split_method']}...")
-            write_log(job_dir, f"Split config: {json.dumps(split_config, indent=2)}")
+            write_log(job_dir, f"Split config: {json.dumps(_json_safe(split_config), indent=2)}")
 
             split_result = splitter.split_data(
                 X=smiles,
@@ -635,7 +788,6 @@ def train(config: Dict[str, Any]) -> None:
 
             X_valid = None
             y_valid = None
-            valid_clean_idx = None
 
             if X_valid_raw is not None and y_valid_raw is not None and len(X_valid_raw) > 0:
                 X_valid, y_valid, valid_clean_idx = featurize_array(
@@ -671,13 +823,20 @@ def train(config: Dict[str, Any]) -> None:
             np.savez_compressed(split_npz_path, **arrays_to_save)
             write_log(job_dir, f"Saved featurized split NPZ to: {split_npz_path}")
 
-        feature_config = {
-            "feature_types": feature_types,
-            "n_bits": n_bits,
-            "desc_names": DESC_NAMES,
-            "smiles_col": smiles_col,
-            "y_col": y_col,
-        }
+        feature_config = build_feature_config(
+            mol_cfg=mol_cfg,
+            split_config=split_config,
+            smiles_col=smiles_col,
+            y_col=y_col,
+            feature_types=feature_types,
+            n_bits=n_bits,
+            X_train=X_train,
+            X_test=X_test,
+            X_valid=X_valid,
+        )
+
+        with open(job_dir / "feature_config.json", "w", encoding="utf-8") as f:
+            json.dump(_json_safe(feature_config), f, indent=4)
 
         write_status(job_dir, "running", 60)
         write_log(job_dir, "Starting model tuning...")
@@ -706,7 +865,7 @@ def train(config: Dict[str, Any]) -> None:
                 feature_config=feature_config,
             )
 
-        write_status(job_dir, "completed", 100, {"metrics": results})
+        write_status(job_dir, "completed", 100, {"metrics": _json_safe(results)})
         write_log(job_dir, "Training completed.")
 
     except Exception as e:

@@ -7,7 +7,8 @@ from rdkit.Chem import Draw
 
 from src.utils.style import load_css as inject_css
 from src.streamlit.utils.select_file import file_picker
-from src.chemflow.machine_learning.predictor.load_model import load_pickle_model
+
+from src.chemflow.machine_learning.predict.predictor import ChemFlowPredictor
 
 
 # ============================================================
@@ -16,10 +17,11 @@ from src.chemflow.machine_learning.predictor.load_model import load_pickle_model
 
 def init_predictor_state():
     defaults = {
-        "predictor_model": None,
+        "predictor": None,
         "predictor_model_file": None,
         "predictor_input_df": None,
         "predictor_results_df": None,
+        "predictor_model_info": None,
     }
 
     for key, value in defaults.items():
@@ -41,48 +43,83 @@ def load_model_panel():
     )
 
     if not model_file:
-        st.info("Please select a trained `.pkl` model file.")
+        st.info("Please select a trained ChemFlow `model_package.pkl` file.")
         return None
 
+    model_file = Path(model_file)
+
     if st.session_state.get("predictor_model_file") == str(model_file):
-        model = st.session_state.get("predictor_model")
-        if model is not None:
+        predictor = st.session_state.get("predictor")
+
+        if predictor is not None:
             st.success("Model already loaded.")
-            st.write("Model Type:")
-            st.code(type(model).__name__, language=None)
-        return model
+            show_model_info(st.session_state.get("predictor_model_info"))
+
+        return predictor
 
     try:
-        model = load_pickle_model(model_file)
+        predictor = ChemFlowPredictor(model_file)
+        model_info = predictor.get_model_info()
 
-        st.session_state["predictor_model"] = model
+        st.session_state["predictor"] = predictor
         st.session_state["predictor_model_file"] = str(model_file)
+        st.session_state["predictor_model_info"] = model_info
 
         st.success("Model loaded successfully.")
-        st.write("Model Type:")
-        st.code(type(model).__name__, language=None)
+        show_model_info(model_info)
 
-        if hasattr(model, "n_features_in_"):
-            st.metric("Number of Features", model.n_features_in_)
-
-        if hasattr(model, "feature_names_in_"):
-            st.write("Features")
-            feature_df = pd.DataFrame(
-                {"feature": list(model.feature_names_in_)}
-            )
-            st.dataframe(feature_df, width="stretch")
-
-        if hasattr(model, "classes_"):
-            st.write("Classes")
-            st.code(str(model.classes_), language=None)
-
-        return model
+        return predictor
 
     except Exception as e:
         st.error(f"Failed to load model:\n{e}")
-        st.session_state["predictor_model"] = None
+
+        st.session_state["predictor"] = None
         st.session_state["predictor_model_file"] = None
+        st.session_state["predictor_model_info"] = None
+
         return None
+
+
+def show_model_info(model_info):
+    if not model_info:
+        st.warning("No model metadata found.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.metric("Model", str(model_info.get("model_name")))
+
+    with c2:
+        st.metric("Task", str(model_info.get("task_type")))
+
+    with c3:
+        n_bits = model_info.get("n_bits")
+        st.metric("FP Bits", "NA" if n_bits is None else str(n_bits))
+
+    st.markdown("#### Feature Information")
+
+    feature_types = model_info.get("feature_types")
+    desc_names = model_info.get("desc_names")
+    feature_shapes = model_info.get("feature_array_shapes")
+
+    st.write("Feature types:")
+    st.code(str(feature_types), language=None)
+
+    if desc_names:
+        with st.expander("Descriptor Names", expanded=False):
+            st.dataframe(
+                pd.DataFrame({"descriptor": desc_names}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    if feature_shapes:
+        with st.expander("Feature Array Shapes", expanded=False):
+            st.json(feature_shapes)
+
+    with st.expander("Full Model Info", expanded=False):
+        st.json(model_info)
 
 
 # ============================================================
@@ -106,20 +143,19 @@ def show_molecule_structures(
         return
 
     max_available = min(40, len(df))
-    default_value = min(max_mols, max_available)
 
-    max_available = min(40, len(df))
+    if max_available <= 0:
+        st.info("No molecules to display.")
+        return
 
-    if max_available <= 1:
+    if max_available == 1:
         max_mols = 1
     else:
-        default_value = min(max_mols, max_available)
-
         max_mols = st.slider(
             "Number of molecules to show",
             min_value=1,
             max_value=max_available,
-            value=default_value,
+            value=min(max_mols, max_available),
             step=1,
             key=f"{key_prefix}_{smiles_col}_structure_max_mols",
         )
@@ -175,7 +211,8 @@ def get_smiles_input():
             df = pd.DataFrame({"SMILES": smiles_list})
             st.session_state["predictor_input_df"] = df
 
-            st.dataframe(df, width="stretch")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
             show_molecule_structures(
                 df=df,
                 smiles_col="SMILES",
@@ -195,14 +232,12 @@ def get_smiles_input():
             st.session_state["predictor_input_df"] = df
 
             st.success("CSV uploaded.")
-            st.dataframe(df.head(), width="stretch")
+            st.dataframe(df.head(), use_container_width=True)
 
             smiles_col = st.selectbox(
                 "SMILES column for structure display",
                 df.columns,
-                index=list(df.columns).index("SMILES")
-                if "SMILES" in df.columns
-                else 0,
+                index=list(df.columns).index("SMILES") if "SMILES" in df.columns else 0,
                 key="predictor_upload_smiles_col",
             )
 
@@ -221,12 +256,12 @@ def get_smiles_input():
 # Prediction
 # ============================================================
 
-def prediction_panel(model):
+def prediction_panel(predictor):
     st.subheader("Prediction Settings")
 
     input_df = st.session_state.get("predictor_input_df")
 
-    if model is None:
+    if predictor is None:
         st.warning("Please load a model first.")
         return
 
@@ -234,71 +269,48 @@ def prediction_panel(model):
         st.warning("Please provide input molecules first.")
         return
 
+    default_smiles_col = predictor.feature_config.get("smiles_col", "SMILES")
+
     smiles_col = st.selectbox(
         "SMILES Column",
         input_df.columns,
-        index=list(input_df.columns).index("SMILES")
+        index=list(input_df.columns).index(default_smiles_col)
+        if default_smiles_col in input_df.columns
+        else list(input_df.columns).index("SMILES")
         if "SMILES" in input_df.columns
         else 0,
         key="predictor_smiles_col",
     )
 
-    st.selectbox(
-        "Prediction Output Type",
-        [
-            "Auto-detect",
-            "Regression",
-            "Classification",
-        ],
-        key="predictor_prediction_type",
-    )
+    st.markdown("#### Model Feature Types")
+    st.code(str(predictor.feature_types), language=None)
 
     st.markdown("#### Input Preview")
-    st.dataframe(input_df.head(20), width="stretch")
+    st.dataframe(input_df.head(20), use_container_width=True)
 
     show_molecule_structures(
         df=input_df,
         smiles_col=smiles_col,
         max_mols=8,
-        key_prefix="predictor_input_preview"
+        key_prefix="predictor_input_preview",
     )
 
     if st.button(
         "Run Prediction",
         type="primary",
-        width="stretch",
+        use_container_width=True,
         key="predictor_run_button",
     ):
         try:
-            from src.chemflow.machine_learning.predictor.featurize import featurize_smiles_2057, featurize_smiles
-
-            smiles_list = input_df[smiles_col].astype(str).tolist()
-
-            #X = featurize_smiles_2057(smiles_list)
-            X = featurize_smiles(smiles_list)
-
-            preds = model.predict(X)
-
-            results_df = input_df.copy()
-            results_df["prediction"] = preds
-
-            if hasattr(model, "predict_proba"):
-                try:
-                    proba = model.predict_proba(X)
-
-                    if proba.ndim == 2:
-                        for i in range(proba.shape[1]):
-                            results_df[f"prob_class_{i}"] = proba[:, i]
-
-                        results_df["confidence"] = proba.max(axis=1)
-
-                except Exception:
-                    pass
+            results_df = predictor.predict_from_dataframe(
+                input_df,
+                smiles_col=smiles_col,
+            )
 
             st.session_state["predictor_results_df"] = results_df
 
             st.success("Prediction finished.")
-            st.dataframe(results_df, width="stretch")
+            st.dataframe(results_df, use_container_width=True)
 
         except Exception as e:
             st.error(f"Prediction failed:\n{e}")
@@ -315,21 +327,20 @@ def results_panel():
 
     if results_df is None or results_df.empty:
         st.info("Prediction results will appear here.")
-        st.markdown(
-            """
-            Expected output:
-
-            - SMILES
-            - Predicted value
-            - Prediction probability
-            - Confidence score
-            - Applicability domain flag
-            - Molecular properties
-            """
-        )
         return
 
-    st.dataframe(results_df, width="stretch")
+    st.dataframe(results_df, use_container_width=True)
+
+    csv_data = results_df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        label="Download Predictions CSV",
+        data=csv_data,
+        file_name="chemflow_predictions.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="download_prediction_results",
+    )
 
     smiles_candidates = [
         col
@@ -349,6 +360,7 @@ def results_panel():
             df=results_df,
             smiles_col=smiles_col,
             max_mols=12,
+            key_prefix="predictor_results",
         )
 
 
@@ -371,7 +383,7 @@ def design():
 
     st.divider()
 
-    model = load_model_panel()
+    predictor = load_model_panel()
 
     st.divider()
 
@@ -388,7 +400,7 @@ def design():
         get_smiles_input()
 
     with tab2:
-        prediction_panel(model)
+        prediction_panel(predictor)
 
     with tab3:
         results_panel()
