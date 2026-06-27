@@ -1,0 +1,177 @@
+defaults:
+  seeds: [42]  # Default random seed for reproducibility
+
+
+classification_models:
+
+  - model_name: Random Forest
+    estimator: RandomForestClassifier
+    model_params:
+      n_estimators: 500        # Number of trees in the forest
+      max_depth: 10            # Maximum tree depth; larger = more complex model
+      max_features: sqrt       # Features considered at each split: sqrt, log2, None
+      class_weight: balanced   # Automatically adjust weights for imbalanced classes
+      min_samples_split: 2     # Minimum samples required to split a node
+      min_samples_leaf: 1      # Minimum samples required in a leaf node
+      bootstrap: true          # Sample training data with replacement
+
+  - model_name: Extra Trees
+    estimator: ExtraTreesClassifier
+    model_params:
+      n_estimators: 500
+      max_depth: 10
+      max_features: sqrt
+      class_weight: balanced
+      min_samples_split: 2
+      min_samples_leaf: 1
+      bootstrap: true
+
+  - model_name: Gradient Boosting
+    estimator: GradientBoostingClassifier
+    model_params:
+      n_estimators: 300        # Number of boosting stages
+      learning_rate: 0.05      # Contribution of each tree
+      max_depth: 5             # Maximum depth of individual trees
+      subsample: 0.8           # Fraction of samples used per boosting round
+
+  - model_name: XGBoost
+    estimator: XGBClassifier
+    model_params:
+      n_estimators: 300        # Number of boosting rounds
+      learning_rate: 0.05      # Shrinks contribution of each tree
+      max_depth: 5             # Tree depth
+      subsample: 0.8           # Fraction of training samples per tree
+      colsample_bytree: 0.8    # Fraction of features per tree
+      reg_alpha: 0.1           # L1 regularization strength
+      reg_lambda: 1.0          # L2 regularization strength
+
+  - model_name: SVM_RBF
+    estimator: SVC
+    model_params:
+      C: 1.0                   # Penalty for misclassification
+      gamma: scale             # RBF kernel width
+      kernel: rbf              # Kernel type: linear, poly, rbf, sigmoid
+      probability: true        # Enable probability predictions
+      class_weight: balanced   # Handle class imbalance
+
+  - model_name: KNN
+    estimator: KNeighborsClassifier
+    model_params:
+      n_neighbors: 5           # Number of nearest neighbors
+      weights: uniform         # uniform or distance
+      algorithm: auto          # auto, ball_tree, kd_tree, brute
+      leaf_size: 30            # Tree leaf size for search structures
+      metric: minkowski        # Distance metric
+      p: 2                     # p=1 Manhattan, p=2 Euclidean
+
+  - model_name: MLP
+    estimator: MLPClassifier
+    model_params:
+      hidden_layer_sizes: [128]  # Hidden layer architecture
+      activation: relu           # identity, logistic, tanh, relu
+      solver: adam               # adam, sgd, lbfgs
+      alpha: 0.0001              # L2 regularization
+      learning_rate: constant    # constant, invscaling, adaptive
+      max_iter: 500              # Maximum training iterations
+
+  - model_name: Logistic Regression
+    estimator: LogisticRegression
+    model_params:
+      penalty: l2              # l1, l2, elasticnet, none
+      C: 1.0                   # Inverse regularization strength
+      solver: lbfgs            # Optimization algorithm
+      max_iter: 1000           # Maximum optimization iterations
+      class_weight: balanced   # Handle class imbalance
+
+
+regression_models:
+
+  - model_name: Random Forest
+    estimator: RandomForestRegressor
+    model_params:
+      n_estimators: 500
+      max_depth: 10
+      max_features: sqrt
+      min_samples_split: 2
+      min_samples_leaf: 1
+      bootstrap: true
+
+  - model_name: Extra Trees
+    estimator: ExtraTreesRegressor
+    model_params:
+      n_estimators: 500
+      max_depth: 10
+      max_features: sqrt
+      min_samples_split: 2
+      min_samples_leaf: 1
+      bootstrap: true
+
+  - model_name: Gradient Boosting
+    estimator: GradientBoostingRegressor
+    model_params:
+      n_estimators: 300
+      learning_rate: 0.05
+      max_depth: 5
+      subsample: 0.8
+      loss: squared_error      # squared_error, absolute_error, huber
+
+  - model_name: XGBoost
+    estimator: XGBRegressor
+    model_params:
+      n_estimators: 300
+      learning_rate: 0.05
+      max_depth: 5
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_alpha: 0.1
+      reg_lambda: 1.0
+      objective: reg:squarederror  # Standard regression objective
+
+  - model_name: SVM_RBF
+    estimator: SVR
+    model_params:
+      C: 1.0                   # Regularization parameter
+      gamma: scale             # Kernel width
+      kernel: rbf
+      epsilon: 0.1             # Width of insensitive error zone
+
+  - model_name: KNN
+    estimator: KNeighborsRegressor
+    model_params:
+      n_neighbors: 5
+      weights: distance        # distance often works better for regression
+      algorithm: auto
+      leaf_size: 30
+      metric: minkowski
+      p: 2
+
+  - model_name: MLP
+    estimator: MLPRegressor
+    model_params:
+      hidden_layer_sizes: [128]
+      activation: relu
+      solver: adam
+      alpha: 0.0001
+      learning_rate: constant
+      max_iter: 500
+
+  - model_name: Ridge Regression
+    estimator: Ridge
+    model_params:
+      alpha: 1.0               # L2 regularization strength
+      solver: auto             # Optimization solver
+      max_iter: 1000           # Maximum iterations
+
+  - model_name: Lasso Regression
+    estimator: Lasso
+    model_params:
+      alpha: 0.01              # L1 regularization strength; larger = more feature selection
+      max_iter: 5000           # Maximum optimization iterations
+      tol: 0.0001              # Optimization tolerance
+      selection: cyclic        # cyclic or random
+
+  - model_name: PLS
+    estimator: PLSRegression
+    model_params:
+      n_components: 2          # Number of latent variables
+      scale: true              # Standardize features before fitting

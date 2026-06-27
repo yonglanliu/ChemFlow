@@ -1,0 +1,193 @@
+defaults:
+  hyperparameter_tuning: true
+  tuning_method: RandomizedSearchCV
+  n_iter: 50
+  cv: 5
+  n_jobs: -1
+
+scoring:
+
+  classification:
+    scoring_metrics:
+      - roc_auc
+      - balanced_accuracy
+      - f1
+      - precision
+      - recall
+
+    refit_metric: f1
+
+  regression:
+    scoring_metrics:
+      - r2
+      - root_mean_squared_error
+      - mean_absolute_error
+
+    refit_metric: root_mean_squared_error
+
+classification_models:
+  - model_name: Random Forest
+    estimator: RandomForestClassifier
+    param_grid:
+      n_estimators: [100, 200, 300, 500, 800]
+      max_depth: [null, 5, 10, 20, 40]
+      max_features: [sqrt, log2, null]
+      min_samples_leaf: [1, 2, 4, 8]
+      min_samples_split: [2, 5, 10]
+      bootstrap: [true, false]
+      class_weight: [null, "balanced", "balanced_subsample"]
+
+  - model_name: Extra Trees
+    estimator: ExtraTreesClassifier
+    param_grid:
+      n_estimators: [100, 200, 500, 800]
+      max_depth: [null, 5, 10, 20, 40]
+      max_features: [sqrt, log2, null]
+      min_samples_leaf: [1, 2, 4, 8]
+      min_samples_split: [2, 5, 10]
+      bootstrap: [true, false]
+      class_weight: [null, "balanced", "balanced_subsample"]
+
+  - model_name: Gradient Boosting
+    estimator: GradientBoostingClassifier
+    param_grid:
+      n_estimators: [100, 200, 500]
+      learning_rate: [0.01, 0.03, 0.05, 0.1]
+      max_depth: [2, 3, 4, 5]
+      subsample: [0.6, 0.8, 1.0]
+
+  - model_name: XGBoost
+    estimator: XGBClassifier
+    param_grid:
+      n_estimators: [100, 300, 500, 1000]
+      learning_rate: [0.005, 0.01, 0.03, 0.05, 0.1]
+      max_depth: [3, 4, 5, 6, 8]
+      subsample: [0.6, 0.8, 1.0] # Specifies the fraction of training instances to be used for growing each tree. Helps prevent overfitting.
+      colsample_bytree: [0.6, 0.8, 1.0]
+      reg_alpha: [0, 0.01, 0.1, 1.0]   # L1 regularization lead to sparsity
+      reg_lambda: [0.1, 1.0, 5.0, 10.0]  # L2 regularization reduces weight size
+
+  - model_name: SVM_RBF
+    estimator: SVC
+    param_grid:
+      C: [0.01, 0.1, 1, 10, 100]
+      gamma: [scale, auto, 0.001, 0.01, 0.1, 1]
+      kernel: [rbf]
+
+  - model_name: KNN
+    estimator: KNeighborsClassifier
+    param_grid:
+      n_neighbors: [3, 5, 7, 9, 15, 25]
+      weights: [uniform, distance]
+      p: [1, 2]
+      algorithm: [auto, ball_tree, kd_tree, brute]
+      leaf_size: [20, 30, 40, 50]
+      metric: [minkowski, euclidean, manhattan]
+
+  - model_name: MLP
+    estimator: MLPClassifier
+    param_grid:
+      hidden_layer_sizes:
+        - [128]
+        - [256]
+        - [128, 64]
+        - [256, 128]
+      activation: [relu, tanh]
+      alpha: [0.0001, 0.001, 0.01]
+      learning_rate_init: [0.0001, 0.001, 0.01]
+      max_iter: [500]
+
+  - model_name: Logistic Regression
+    estimator: LogisticRegression
+    param_grid:
+      C: [0.01, 0.1, 1, 10, 100]
+      penalty: [l2]
+      solver: [lbfgs, liblinear]
+      max_iter: [1000]
+
+
+regression_models:
+  - model_name: Random Forest
+    estimator: RandomForestRegressor
+    param_grid:
+      n_estimators: [100, 200, 300, 500, 800]
+      max_depth: [null, 5, 10, 20, 40]
+      max_features: [sqrt, log2, null]
+      min_samples_leaf: [1, 2, 4, 8]
+      min_samples_split: [2, 5, 10]
+      bootstrap: [true, false]
+
+  - model_name: Extra Trees
+    estimator: ExtraTreesRegressor
+    param_grid:
+      n_estimators: [100, 200, 500, 800]
+      max_depth: [null, 5, 10, 20, 40]
+      max_features: [sqrt, log2, null]
+      min_samples_leaf: [1, 2, 4, 8]
+      min_samples_split: [2, 5, 10]
+
+  - model_name: Gradient Boosting
+    estimator: GradientBoostingRegressor
+    param_grid:
+      n_estimators: [100, 200, 500]
+      learning_rate: [0.01, 0.03, 0.05, 0.1]
+      max_depth: [2, 3, 4, 5]
+      subsample: [0.6, 0.8, 1.0]
+
+  - model_name: XGBoost
+    estimator: XGBRegressor
+    param_grid:
+      n_estimators: [100, 300, 500, 1000]
+      learning_rate: [0.005, 0.01, 0.03, 0.05, 0.1]
+      max_depth: [3, 4, 5, 6, 8]
+      subsample: [0.6, 0.8, 1.0]
+      colsample_bytree: [0.6, 0.8, 1.0]
+      reg_alpha: [0, 0.01, 0.1, 1.0]
+      reg_lambda: [0.1, 1.0, 5.0, 10.0]
+
+  - model_name: SVM_RBF
+    estimator: SVR
+    param_grid:
+      C: [0.01, 0.1, 1, 10, 100]
+      gamma: [scale, auto, 0.001, 0.01, 0.1, 1]
+      kernel: [rbf]
+
+  - model_name: KNN
+    estimator: KNeighborsRegressor
+    param_grid:
+      n_neighbors: [3, 5, 7, 9, 15, 25]
+      weights: [uniform, distance]
+      p: [1, 2]
+      algorithm: [auto, ball_tree, kd_tree, brute]
+      leaf_size: [20, 30, 40, 50]
+      metric: [minkowski, euclidean, manhattan]
+
+  - model_name: MLP
+    estimator: MLPRegressor
+    param_grid:
+      hidden_layer_sizes:
+        - [128]
+        - [256]
+        - [128, 64]
+        - [256, 128]
+      activation: [relu, tanh]
+      alpha: [0.0001, 0.001, 0.01]
+      learning_rate_init: [0.0001, 0.001, 0.01]
+      max_iter: [500]
+
+  - model_name: Ridge Regression
+    estimator: Ridge
+    param_grid:
+      alpha: [0.001, 0.01, 0.1, 1, 10, 100]
+
+  - model_name: Lasso Regression
+    estimator: Lasso
+    param_grid:
+      alpha: [0.0001, 0.001, 0.01, 0.1, 1, 10]
+      max_iter: [5000]
+
+  - model_name: PLS
+    estimator: PLSRegression
+    param_grid:
+      n_components: [2, 3, 5, 8, 10, 15, 20]
+      scale: [true, false]

@@ -122,15 +122,14 @@ def design(workdir, task_type):
             )
     c11, c12, c13 = st.columns((0.4, 1, 1), vertical_alignment="bottom")
     with c11:
-        save_split_dataset = st.selectbox(
+        save_split_dataset = st.checkbox(
             "Save Split Dataset",
-            ["Yes", "No"],
-            index=0,
+            value=True,
             key="ml_save_split_dataset",
             help="Whether to save the split dataset.",
         )
     with c12:
-        if save_split_dataset == "Yes":
+        if save_split_dataset:
             save_split_dataset_path = st.text_input(
                 "Save Directory",
                 value=f"{workdir}/split_dataset",
@@ -140,7 +139,7 @@ def design(workdir, task_type):
         else:
             save_split_dataset_path = None
     with c13:
-        if save_split_dataset == "Yes":
+        if save_split_dataset:
             prefix = st.text_input("Prefix for Split Dataset Files", 
                           value=f"{split_method}_split_seed{data_split_seed}", 
                           key="ml_save_split_dataset_prefix", 
@@ -148,13 +147,14 @@ def design(workdir, task_type):
         else:
             prefix = None
 
-    split_config["task_type"] = task_type
     split_config["split_method"] = split_method
     split_config["test_size"] = test_size
     split_config["validation_size"] = validation_size if validation_size > 0 else None
     split_config["random_seed"] = data_split_seed
     split_config["save_split_data"] = save_split_dataset
-    split_config["save_dir"] = save_split_dataset_path
-    split_config["prefix_name"] = prefix
+    if save_split_dataset:
+        split_config["save_dir"] = save_split_dataset_path
+        split_config["prefix_name"] = prefix
+
 
     return split_config

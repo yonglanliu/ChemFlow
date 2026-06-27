@@ -5,7 +5,6 @@ from pathlib import Path
 import json
 import pickle
 import sqlite3
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -114,6 +113,9 @@ def load_dataframe_to_session(data_file):
     st.session_state["ml_loaded_data_file"] = data_file
     st.session_state["ml_df"] = df.copy()
 
+    # Reset saved data config when a new data file is loaded
+    st.session_state.pop("ml_data_config", None)
+
     return st.session_state["ml_df"]
 
 
@@ -170,22 +172,8 @@ def create_class_id_from_class_labels(
     class_id_col: str,
     class_names: list[str],
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    """
-    Create numeric class IDs from an existing text class column.
 
-    Example:
-    class_col:
-        inactive, moderate, active
-
-    class_id_col:
-        0, 1, 2
-    """
-
-    clean_class = (
-        df[class_col]
-        .astype("string")
-        .str.strip()
-    )
+    clean_class = df[class_col].astype("string").str.strip()
 
     class_mapping = {
         str(name).strip(): idx
@@ -193,7 +181,6 @@ def create_class_id_from_class_labels(
     }
 
     df[class_id_col] = clean_class.map(class_mapping)
-
     df.loc[df[class_col].isna(), class_id_col] = np.nan
 
     return df, class_mapping
@@ -267,10 +254,13 @@ def save_training_dataframe(
 def design(data_file, workdir, task_type):
     task_type = str(task_type).lower()
 
+    data = st.session_state.get("ml_data_config", None)
+    features = st.session_state.get("ml_feature_config", {})
+
     df = load_dataframe_to_session(data_file)
 
     if df is None:
-        return None
+        return data, features
 
     st.subheader("Raw Dataset Preview")
     st.dataframe(
@@ -281,24 +271,31 @@ def design(data_file, workdir, task_type):
 
     c1, c2 = st.columns(2, vertical_alignment="bottom")
 
-    fp_bits = None
-
     with c1:
-        features = st.multiselect(
+        selected_features = st.multiselect(
             "Features",
             MOL_REP_NAMES,
-            default=["ECFP4"],
+            default=features.get("features", ["ECFP4"]),
             key="ml_representations",
         )
 
+    features["features"] = selected_features
+
     with c2:
-        if any(fp in features for fp in ["ECFP4", "ECFP6", "FCFP4", "FCFP6"]):
+        if any(fp in selected_features for fp in ["ECFP4", "ECFP6", "FCFP4", "FCFP6"]):
             fp_bits = st.selectbox(
                 "Fingerprint Bits",
                 [1024, 2048, 4096],
-                index=1,
+                index=[1024, 2048, 4096].index(features.get("fp_bits", 2048))
+                if features.get("fp_bits", 2048) in [1024, 2048, 4096]
+                else 1,
                 key="ml_fp_bits",
             )
+            features["fp_bits"] = fp_bits
+        else:
+            features["fp_bits"] = None
+
+    st.session_state["ml_feature_config"] = features
 
     c3, c4 = st.columns(2, vertical_alignment="bottom")
 
@@ -321,7 +318,6 @@ def design(data_file, workdir, task_type):
     y_col = activity_col
     class_col = None
     class_id_col = None
-    class_mapping = None
     n_classes = None
 
     # ============================================================
@@ -356,6 +352,7 @@ def design(data_file, workdir, task_type):
                 try:
                     df[y_col] = safe_eval_formula(conversion_formula, activity)
                     st.session_state["ml_df"] = df
+                    st.session_state.pop("ml_data_config", None)
                     temp_success(f"Created regression target column: {y_col}")
                 except Exception as e:
                     temp_error(f"Invalid conversion formula: {e}")
@@ -419,6 +416,7 @@ def design(data_file, workdir, task_type):
                     try:
                         df[y_col] = safe_eval_formula(conversion_formula, activity)
                         st.session_state["ml_df"] = df
+                        st.session_state.pop("ml_data_config", None)
                         temp_success(f"Created converted target column: {y_col}")
                     except Exception as e:
                         temp_error(f"Invalid conversion formula: {e}")
@@ -439,10 +437,6 @@ def design(data_file, workdir, task_type):
         )
 
         class_id_col = f"{class_col}_id"
-
-        # ------------------------------------------------------------
-        # Step 1: Create text class labels
-        # ------------------------------------------------------------
 
         if classification_mode == "Binary: active/inactive by threshold":
             c10, c11, c12 = st.columns(3, vertical_alignment="bottom")
@@ -486,6 +480,7 @@ def design(data_file, workdir, task_type):
                         df = df.drop(columns=[class_id_col])
 
                     st.session_state["ml_df"] = df
+                    st.session_state.pop("ml_data_config", None)
                     temp_success(f"Created class label column: {class_col}")
 
         else:
@@ -553,14 +548,11 @@ def design(data_file, workdir, task_type):
                                 df = df.drop(columns=[class_id_col])
 
                             st.session_state["ml_df"] = df
+                            st.session_state.pop("ml_data_config", None)
                             temp_success(f"Created class label column: {class_col}")
 
                     except Exception as e:
                         temp_error(f"Failed to create multiclass labels: {e}")
-
-        # ------------------------------------------------------------
-        # Step 2: Map class labels to digital IDs
-        # ------------------------------------------------------------
 
         st.markdown("#### Step 2: Map Classes to Digital IDs")
 
@@ -630,6 +622,7 @@ def design(data_file, workdir, task_type):
                         )
 
                         st.session_state["ml_df"] = df
+                        st.session_state.pop("ml_data_config", None)
 
                         temp_success(f"Created digital class ID column: {class_id_col}")
                         st.write("Class mapping:")
@@ -653,42 +646,68 @@ def design(data_file, workdir, task_type):
             smiles_col=structure_col,
             x_col=activity_col,
             y_col=y_col,
-            class_col=class_col if class_col in df.columns else None,
+            class_col=class_col if class_col and class_col in df.columns else None,
         )
 
     else:
         temp_error("task_type must be 'classification' or 'regression'.")
-        return None
+        return data, features
+
+    # ============================================================
+    # Save training dataframe
+    # ============================================================
 
     target_col = y_col if task_type == "regression" else class_id_col
 
+    st.markdown("#### Save Training Dataset")
+
     if target_col is None or target_col not in df.columns:
-        temp_error("Please create/select a valid target column before training.")
-        return None
+        temp_info("Please create/select a valid target column before saving training data.")
+        return data, features
 
-    training_data_file = save_training_dataframe(
-        df=df,
-        workdir=workdir,
-        task_type=task_type,
-        structure_col=structure_col,
-        activity_col=activity_col,
-        target_col=target_col,
-        prefix=Path(data_file).stem,
-        output_format="pickle",
-    )
+    valid_rows = df[[structure_col, target_col]].dropna().shape[0]
 
-    return {
-        "original_data_file": str(data_file),
-        "training_data_file": str(training_data_file),
-        "representations": features,
-        "fp_bits": fp_bits,
-        "smiles_col": structure_col,
-        "X_col": structure_col,
-        "activity_col": activity_col,
-        "y_col": target_col,
-        "regression_target_col": y_col if task_type == "regression" else None,
-        "class_col": class_col,
-        "class_id_col": class_id_col,
-        "task_type": task_type,
-        "n_classes": n_classes,
-    }
+    st.write(f"Target column: `{target_col}`")
+    st.write(f"Valid training rows: `{valid_rows}`")
+
+    if valid_rows == 0:
+        temp_error("No valid rows found after removing missing structure/target values.")
+        return data, features
+
+    if st.button(
+        "Save Training Data",
+        key="ml_save_training_data",
+        use_container_width=True,
+        type="primary",
+    ):
+        training_data_file = save_training_dataframe(
+            df=df,
+            workdir=workdir,
+            task_type=task_type,
+            structure_col=structure_col,
+            activity_col=activity_col,
+            target_col=target_col,
+            prefix=Path(data_file).stem,
+            output_format="pickle",
+        )
+
+        data = {
+            "original_data_file": str(data_file) if data_file else None,
+            "training_data_file": str(training_data_file),
+            "X_col": structure_col,
+            "y_col": target_col,
+            "n_classes": n_classes,
+        }
+
+        st.session_state["ml_data_config"] = data
+        st.session_state["ml_feature_config"] = features
+
+        temp_success(f"Saved training data: {training_data_file}")
+
+    else:
+        if data is None:
+            temp_info("Click **Save Training Data** when the setup is ready.")
+        else:
+            temp_success(f"Using saved training data: {data.get('training_data_file')}")
+
+    return data, features

@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -49,12 +50,7 @@ def config_to_dataframe(config):
         else:
             value = str(value)
 
-        rows.append(
-            {
-                "Parameter": str(key),
-                "Value": value,
-            }
-        )
+        rows.append({"Parameter": str(key), "Value": value})
 
     return pd.DataFrame(rows)
 
@@ -82,7 +78,6 @@ def show_training_status(run_dir):
     status_file = run_dir / "status.json"
     log_file = run_dir / "training.log"
     subprocess_log_file = run_dir / "subprocess.log"
-    metrics_file = run_dir / "metrics.json"
 
     status = read_json(status_file)
 
@@ -113,11 +108,23 @@ def show_training_status(run_dir):
     else:
         st.warning(f"Unknown status: {current_status}")
 
-    st.write(status)
+    with st.expander("Raw status.json", expanded=False):
+        st.json(status)
 
-    if metrics_file.exists():
-        st.subheader("Metrics")
-        st.json(read_json(metrics_file), expanded=False)
+    summary_files = sorted(run_dir.glob("*summary*.json"))
+    csv_files = sorted(run_dir.glob("*summary*.csv"))
+
+    if summary_files:
+        st.subheader("Summary JSON Files")
+        for path in summary_files:
+            with st.expander(path.name, expanded=False):
+                st.json(read_json(path))
+
+    if csv_files:
+        st.subheader("Summary CSV Files")
+        for path in csv_files:
+            st.write(path.name)
+            st.dataframe(pd.read_csv(path), use_container_width=True)
 
     if log_file.exists():
         st.subheader("Training Log")
@@ -130,6 +137,10 @@ def show_training_status(run_dir):
 
 def design():
     from src.streamlit.utils.select_dir import directory_picker
+    import src.streamlit.pages.Machine_Learning.tabs.tab1_utils.model_selection as model_selection
+    from src.streamlit.utils.select_file import file_picker
+    from src.streamlit.pages.Machine_Learning.tabs.tab1_utils import featurization
+    from src.streamlit.pages.Machine_Learning.tabs.tab1_utils import data_split
 
     workdir = directory_picker(
         label="Select Working Directory",
@@ -139,23 +150,16 @@ def design():
 
     if workdir is None:
         st.info("Please select a working directory.")
-        return
+        return None
 
     workdir = Path(workdir)
 
     st.divider()
 
-    import src.streamlit.pages.Machine_Learning.tabs.tab1_utils.model_selection as model_selection
-
-    models, task_type = model_selection.design(workdir)
+    models, task_type = model_selection.design()
     task_type = str(task_type).lower()
 
     st.divider()
-
-    st.subheader("Molecular Representation")
-
-    from src.streamlit.utils.select_file import file_picker
-    import src.streamlit.pages.Machine_Learning.tabs.tab1_utils.featurization as mol_rep
 
     data_file = file_picker(
         start_dir=workdir,
@@ -163,24 +167,22 @@ def design():
         allowed_extensions=(
             ".csv",
             ".tsv",
-            ".xlsx",
-            ".xls",
             ".json",
             ".pkl",
             ".pickle",
             ".db",
             ".sqlite",
             ".sqlite3",
-            ".txt",
             ".parquet",
             ".feather",
         ),
     )
 
-    mol_config = None
+    data = {}
+    features = {}
 
     if data_file:
-        mol_config = mol_rep.design(
+        data, features = featurization.design(
             data_file=data_file,
             workdir=workdir,
             task_type=task_type,
@@ -190,18 +192,18 @@ def design():
 
     st.divider()
 
-    from src.streamlit.pages.Machine_Learning.tabs.tab1_utils import data_split
-
     st.subheader("Dataset Splitting")
-
     split_config = data_split.design(workdir, task_type)
 
     training_config = {
         "models": models,
         "task_type": task_type,
-        "task": task_type,
-        "featurization": mol_config,
-        "data_file": str(data_file) if data_file else None,
+        "hyperparameter_tuning": st.session_state.get(
+            "ml_hyperparameter_tuning",
+            True,
+        ),
+        "data": data,
+        "featurization": features,
         "data_split": split_config,
         "workdir": str(workdir),
     }
@@ -252,12 +254,15 @@ def design():
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(training_config_safe, f, indent=4, default=str)
 
-            st.success(f"Saved config to {config_path}")
+            st.success(f"Saved config to: {config_path}")
 
     st.divider()
 
     if "current_run_dir" not in st.session_state:
         st.session_state["current_run_dir"] = None
+
+    if "training_pid" not in st.session_state:
+        st.session_state["training_pid"] = None
 
     if st.button(
         "Train Selected Models",
@@ -267,28 +272,35 @@ def design():
     ):
         if not models:
             st.warning("Please select at least one model.")
-            return
+            return workdir
 
-        if mol_config is None:
-            st.warning("Please select a data file and configure molecular representation.")
-            return
+        if not data_file:
+            st.warning("Please select a training data file.")
+            return workdir
 
-        if mol_config.get("training_data_file") is None:
-            st.warning("Training data file was not created. Please finish target/class setup.")
-            return
+        if not features:
+            st.warning("Please configure molecular representation.")
+            return workdir
 
-        if split_config is None:
+        if not data:
+            st.warning("Please configure data settings.")
+            return workdir
+
+        if not split_config:
             st.warning("Please configure dataset splitting.")
-            return
+            return workdir
 
         run_id, run_dir = create_run_dir(workdir)
 
         run_training_config = {
             "models": models,
+            "hyperparameter_tuning": st.session_state.get(
+                "ml_hyperparameter_tuning",
+                True,
+            ),
             "task_type": task_type,
-            "task": task_type,
-            "featurization": mol_config,
-            "data_file": str(data_file) if data_file else None,
+            "data": data,
+            "featurization": features,
             "data_split": split_config,
             "workdir": str(run_dir),
         }
@@ -302,22 +314,28 @@ def design():
 
         subprocess_log_path = run_dir / "subprocess.log"
 
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(Path.cwd() / "src")
+
         with open(subprocess_log_path, "w", encoding="utf-8") as log_f:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 [
                     sys.executable,
                     "-m",
-                    "src.chemflow.machine_learning.train.train_runner",
+                    "chemflow.machine_learning.train.train_runner",
                     str(config_path),
                 ],
                 stdout=log_f,
                 stderr=log_f,
                 cwd=Path.cwd(),
+                env=env,
             )
 
         st.session_state["current_run_dir"] = str(run_dir)
+        st.session_state["training_pid"] = process.pid
 
         st.success(f"Training started: {run_id}")
+        st.info(f"PID: {process.pid}")
         st.info(f"Config saved to: {config_path}")
         st.info(f"Subprocess log: {subprocess_log_path}")
 
@@ -327,6 +345,11 @@ def design():
 
     if st.session_state["current_run_dir"]:
         run_dir = Path(st.session_state["current_run_dir"])
+
+        st.write(f"Current run directory: `{run_dir}`")
+
+        if st.session_state.get("training_pid"):
+            st.write(f"Training PID: `{st.session_state['training_pid']}`")
 
         if st.button(
             "Refresh Training Status",
