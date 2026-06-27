@@ -32,7 +32,7 @@ similarity_search_page = st.Page(
     icon=":material/search:",
 )
 chemical_space_page = st.Page(
-    "src/streamlit/pages/Cheminformatics/Chemical_Space_Page.py",
+    "src/streamlit/pages/Cheminformatics/Clustering_Plot_Page.py",
     title="Chemical Space",
     icon=":material/space_dashboard:",
 )

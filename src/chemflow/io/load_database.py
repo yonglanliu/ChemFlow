@@ -7,12 +7,14 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 from rdkit.Chem.rdMolDescriptors import GetMorganFingerprintAsBitVect
 
 
-def load_molecule_2d_database(database_file, smiles_col="SMILES", name_col=None):
+def load_molecule_database(database_file, smiles_col="SMILES", name_col=None):
     database_file = Path(database_file)
     suffix = database_file.suffix.lower()
 
     if suffix == ".csv":
         df = pd.read_csv(database_file)
+    elif suffix in [".parquet", ".pq"]:
+        df = pd.read_parquet(database_file)
     elif suffix in [".tsv", ".txt"]:
         df = pd.read_csv(database_file, sep="\t")
     elif suffix in [".xlsx", ".xls"]:
