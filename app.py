@@ -26,6 +26,17 @@ database_combine = st.Page(
     icon=":material/hub:",
 )
 
+similarity_search_page = st.Page(
+    "src/streamlit/pages/Cheminformatics/Similarity_Search_Page.py",
+    title="Similarity Search",
+    icon=":material/search:",
+)
+chemical_space_page = st.Page(
+    "src/streamlit/pages/Cheminformatics/Chemical_Space_Page.py",
+    title="Chemical Space",
+    icon=":material/space_dashboard:",
+)
+
 machine_learning_page = st.Page(
     "src/streamlit/pages/Machine_Learning/machine_learning_main_page.py",
     title="Machine Learning",
@@ -48,7 +59,7 @@ pg = st.navigation(
     {
         "Main": [home_page],
         "Data": [data_extraction_page, database_combine],
-        "Clustering":[],
+        "Cheminformatics":[similarity_search_page, chemical_space_page],
         "Machine Learning":[machine_learning_page],
         "Predictor":[predictor_page],
         "Molecular Generator":[molecular_generator_page],

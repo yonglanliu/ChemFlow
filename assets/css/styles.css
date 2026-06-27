@@ -63,6 +63,12 @@ hr {
     color: #6c757d;
     margin-bottom: 2rem;
 }
+.section-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-color);
+    margin-bottom: 0.5rem;
+}
 
 /* ==========================================================
    Cards

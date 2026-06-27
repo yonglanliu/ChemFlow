@@ -80,3 +80,4 @@ dist/
 bash/
 notebook/
 app/
+similarity_search_test/
