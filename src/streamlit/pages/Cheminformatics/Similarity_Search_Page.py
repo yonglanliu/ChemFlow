@@ -16,7 +16,7 @@ from src.config import PROJECT_ROOT
 from src.utils.style import load_css as inject_css
 from src.streamlit.utils.select_dir import directory_picker
 from src.chemflow.chemistry.similarity_search import SimilarityCalculator
-from src.chemflow.io.load_database import load_molecule_2d_database
+from src.chemflow.io.load_database import load_molecule_database
 
 
 # ============================================================
@@ -157,7 +157,7 @@ def load_database(db_path: Path, smiles_col: str) -> pd.DataFrame:
     if not db_path.exists():
         raise FileNotFoundError(f"Database file not found: {db_path}")
 
-    df = load_molecule_2d_database(db_path, smiles_col=smiles_col)
+    df = load_molecule_database(db_path, smiles_col=smiles_col)
 
     if smiles_col not in df.columns:
         raise ValueError(f"SMILES column `{smiles_col}` not found in database.")
