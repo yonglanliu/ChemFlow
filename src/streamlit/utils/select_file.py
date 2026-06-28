@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def file_picker(
-    start_dir="./",
+    start_dir: str | Path | None = None,
     allowed_extensions=(".csv", ".tsv", ".txt", ".pkl", ".pickle", ".db", ".sqlite", ".sqlite3"),
     key_prefix="input_file",
 ):

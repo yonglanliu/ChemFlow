@@ -23,9 +23,8 @@ from src.chemflow.io.load_database import load_molecule_database
 # Constants
 # ============================================================
 
-SUPPORTED_MOL_FILES = ["sdf", "mol", "mol2", "pdb"]
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "combined" / "combined_pivot.csv"
-
+SUPPORTED_MOL_FILES = ["sdf", "mol", "mol2", "pdb", "smi"]
+DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "combined" / "combined_pivot.parquet"
 
 # ============================================================
 # Helpers
@@ -60,12 +59,12 @@ def section_title(text: str) -> None:
 def mol_to_clean_smiles(mol: Chem.Mol) -> str:
     return Chem.MolToSmiles(Chem.RemoveHs(mol), canonical=True)
 
-
-def read_uploaded_molecule(uploaded_file) -> Chem.Mol | None:
+def read_uploaded_molecules(uploaded_file) -> list[Chem.Mol]:
     if uploaded_file is None:
-        return None
+        return []
 
     suffix = Path(uploaded_file.name).suffix.lower()
+    mols: list[Chem.Mol] = []
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
@@ -74,22 +73,43 @@ def read_uploaded_molecule(uploaded_file) -> Chem.Mol | None:
     try:
         if suffix == ".sdf":
             suppl = Chem.SDMolSupplier(tmp_path, removeHs=False)
-            mols = [m for m in suppl if m is not None]
-            return mols[0] if mols else None
+            mols = [mol for mol in suppl if mol is not None]
 
-        if suffix == ".mol":
-            return Chem.MolFromMolFile(tmp_path, removeHs=False)
+        elif suffix == ".mol":
+            mol = Chem.MolFromMolFile(tmp_path, removeHs=False)
+            if mol is not None:
+                mols.append(mol)
 
-        if suffix == ".mol2":
-            return Chem.MolFromMol2File(tmp_path, removeHs=False)
+        elif suffix == ".mol2":
+            mol = Chem.MolFromMol2File(tmp_path, removeHs=False)
+            if mol is not None:
+                mols.append(mol)
 
-        if suffix == ".pdb":
-            return Chem.MolFromPDBFile(tmp_path, removeHs=False)
+        elif suffix == ".pdb":
+            mol = Chem.MolFromPDBFile(tmp_path, removeHs=False)
+            if mol is not None:
+                mols.append(mol)
+
+        elif suffix in [".smi", ".smiles", ".txt"]:
+            with open(tmp_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    smiles = line.split()[0]
+                    mol = Chem.MolFromSmiles(smiles)
+
+                    if mol is not None:
+                        mols.append(mol)
+
+        else:
+            st.error(f"Unsupported file format: {suffix}")
 
     except Exception as exc:
         st.error(f"Failed to read molecule file: {exc}")
 
-    return None
+    return mols
 
 
 def parse_pasted_smiles(text: str) -> list[dict]:
@@ -302,33 +322,44 @@ elif query_source == "Use SMILES":
         save_query_molecules(query_molecules)
 
 elif query_source == "Upload Molecule File":
+    section_title("Upload Query Molecule File")
+
     uploaded_query_file = st.file_uploader(
         "Upload query molecule file",
         type=SUPPORTED_MOL_FILES,
         accept_multiple_files=False,
+        label_visibility="collapsed",
+        key="query_molecule_file_uploader",
     )
 
     if uploaded_query_file is not None:
-        mol = read_uploaded_molecule(uploaded_query_file)
+        mols = read_uploaded_molecules(uploaded_query_file)
 
-        if mol is None:
+        if not mols:
             st.error("Could not read molecule from uploaded file.")
         else:
+            has_3d = any(mol.GetNumConformers() > 0 for mol in mols)
+
             query_molecules = [
                 {
-                    "Name": Path(uploaded_query_file.name).stem,
+                    "Name": f"{Path(uploaded_query_file.name).stem}_{i + 1}"
+                    if len(mols) > 1
+                    else Path(uploaded_query_file.name).stem,
                     "SMILES": mol_to_clean_smiles(mol),
                     "Mol": mol,
                 }
+                for i, mol in enumerate(mols)
             ]
 
             preview_molecules(query_molecules)
             save_query_molecules(query_molecules)
 
-            if mol.GetNumConformers() > 0:
+            if has_3d:
                 st.info("3D coordinates detected. You can use 3D shape similarity.")
             else:
-                st.warning("No 3D coordinates detected. Use 2D similarity or generate conformers first.")
+                st.warning(
+                    "No 3D coordinates detected. Use 2D similarity or generate conformers first."
+                )
 
 
 # ============================================================
@@ -413,7 +444,7 @@ divider()
 section_title("Database Settings")
 
 db_path = st.text_input(
-    "Database CSV Path",
+    "Database Path",
     value=str(DEFAULT_DB_PATH),
 )
 

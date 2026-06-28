@@ -1,5 +1,7 @@
 import streamlit as st
 
+from src.streamlit.pages.Data_Extraction.tabs.tab1 import BASE_DIR
+
 st.cache_data.clear()
 st.cache_resource.clear()
 
@@ -42,6 +44,11 @@ machine_learning_page = st.Page(
     title="Machine Learning",
     icon=":material/smart_toy:",
 )
+generative_model_page = st.Page(
+    "src/streamlit/pages/Generative_Model/generative_model_main_page.py",
+    title="Generative Models",
+    icon="🤖",
+)
 
 predictor_page = st.Page(
     "src/streamlit/pages/Predictor.py",
@@ -50,7 +57,7 @@ predictor_page = st.Page(
 )
 
 molecular_generator_page = st.Page(
-    "src/streamlit/pages/Molecular_Generator.py",
+    "src/streamlit/pages/Molecular_Generator/Molecular_Generator_Main_Page.py",
     title="Molecular Generator",
     icon=":material/biotech:",
 )
@@ -60,7 +67,7 @@ pg = st.navigation(
         "Main": [home_page],
         "Data": [data_extraction_page, database_combine],
         "Cheminformatics":[similarity_search_page, chemical_space_page],
-        "Machine Learning":[machine_learning_page],
+        "Machine Learning":[machine_learning_page, generative_model_page],
         "Predictor":[predictor_page],
         "Molecular Generator":[molecular_generator_page],
         "Molecular Optimization":[],
