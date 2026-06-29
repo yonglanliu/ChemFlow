@@ -370,30 +370,12 @@ with st.expander("Training Parameters", expanded=False):
         key="learning_rate",
     )
 
-    reward_learning_rate = st.number_input(
-        label="Reward Learning Rate",
-        min_value=1e-7,
-        max_value=1.0,
-        value=float(training_config.get("reward_learning_rate", 1e-4)),
-        step=1e-5,
-        format="%.7f",
-        key="reward_learning_rate",
-    )
-
     epochs_no_reward = st.number_input(
         label="Epochs Without Reward",
         min_value=1,
-        value=int(training_config.get("epochs_no_reward", 100)),
+        value=int(training_config.get("epochs", 100)),
         step=1,
         key="epochs_no_reward",
-    )
-
-    epochs_with_reward = st.number_input(
-        label="Epochs With Reward",
-        min_value=0,
-        value=int(training_config.get("epochs_with_reward", 50)),
-        step=1,
-        key="epochs_with_reward",
     )
 
     weight_decay = st.number_input(
@@ -452,9 +434,7 @@ with st.expander("Training Parameters", expanded=False):
             "num_workers": int(num_workers),
             "batch_size": int(batch_size),
             "learning_rate": float(learning_rate),
-            "reward_learning_rate": float(reward_learning_rate),
-            "epochs_no_reward": int(epochs_no_reward),
-            "epochs_with_reward": int(epochs_with_reward),
+            "epochs": int(epochs_no_reward),
             "weight_decay": float(weight_decay),
             "gradient_clip": float(gradient_clip),
             "scheduler": scheduler_type,

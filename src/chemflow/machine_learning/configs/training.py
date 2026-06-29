@@ -10,13 +10,12 @@ class LLMTrainingConfig:
     tensorboard_dir: str = "tensorboard"
     batch_size: int = 64
     learning_rate: float = 1e-3
-    epochs_no_reward: int = 100
-    epochs_with_reward: int = 50
+    epochs: int = 100
     weight_decay: float = 1e-5
     gradient_clip: float = 1.0
     gradient_clip_value: float = 1.0
     device: str = "cuda"  # Options: "cuda", "cpu"
-    schedular: str = "linear"  # Options: "linear", "cosine", "exponential"
+    scheduler: str = "linear"  # Options: "linear", "cosine", "exponential"
     plateau_patience: int = 5
     cached_data_path: str = "cache/cached_data.pt"
     val_train_split: float = 0.1  # Fraction of data to use for validation
@@ -30,4 +29,3 @@ class LLMTrainingConfig:
     num_workers: int = 4  # Number of workers for data loading
     pretrained_ckpt_path: str = "checkpoints/best_model.pt"  # Path to the pre-trained model for fine-tuning
     early_stop_patience: int = 20  # Number of epochs with no improvement after which training will be stopped
-    reward_learning_rate: float = 1e-4  # Learning rate for reward training
