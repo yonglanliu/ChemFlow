@@ -7,15 +7,10 @@ import streamlit as st
 import torch
 from transformers import AutoTokenizer
 
-from src.config import PROJECT_ROOT
 from src.utils.style import load_css as inject_css
 from src.chemflow.machine_learning.llm.rnn import SmilesLSTMGenerator
 from src.chemflow.machine_learning.generator.lstm_generator import generate
 
-
-# ============================================================
-# Helpers
-# ============================================================
 
 def divider() -> None:
     st.markdown(
@@ -51,23 +46,76 @@ def load_tokenizer():
     )
 
 
+def build_model_config(cfg: dict) -> dict:
+    """
+    Keep only architecture parameters accepted by SmilesLSTMGenerator.
+    Training-only parameters such as workdir, epochs, batch_size, lr, etc.
+    must not be passed into the model constructor.
+    """
+
+    allowed_keys = {
+        "vocab_size",
+        "embedding_dim",
+        "hidden_dim",
+        "num_layers",
+        "dropout",
+        "pad_token_id",
+    }
+
+    model_cfg = {k: v for k, v in cfg.items() if k in allowed_keys}
+
+    if "pad_token_id" not in model_cfg:
+        model_cfg["pad_token_id"] = 0
+
+    return model_cfg
+
+
 @st.cache_resource
 def load_generator_model(checkpoint_path: str):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location=device,
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
     )
 
-    cfg = checkpoint["config"]
+    checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    model = SmilesLSTMGenerator(**cfg)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Unsupported checkpoint type: {type(checkpoint)}")
+
+    if "config" not in checkpoint:
+        raise KeyError("Checkpoint does not contain 'config'.")
+
+    if "model" not in checkpoint:
+        raise KeyError("Checkpoint does not contain 'model'.")
+
+    training_config = checkpoint["config"]
+
+    tokenizer_path = Path(training_config["workdir"]).expanduser().resolve() / "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+
+    lstm_config = training_config.get("model_config", None)
+
+    # If model_config was not saved inside training_config,
+    # use the same architecture you trained with.
+    model = SmilesLSTMGenerator(
+        vocab_size=len(tokenizer),
+        embedding_dim=256,
+        hidden_dim=512,
+        num_layers=2,
+        dropout=0.2,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+
+    model.load_state_dict(checkpoint["model"], strict=True)
     model.to(device)
     model.eval()
 
-    return model, device
+    return model, tokenizer, device
 
 
 # ============================================================
@@ -89,16 +137,11 @@ divider()
 
 section_title("Select Generator Model")
 
-models = {
-    "Unconditional LSTM Generator": PROJECT_ROOT
-    / "checkpoints"
-    / "smiles_lstm_best.pt"
-}
-
-selected_model_name = st.selectbox(
-    "Generator model",
-    options=list(models.keys()),
-    label_visibility="collapsed",
+selected_model = st.text_input(
+    "Model Path",
+    value="./checkpoints/generator_model.pt",
+    placeholder="Enter the path to the generator model checkpoint.",
+    help="Enter the path to a trained LSTM generator checkpoint.",
 )
 
 num_molecules = st.number_input(
@@ -134,14 +177,20 @@ top_k = st.slider(
 )
 
 if st.button("Generate Molecules"):
-    checkpoint_path = models[selected_model_name]
+    checkpoint_path = Path(selected_model).expanduser().resolve()
 
     if not checkpoint_path.exists():
         st.error(f"Checkpoint not found: {checkpoint_path}")
         st.stop()
 
-    tokenizer = load_tokenizer()
-    model, device = load_generator_model(str(checkpoint_path))
+    try:
+        tokenizer = load_tokenizer()
+        model, tokenizer, device = load_generator_model(str(checkpoint_path))
+
+    except Exception as e:
+        st.error("Failed to load generator model.")
+        st.exception(e)
+        st.stop()
 
     st.markdown("### Generated Molecules")
 
@@ -149,7 +198,7 @@ if st.button("Generate Molecules"):
 
     with st.spinner("Generating molecules..."):
         with torch.no_grad():
-            for i in range(num_molecules):
+            for _ in range(num_molecules):
                 smiles = generate(
                     model=model,
                     tokenizer=tokenizer,
