@@ -57,11 +57,11 @@ class SmilesDataset(Dataset):
         labels = y.clone()
 
         # ignore padding loss
-        labels[mask == 0] = -100
+        labels[mask == 0] = self.tokenizer.pad_token_id
 
         # optional: do not train loss on condition tokens
         if self.condition_list is not None and self.ignore_condition_loss:
-            labels[:num_condition_tokens] = -100
+            labels[:num_condition_tokens] = self.tokenizer.pad_token_id
 
         return {
             "input_ids": x,
