@@ -6,7 +6,7 @@ import streamlit as st
 
 
 def load_css():
-    css_path = Path(__file__).resolve().parents[2] / "assets" / "CSS" / "styles.css"
+    css_path = Path(__file__).resolve().parents[2] / "assets" / "css" / "styles.css"
 
     if not css_path.exists():
         st.error(f"CSS file not found: {css_path}")
