@@ -1,0 +1,110 @@
+# ==========================================================
+# GPT Model
+# ==========================================================
+
+[GPTConfig]
+
+# Vocabulary
+vocab_size = 0
+
+# Sequence
+max_len = 128
+
+# Model
+d_model = 256
+n_heads = 8
+n_layers = 6
+d_ff = 1024
+
+# Regularization
+dropout = 0.1
+
+# Special tokens
+pad_token_id = 0
+bos_token_id = 0
+eos_token_id = 2
+
+# Quantization Noise
+use_quant_noise = false
+quant_noise_p = 0.0
+quant_noise_block_size = 8
+
+
+# ==========================================================
+# Training
+# ==========================================================
+
+[GPTTrainingConfig]
+
+workdir = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training"
+
+batch_size = 32
+learning_rate = 1e-4
+weight_decay = 0.01
+num_epochs = 50
+
+seed = 42
+
+early_stopping = true
+early_stopping_patience = 10
+
+scheduler = "cosine"   # "none", "linear", "cosine", "exponential", "plateau"
+
+gradient_clip_value = 1.0
+
+num_workers = 0
+
+plot_training_history = true
+
+
+# ==========================================================
+# Dataset
+# ==========================================================
+
+[DatasetConfig]
+
+dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/combined/combined_pivot.parquet"
+
+smiles_column = "SMILES"
+
+training_X = "train_smiles"
+validation_X = "val_smiles"
+
+training_y = "train_labels"
+validation_y = "val_labels"
+
+val_fraction = 0.1
+
+max_length = 128
+
+preprocess_batch_size = 100000
+
+seed = 42
+
+
+# ==========================================================
+# Tokenizer
+# ==========================================================
+
+[TokenizerConfig]
+
+tokenizer_name = "seyonec/ChemBERTa_zinc250k_v2_40k"
+
+max_length = 128
+
+condition_tokens = []
+
+
+# ==========================================================
+# Generation
+# ==========================================================
+
+[GPTGenerationConfig]
+
+max_gen_len = 128
+
+temperature = 1.0
+
+top_k = 50
+
+top_p = 0.95
