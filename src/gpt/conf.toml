@@ -36,7 +36,7 @@ quant_noise_block_size = 8
 
 [GPTTrainingConfig]
 
-workdir = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training"
+workdir = "/ChemFlow/gpt_training"
 
 batch_size = 32
 learning_rate = 1e-4
@@ -63,7 +63,7 @@ plot_training_history = true
 
 [DatasetConfig]
 
-dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/combined/combined_pivot.parquet"
+dataset_path = "/ChemFlow/dataset/combined/combined_pivot.parquet"
 
 smiles_column = "SMILES"
 
