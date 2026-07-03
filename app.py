@@ -44,11 +44,11 @@ machine_learning_page = st.Page(
     title="Machine Learning",
     icon=":material/smart_toy:",
 )
-generative_model_page = st.Page(
-    "src/streamlit/pages/Generative_Model/generative_model_main_page.py",
-    title="Generative Models",
-    icon="🤖",
-)
+# generative_model_page = st.Page(
+#     "src/streamlit/pages/Generative_Model/generative_model_main_page.py",
+#     title="Generative Models",
+#     icon="🤖",
+# )
 
 predictor_page = st.Page(
     "src/streamlit/pages/Predictor.py",
@@ -67,7 +67,7 @@ pg = st.navigation(
         "Main": [home_page],
         "Data": [data_extraction_page, database_combine],
         "Cheminformatics":[similarity_search_page, chemical_space_page],
-        "Machine Learning":[machine_learning_page, generative_model_page],
+        "Machine Learning":[machine_learning_page],
         "Predictor":[predictor_page],
         "Molecular Generator":[molecular_generator_page],
         "Molecular Optimization":[],
