@@ -83,5 +83,6 @@ bash/
 notebook/
 app/
 similarity_search_test/
-lstm_training/
-src/gpt/
+gpt_training/
+test/
+diffusion_training/
