@@ -9,11 +9,24 @@ from types import SimpleNamespace
 import streamlit as st
 import torch
 from transformers import AutoTokenizer
+from rdkit import Chem
+from rdkit.Chem import Draw
 
 from src.config import PROJECT_ROOT
 from src.utils.style import load_css as inject_css
-from src.gpt.model import GPT
-from src.gpt.generator import generate
+from src.deep_learning.gpt.model import GPT
+from src.deep_learning.gpt.generator import generate
+
+
+# ============================================================
+# Session State
+# ============================================================
+
+if "generated_smiles" not in st.session_state:
+    st.session_state["generated_smiles"] = []
+
+if "generation_config" not in st.session_state:
+    st.session_state["generation_config"] = {}
 
 
 # ============================================================
@@ -102,6 +115,49 @@ def build_input_ids(
         dtype=torch.long,
         device=device,
     )
+
+
+def preview_molecules(
+    query_molecules: list[dict],
+    max_cols: int = 5,
+) -> None:
+    if not query_molecules:
+        return
+
+    st.success(f"{len(query_molecules)} valid molecule(s) detected.")
+
+    cols = st.columns(max_cols)
+
+    for i, item in enumerate(query_molecules):
+        with cols[i % max_cols]:
+            st.markdown(f"**{item['Name']}**")
+            st.image(Draw.MolToImage(item["Mol"], size=(240, 180)))
+            st.code(item["SMILES"], language="text")
+
+
+def split_valid_invalid_smiles(smiles_list: list[str]):
+    valid_items = []
+    invalid_smiles = []
+
+    for idx, smiles in enumerate(smiles_list, start=1):
+        mol = Chem.MolFromSmiles(smiles)
+
+        if mol is None:
+            invalid_smiles.append(smiles)
+            continue
+
+        canonical_smiles = Chem.MolToSmiles(mol)
+
+        valid_items.append(
+            {
+                "Name": f"Molecule {idx}",
+                "SMILES": canonical_smiles,
+                "Original_SMILES": smiles,
+                "Mol": mol,
+            }
+        )
+
+    return valid_items, invalid_smiles
 
 
 # ============================================================
@@ -225,7 +281,7 @@ section_title("Select GPT Generator Model")
 
 selected_model = st.text_input(
     "Model checkpoint path",
-    value=str(PROJECT_ROOT / "outputs" / "gpt" / "checkpoints" / "best_model.pt"),
+    value=str(PROJECT_ROOT / "checkpoints" / "best_model.pt"),
     placeholder="Enter the path to the GPT generator checkpoint.",
     help="Path to best_model.pt or last_model.pt.",
 )
@@ -290,7 +346,27 @@ skip_special_tokens = st.checkbox(
 
 divider()
 
-if st.button("Generate Molecules"):
+button_cols = st.columns([1, 1, 4])
+
+with button_cols[0]:
+    generate_clicked = st.button(
+        "Generate Molecules",
+        type="primary",
+    )
+
+with button_cols[1]:
+    clear_clicked = st.button(
+        "Clear Molecules",
+    )
+
+
+if clear_clicked:
+    st.session_state["generated_smiles"] = []
+    st.session_state["generation_config"] = {}
+    st.success("Generated molecules cleared from session state.")
+
+
+if generate_clicked:
     checkpoint_path = Path(selected_model).expanduser().resolve()
 
     if not checkpoint_path.exists():
@@ -332,7 +408,7 @@ if st.button("Generate Molecules"):
 
     with st.spinner("Generating molecules..."):
         with torch.no_grad():
-            for i in range(num_molecules):
+            for i in range(int(num_molecules)):
                 input_ids = build_input_ids(
                     tokenizer=tokenizer,
                     prompt=condition_prompt,
@@ -369,12 +445,43 @@ if st.button("Generate Molecules"):
                 text = text.strip()
                 generated_smiles.append(text)
 
-                progress.progress((i + 1) / num_molecules)
+                progress.progress((i + 1) / int(num_molecules))
+
+    st.session_state["generated_smiles"] = generated_smiles
+    st.session_state["generation_config"] = {
+        "checkpoint_path": str(checkpoint_path),
+        "num_molecules": int(num_molecules),
+        "max_new_tokens": int(max_new_tokens),
+        "temperature": float(temperature),
+        "top_k": int(top_k),
+        "condition_prompt": condition_prompt,
+        "include_bos": bool(include_bos),
+        "remove_prompt_from_output": bool(remove_prompt_from_output),
+        "skip_special_tokens": bool(skip_special_tokens),
+    }
+
+    st.success(
+        f"Generated {len(generated_smiles)} molecule(s) and stored them in session state."
+    )
+
+
+# ============================================================
+# Display Stored Generated Molecules
+# ============================================================
+
+generated_smiles = st.session_state.get("generated_smiles", [])
+
+if generated_smiles:
+    divider()
 
     st.markdown("### Generated Molecules")
 
-    for i, smiles in enumerate(generated_smiles, start=1):
-        st.code(f"{i:02d}: {smiles}", language="text")
+    with st.expander("Generation settings", expanded=False):
+        st.json(st.session_state.get("generation_config", {}))
+
+    with st.expander("Generated SMILES", expanded=True):
+        for i, smiles in enumerate(generated_smiles, start=1):
+            st.code(f"{i:02d}: {smiles}", language="text")
 
     st.download_button(
         label="Download SMILES",
@@ -382,3 +489,32 @@ if st.button("Generate Molecules"):
         file_name="generated_smiles.smi",
         mime="text/plain",
     )
+
+    divider()
+
+    st.markdown("### Molecular Structures")
+
+    valid_items, invalid_smiles = split_valid_invalid_smiles(generated_smiles)
+
+    st.success(
+        f"Valid molecules: {len(valid_items)} / {len(generated_smiles)}"
+    )
+
+    if invalid_smiles:
+        st.warning(f"Invalid SMILES: {len(invalid_smiles)}")
+
+    if valid_items:
+        preview_molecules(
+            query_molecules=valid_items,
+            max_cols=5,
+        )
+    else:
+        st.info("No valid molecules to preview.")
+
+    if invalid_smiles:
+        with st.expander("Invalid SMILES", expanded=False):
+            for smi in invalid_smiles:
+                st.code(smi, language="text")
+
+else:
+    st.info("No generated molecules in session state yet.")

@@ -41,16 +41,26 @@ def inject_css():
 def init_state():
     defaults = {
         "tab2_targets_df": None,
-        "tab2_sel_chembl_id": None,
         "tab2_bioactivity_df": None,
         "tab2_original_bioactivity_df": None,
         "tab2_display_df": None,
         "tab2_deleted_rows_df": pd.DataFrame(),
+        "tab2_activity_col": None,
+        "tab2_activity_name_col": "Activity Name",
+        "tab2_target_chembl_id_col": "Target ChEMBL ID",
     }
 
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    if "tab2_uniprot_id" not in st.session_state:
+        selected_uniprot_ids = st.session_state.get("selected_uniprot_id", [])
+
+        if isinstance(selected_uniprot_ids, str):
+            selected_uniprot_ids = [selected_uniprot_ids]
+
+        st.session_state["tab2_uniprot_id"] = "\n".join(selected_uniprot_ids)
 
 
 # ============================================================
@@ -265,6 +275,7 @@ def design():
     query_fields, query_type, assay_fields = set_bioactivity_query()
 
     get_bioactivity_data_streamlit(query_fields=query_fields, query_type=query_type, assay_fields=assay_fields, cfg=cfg)
+    st.session_state["tab2_activity_col"] = "standard_value"
 
     show_bioactivity_table(ligand_id_col=cfg.ligand_id_col, 
                            state_original_bioactivity_df_name="tab2_original_bioactivity_df",

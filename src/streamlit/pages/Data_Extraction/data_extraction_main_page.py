@@ -31,16 +31,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <div class="subtitle">
-        Query, retrieve, and curate public bioactivity and
-        structural data from UniProt, ChEMBL, PubChem,
-        BindingDB, and RCSB PDB.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+# st.markdown(
+#     """
+#     <div class="subtitle">
+#         Query, retrieve, and curate public bioactivity and
+#         structural data from UniProt, ChEMBL, PubChem,
+#         BindingDB, and RCSB PDB.
+#     </div>
+#     """,
+#     unsafe_allow_html=True,
+# )
 
 st.divider()
 
