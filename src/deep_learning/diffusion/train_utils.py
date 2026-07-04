@@ -211,6 +211,30 @@ def plot_training_history(history: dict, output_dir: str | Path):
     plt.close()
 
     plt.figure(figsize=(7, 5))
+    plt.plot(epochs, history["train_bond_acc"], label="Train Bond Acc", linewidth=2)
+    plt.plot(epochs, history["val_bond_acc"], label="Val Bond Acc", linewidth=2)
+    plt.xlabel("Epoch")
+    plt.ylabel("Bond Accuracy")
+    plt.title("Training and Validation Bond Accuracy")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / "bond_acc_curve.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
+    plt.plot(epochs, history["real_bond_acc"], label="Train Real Bond Acc", linewidth=2)
+    plt.plot(epochs, history["val_real_bond_acc"], label="Val Real Bond Acc", linewidth=2)
+    plt.xlabel("Epoch")
+    plt.ylabel("Real Bond Accuracy")
+    plt.title("Training and Validation Real Bond Accuracy")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / "real_bond_acc_curve.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
     plt.plot(epochs, history["learning_rate"], linewidth=2)
     plt.xlabel("Epoch")
     plt.ylabel("Learning Rate")
@@ -305,9 +329,17 @@ def append_history_csv(
     train_loss: float,
     train_atom_loss: float,
     train_bond_loss: float,
+    train_bond_acc: float,
+    train_real_bond_acc: float,
+    train_no_bond_ratio: float,
+    train_pred_no_bond_ratio: float,
     val_loss: float,
     val_atom_loss: float,
     val_bond_loss: float,
+    val_bond_acc: float,
+    val_real_bond_acc: float,
+    val_no_bond_ratio: float,
+    val_pred_no_bond_ratio: float,
     learning_rate: float,
 ):
     path = Path(path)
@@ -320,14 +352,22 @@ def append_history_csv(
 
         if write_header:
             writer.writerow([
-                "epoch",
-                "train_loss",
-                "train_atom_loss",
-                "train_bond_loss",
-                "val_loss",
-                "val_atom_loss",
-                "val_bond_loss",
-                "learning_rate",
+                epoch,
+                train_loss,
+                train_atom_loss,
+                train_bond_loss,
+                train_bond_acc,
+                train_real_bond_acc,
+                train_no_bond_ratio,
+                train_pred_no_bond_ratio,
+                val_loss,
+                val_atom_loss,
+                val_bond_loss,
+                val_bond_acc,
+                val_real_bond_acc,
+                val_no_bond_ratio,
+                val_pred_no_bond_ratio,
+                learning_rate,
             ])
 
         writer.writerow([
@@ -335,10 +375,18 @@ def append_history_csv(
             train_loss,
             train_atom_loss,
             train_bond_loss,
+            train_bond_acc,
+            train_real_bond_acc,
+            train_no_bond_ratio,
+            train_pred_no_bond_ratio,
             val_loss,
             val_atom_loss,
             val_bond_loss,
             learning_rate,
+            val_bond_acc,
+            val_real_bond_acc,
+            val_no_bond_ratio,
+            val_pred_no_bond_ratio,
         ])
 
 def load_graphormer_backbone(model, ckpt_path):

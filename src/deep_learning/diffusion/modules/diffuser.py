@@ -23,8 +23,7 @@ class GraphormerDiffuser(nn.Module):
         bond_pad_token: int = 0,
         atom_loss_weight: float = 1.0,
         bond_loss_weight: float = 1.0,
-        no_bond_class_weight: float = 0.05,
-        real_bond_class_weight: float = 5.0,
+        negative_sampling_ratio: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -38,9 +37,7 @@ class GraphormerDiffuser(nn.Module):
 
         self.atom_loss_weight = atom_loss_weight
         self.bond_loss_weight = bond_loss_weight
-
-        self.no_bond_class_weight = no_bond_class_weight
-        self.real_bond_class_weight = real_bond_class_weight
+        self.negative_sampling_ratio = negative_sampling_ratio
 
     def forward(
         self,
@@ -91,9 +88,6 @@ class GraphormerDiffuser(nn.Module):
         bond_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
 
-        # -------------------------------
-        # Atom loss
-        # -------------------------------
         if atom_mask.any():
             atom_loss = F.cross_entropy(
                 atom_logits[atom_mask],
@@ -102,54 +96,73 @@ class GraphormerDiffuser(nn.Module):
         else:
             atom_loss = atom_logits.sum() * 0.0
 
-        # -------------------------------
-        # Bond loss + bond diagnostics
-        # -------------------------------
         if bond_mask.any():
-            bond_targets = clean_bond_types[bond_mask]
+            bond_targets = clean_bond_types[bond_mask]  
             masked_bond_logits = bond_logits[bond_mask]
 
+            positive_mask = bond_targets > 0
+            negative_mask = bond_targets == 0
+
+            # Extract the indices of positive and negative samples
+            positive_index = positive_mask.nonzero(as_tuple=True)[0]
+            negative_index = negative_mask.nonzero(as_tuple=True)[0]
+
+            # Count the number of positive and negative samples
+            num_positive = positive_index.numel()
+            num_negative = negative_index.numel()
+
+            if num_positive > 0 and num_negative > 0:
+                num_negative_sample = int(
+                    min(
+                        num_negative,
+                        max(1, round(float(num_positive) * self.negative_sampling_ratio)),
+                    )
+                )
+
+                perm = torch.randperm(
+                    num_negative,
+                    device=negative_index.device,
+                )
+
+                sampled_negative_index = negative_index[
+                    perm[:num_negative_sample]
+                ]
+
+                selected_index = torch.cat(
+                    [
+                        positive_index,
+                        sampled_negative_index,
+                    ],
+                    dim=0,
+                )
+
+                bond_loss = F.cross_entropy(
+                    masked_bond_logits[selected_index],
+                    bond_targets[selected_index],
+                )
+
+            else:
+                bond_loss = F.cross_entropy(
+                    masked_bond_logits,
+                    bond_targets,
+                )
+
+            # Index of the predicted bond types
             bond_pred = masked_bond_logits.argmax(dim=-1)
 
-            bond_class_weight = torch.ones(
-                bond_logits.size(-1),
-                device=bond_logits.device,
-                dtype=bond_logits.dtype,
-            )
-
-            # Class 0 is usually no-bond.
-            bond_class_weight[0] = self.no_bond_class_weight
-
-            # Classes 1+ are real bond types.
-            bond_class_weight[1:] = self.real_bond_class_weight
-
-            bond_loss = F.cross_entropy(
-                masked_bond_logits,
-                bond_targets,
-                weight=bond_class_weight,
-            )
-
-            bond_acc = (
-                bond_pred == bond_targets
-            ).float().mean()
+            # Compute bond accuracy
+            bond_acc = (bond_pred == bond_targets).float().mean()
 
             real_bond_mask = bond_targets > 0
 
             if real_bond_mask.any():
-                real_bond_acc = (
-                    bond_pred[real_bond_mask]
-                    == bond_targets[real_bond_mask]
-                ).float().mean()
+                real_bond_acc = (bond_pred[real_bond_mask]== bond_targets[real_bond_mask]).float().mean()
             else:
                 real_bond_acc = bond_logits.sum() * 0.0
 
-            no_bond_ratio = (
-                bond_targets == 0
-            ).float().mean()
+            no_bond_ratio = (bond_targets == 0).float().mean()
 
-            pred_no_bond_ratio = (
-                bond_pred == 0
-            ).float().mean()
+            pred_no_bond_ratio = (bond_pred == 0).float().mean()
 
         else:
             bond_loss = bond_logits.sum() * 0.0
@@ -158,9 +171,6 @@ class GraphormerDiffuser(nn.Module):
             no_bond_ratio = bond_logits.sum() * 0.0
             pred_no_bond_ratio = bond_logits.sum() * 0.0
 
-        # -------------------------------
-        # Total loss
-        # -------------------------------
         loss = (
             self.atom_loss_weight * atom_loss
             + self.bond_loss_weight * bond_loss
@@ -218,6 +228,5 @@ class GraphormerDiffuser(nn.Module):
             "bond_pad_token": self.bond_pad_token,
             "atom_loss_weight": self.atom_loss_weight,
             "bond_loss_weight": self.bond_loss_weight,
-            "no_bond_class_weight": self.no_bond_class_weight,
-            "real_bond_class_weight": self.real_bond_class_weight,
+            "negative_sampling_ratio": self.negative_sampling_ratio,
         }

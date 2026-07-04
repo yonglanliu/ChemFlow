@@ -74,6 +74,22 @@ def train_step(
     optimizer.zero_grad(set_to_none=True)
 
     out = model(batch)
+    # if torch.rand(1).item() < 0.001:
+    #     noisy_batch = out["noisy_batch"]
+
+    #     print("\n========== TRAIN ==========")
+
+    #     print("t:")
+    #     print(
+    #         noisy_batch["t"].min().item(),
+    #         noisy_batch["t"].float().mean().item(),
+    #         noisy_batch["t"].max().item(),
+    #     )
+
+    #     print("bond_mask ratio:")
+    #     print(
+    #         noisy_batch["bond_mask"].float().mean().item()
+    #     )
 
     loss = out["loss"]
     atom_loss = out["atom_loss"]
@@ -119,6 +135,7 @@ def evaluate(
     loader,
     device,
 ) -> Dict[str, float]:
+    torch.manual_seed(1234)
     model.eval()
 
     total_loss = 0.0
@@ -141,6 +158,23 @@ def evaluate(
     for step, batch in enumerate(progress):
         batch = move_batch_to_device(batch, device)
         out = model(batch)
+        # ----------debugging: print the first batch's t and bond_mask
+        # if step == 0:
+        #     noisy_batch = out["noisy_batch"]
+
+        #     print("\n========== VALIDATION ==========")
+
+        #     print("t:")
+        #     print(
+        #         noisy_batch["t"].min().item(),
+        #         noisy_batch["t"].float().mean().item(),
+        #         noisy_batch["t"].max().item(),
+        #     )
+
+        #     bond_mask = noisy_batch["bond_mask"]
+
+        #     print("bond_mask ratio:")
+        #     print(bond_mask.float().mean().item())
 
         loss = out["loss"]
         atom_loss = out["atom_loss"]
@@ -368,9 +402,7 @@ def run_training(
             history["train_bond_acc"].append(train_metrics["bond_acc"])
             history["train_real_bond_acc"].append(train_metrics["real_bond_acc"])
             history["train_no_bond_ratio"].append(train_metrics["no_bond_ratio"])
-            history["train_pred_no_bond_ratio"].append(
-                train_metrics["pred_no_bond_ratio"]
-            )
+            history["train_pred_no_bond_ratio"].append(train_metrics["pred_no_bond_ratio"])
 
             history["val_loss"].append(val_metrics["loss"])
             history["val_atom_loss"].append(val_metrics["atom_loss"])
@@ -378,9 +410,7 @@ def run_training(
             history["val_bond_acc"].append(val_metrics["bond_acc"])
             history["val_real_bond_acc"].append(val_metrics["real_bond_acc"])
             history["val_no_bond_ratio"].append(val_metrics["no_bond_ratio"])
-            history["val_pred_no_bond_ratio"].append(
-                val_metrics["pred_no_bond_ratio"]
-            )
+            history["val_pred_no_bond_ratio"].append(val_metrics["pred_no_bond_ratio"])
 
             history["learning_rate"].append(lr)
 
@@ -390,9 +420,17 @@ def run_training(
                 train_loss=train_metrics["loss"],
                 train_atom_loss=train_metrics["atom_loss"],
                 train_bond_loss=train_metrics["bond_loss"],
+                train_bond_acc=train_metrics["bond_acc"],
+                train_real_bond_acc=train_metrics["real_bond_acc"],
+                train_no_bond_ratio=train_metrics["no_bond_ratio"],
+                train_pred_no_bond_ratio=train_metrics["pred_no_bond_ratio"],
                 val_loss=val_metrics["loss"],
                 val_atom_loss=val_metrics["atom_loss"],
                 val_bond_loss=val_metrics["bond_loss"],
+                val_bond_acc=val_metrics["bond_acc"],
+                val_real_bond_acc=val_metrics["real_bond_acc"],
+                val_no_bond_ratio=val_metrics["no_bond_ratio"],
+                val_pred_no_bond_ratio=val_metrics["pred_no_bond_ratio"],
                 learning_rate=lr,
             )
 
@@ -707,15 +745,10 @@ def train(config_path: str | Path):
             bond_pad_token=bond_pad_token,
             atom_loss_weight=getattr(diffuser_config, "atom_loss_weight", 1.0),
             bond_loss_weight=getattr(diffuser_config, "bond_loss_weight", 1.0),
-            no_bond_class_weight=getattr(
+            negative_sampling_ratio = getattr(
                 diffuser_config,
-                "no_bond_class_weight",
-                0.05,
-            ),
-            real_bond_class_weight=getattr(
-                diffuser_config,
-                "real_bond_class_weight",
-                5.0,
+                "negative_sampling_ratio",
+                1.0,
             ),
         ).to(device)
 
