@@ -14,6 +14,7 @@ class GraphormerDenoiser(nn.Module):
         hidden_dim: int,
         num_atom_types: int,
         num_bond_types: int,
+        num_timesteps: int,
         dropout: float = 0.1,
         bond_pair_mode: str = "sum",
     ) -> None:
@@ -25,6 +26,9 @@ class GraphormerDenoiser(nn.Module):
         self.num_bond_types = num_bond_types
         self.num_bond_classes = num_bond_types
         self.bond_pair_mode = bond_pair_mode
+        self.num_timesteps = num_timesteps
+
+        self.time_embedding = nn.Embedding(num_timesteps, hidden_dim)
 
         self.atom_head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
@@ -62,11 +66,15 @@ class GraphormerDenoiser(nn.Module):
         )
 
         h = inner_states[-1]      # [B, N+1, H]
+        t = batch["t"]              # [B]
 
         assert torch.isfinite(h).all(), "Graphormer encoder output has NaN/Inf"
 
         node_h = h[:, 1:, :]      # [B, N, H]  no CLS token
+        t_emb = self.time_embedding(t) 
 
+        node_h = node_h + t_emb[:, None, :]   # [B, N, H]
+        
         atom_logits = self.atom_head(node_h)
 
         B, N, H = node_h.shape
@@ -101,4 +109,5 @@ class GraphormerDenoiser(nn.Module):
             "num_bond_classes": self.num_bond_classes,
             "bond_pair_mode": self.bond_pair_mode,
             "dropout": self.atom_head[1].p,
+            "num_timesteps": self.num_timesteps,
         }

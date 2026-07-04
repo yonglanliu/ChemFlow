@@ -6,6 +6,7 @@ from src.deep_learning.utils import (
     unwrap_model,
     move_optimizer_state_to_device,
 )
+from src.deep_learning.utils.distributed import main_print
 
 # ============================================================
 # Collate utilities
@@ -223,35 +224,30 @@ def plot_training_history(history: dict, output_dir: str | Path):
 
 
 def load_checkpoint_for_resume(
-    checkpoint_path: str | Path,
+    checkpoint_path,
     model,
     optimizer=None,
     scheduler=None,
-    device: torch.device | str = "cpu",
+    device="cpu",
+    load_optimizer=True,
 ):
-    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
-
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
-
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    unwrap_model(model).load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"])
 
-    if optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
+    if load_optimizer and optimizer is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        move_optimizer_state_to_device(optimizer, torch.device(device))
 
-    if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+    if load_optimizer and scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
     return {
-        "start_epoch": int(checkpoint.get("epoch", 0)) + 1,
-        "best_val_loss": float(checkpoint.get("best_val_loss", checkpoint.get("val_loss", float("inf")))),
-        "best_epoch": int(checkpoint.get("best_epoch", checkpoint.get("epoch", 0))),
-        "patience_counter": int(checkpoint.get("patience_counter", 0)),
+        "start_epoch": checkpoint["epoch"] + 1,
+        "best_val_loss": checkpoint.get("best_val_loss", float("inf")),
+        "best_epoch": checkpoint.get("best_epoch", 0),
+        "patience_counter": checkpoint.get("patience_counter", 0),
         "history": checkpoint.get("history", None),
-        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_path": checkpoint_path,
     }
 
 # ============================================================
@@ -344,3 +340,26 @@ def append_history_csv(
             val_bond_loss,
             learning_rate,
         ])
+
+def load_graphormer_backbone(model, ckpt_path):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+    # Fairseq checkpoint
+    state_dict = ckpt["model"] if "model" in ckpt else ckpt
+
+    # Extract only Graphormer backbone
+    graph_encoder_state = {
+        k.replace("encoder.graph_encoder.", ""): v
+        for k, v in state_dict.items()
+        if k.startswith("encoder.graph_encoder.")
+    }
+
+    missing, unexpected = model.load_state_dict(
+        graph_encoder_state,
+        strict=False,
+    )
+
+    main_print("Loaded {} parameters".format(len(graph_encoder_state)))
+    main_print("Missing keys:", missing)
+    main_print("Unexpected keys:", unexpected)
+    return model

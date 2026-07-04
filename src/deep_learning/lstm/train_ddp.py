@@ -73,7 +73,7 @@ def train_step(
 
     optimizer.zero_grad(set_to_none=True)
 
-    logits = model(x)
+    logits, _= model(x)
 
     loss = criterion(
         logits.reshape(-1, logits.size(-1)),
@@ -117,7 +117,7 @@ def evaluate(
         x = input_ids[:, :-1]
         y = input_ids[:, 1:]
 
-        logits = model(x)
+        logits, _ = model(x)
 
         loss = criterion(
             logits.reshape(-1, logits.size(-1)),
@@ -282,7 +282,7 @@ def run_training(
             )
 
             print(
-                f"[GPT-DDP] epoch={epoch}/{epochs} "
+                f"[LSTM-DDP] epoch={epoch}/{epochs} "
                 f"train_loss={avg_train_loss:.4f} "
                 f"val_loss={val_loss:.4f} "
                 f"val_ppl={val_ppl:.4f} "
@@ -362,8 +362,6 @@ def run_training(
             break
 
     return history, best_path
-
-
 
 
 
@@ -553,7 +551,6 @@ def train(config_path: str | Path):
             hidden_dim=lstm_config.hidden_dim,
             num_layers=lstm_config.num_layers,
             dropout=lstm_config.dropout,
-            parameter_init=getattr(lstm_config, "parameter_init", "lstm_default"),
         ).to(device)
 
 

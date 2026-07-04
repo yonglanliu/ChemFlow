@@ -7,7 +7,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.deep_learning.diffusion.modules.noise.mask_noise import mask_diffusion_batch
+from src.deep_learning.diffusion.modules.noise.mask_noise import (
+    mask_diffusion_batch,
+)
 
 
 class GraphormerDiffuser(nn.Module):
@@ -21,6 +23,8 @@ class GraphormerDiffuser(nn.Module):
         bond_pad_token: int = 0,
         atom_loss_weight: float = 1.0,
         bond_loss_weight: float = 1.0,
+        no_bond_class_weight: float = 0.05,
+        real_bond_class_weight: float = 5.0,
     ) -> None:
         super().__init__()
 
@@ -35,9 +39,14 @@ class GraphormerDiffuser(nn.Module):
         self.atom_loss_weight = atom_loss_weight
         self.bond_loss_weight = bond_loss_weight
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        self.no_bond_class_weight = no_bond_class_weight
+        self.real_bond_class_weight = real_bond_class_weight
 
-        # Mask the input batch to create a noisy version for diffusion training
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+
         noisy_batch = mask_diffusion_batch(
             batch=batch,
             num_timesteps=self.num_timesteps,
@@ -49,14 +58,12 @@ class GraphormerDiffuser(nn.Module):
 
         clean_atom_types = batch["atom_types"].long()
         clean_bond_types = batch["bond_types"].long()
-
         node_mask = batch["node_mask"].bool()
 
         atom_mask = noisy_batch["atom_mask"].bool() & node_mask
 
         valid_edge_mask = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)
         bond_mask = noisy_batch["bond_mask"].bool() & valid_edge_mask
-
 
         loss_dict = self.compute_loss(
             atom_logits=atom_logits,
@@ -83,6 +90,10 @@ class GraphormerDiffuser(nn.Module):
         atom_mask: torch.Tensor,
         bond_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+
+        # -------------------------------
+        # Atom loss
+        # -------------------------------
         if atom_mask.any():
             atom_loss = F.cross_entropy(
                 atom_logits[atom_mask],
@@ -91,14 +102,65 @@ class GraphormerDiffuser(nn.Module):
         else:
             atom_loss = atom_logits.sum() * 0.0
 
+        # -------------------------------
+        # Bond loss + bond diagnostics
+        # -------------------------------
         if bond_mask.any():
-            bond_loss = F.cross_entropy(
-                bond_logits[bond_mask],
-                clean_bond_types[bond_mask],
+            bond_targets = clean_bond_types[bond_mask]
+            masked_bond_logits = bond_logits[bond_mask]
+
+            bond_pred = masked_bond_logits.argmax(dim=-1)
+
+            bond_class_weight = torch.ones(
+                bond_logits.size(-1),
+                device=bond_logits.device,
+                dtype=bond_logits.dtype,
             )
+
+            # Class 0 is usually no-bond.
+            bond_class_weight[0] = self.no_bond_class_weight
+
+            # Classes 1+ are real bond types.
+            bond_class_weight[1:] = self.real_bond_class_weight
+
+            bond_loss = F.cross_entropy(
+                masked_bond_logits,
+                bond_targets,
+                weight=bond_class_weight,
+            )
+
+            bond_acc = (
+                bond_pred == bond_targets
+            ).float().mean()
+
+            real_bond_mask = bond_targets > 0
+
+            if real_bond_mask.any():
+                real_bond_acc = (
+                    bond_pred[real_bond_mask]
+                    == bond_targets[real_bond_mask]
+                ).float().mean()
+            else:
+                real_bond_acc = bond_logits.sum() * 0.0
+
+            no_bond_ratio = (
+                bond_targets == 0
+            ).float().mean()
+
+            pred_no_bond_ratio = (
+                bond_pred == 0
+            ).float().mean()
+
         else:
             bond_loss = bond_logits.sum() * 0.0
+            bond_acc = bond_logits.sum() * 0.0
+            real_bond_acc = bond_logits.sum() * 0.0
+            no_bond_ratio = bond_logits.sum() * 0.0
+            pred_no_bond_ratio = bond_logits.sum() * 0.0
 
+        # -------------------------------
+        # Total loss
+        # -------------------------------
         loss = (
             self.atom_loss_weight * atom_loss
             + self.bond_loss_weight * bond_loss
@@ -112,10 +174,13 @@ class GraphormerDiffuser(nn.Module):
             "loss": loss,
             "atom_loss": atom_loss,
             "bond_loss": bond_loss,
+            "bond_acc": bond_acc,
+            "real_bond_acc": real_bond_acc,
+            "no_bond_ratio": no_bond_ratio,
+            "pred_no_bond_ratio": pred_no_bond_ratio,
         }
 
-
-    def _check_input(self,batch):
+    def _check_input(self, batch):
         for k, v in batch.items():
             if torch.is_tensor(v):
                 if not torch.isfinite(v.float()).all():
@@ -153,4 +218,6 @@ class GraphormerDiffuser(nn.Module):
             "bond_pad_token": self.bond_pad_token,
             "atom_loss_weight": self.atom_loss_weight,
             "bond_loss_weight": self.bond_loss_weight,
+            "no_bond_class_weight": self.no_bond_class_weight,
+            "real_bond_class_weight": self.real_bond_class_weight,
         }

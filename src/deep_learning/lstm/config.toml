@@ -1,0 +1,91 @@
+# ============================================================
+# GenerationConfig
+# ============================================================
+
+[GenerationConfig]
+
+temperature = 0.8
+top_k = 50
+max_length = 128
+num_samples = 100
+max_generation_length = 100
+
+
+# ============================================================
+# TokenizerConfig
+# ============================================================
+
+[TokenizerConfig]
+
+tokenizer_name = "seyonec/ChemBERTa_zinc250k_v2_40k"
+max_length = 128
+
+condition_tokens = []
+
+
+# ============================================================
+# LSTMConfig
+# ============================================================
+
+[LSTMConfig]
+
+vocab_size = 10000
+pad_token_id = 0
+bos_token_id = 1
+eos_token_id = 2
+
+embedding_dim = 256
+hidden_dim = 512
+num_layers = 2
+dropout = 0.2
+
+
+# ============================================================
+# TrainingConfig
+# ============================================================
+
+[LSTMTrainingConfig]
+
+workdir = "/ChemFlow/example_training/lstm_training"
+
+batch_size = 32
+learning_rate = 1e-4
+weight_decay = 0.01
+num_epochs = 70
+seed = 42
+early_stopping = true
+early_stopping_patience = 10
+scheduler = "cosine"   # "none", "linear", "cosine", "exponential", "plateau"
+gradient_clip_value = 1.0
+# max_grad_norm = 1.0
+num_workers = 0
+plot_training_history = true
+
+# For resume job, either use resume=true, or specify a path of checkpoint to resume_from
+resume = true
+# resume_checkpoint = "/path/to/workdir/checkpoints/last_model.pt"
+
+
+# ==========================================================
+# Dataset
+# ==========================================================
+
+[DatasetConfig]
+
+dataset_path = "./dataset/combined/combined_pivot.parquet"
+
+smiles_column = "SMILES"
+
+training_X = "train_smiles"
+validation_X = "val_smiles"
+
+training_y = "train_labels"
+validation_y = "val_labels"
+
+val_fraction = 0.1
+
+max_length = 128
+
+preprocess_batch_size = 100000
+
+seed = 42

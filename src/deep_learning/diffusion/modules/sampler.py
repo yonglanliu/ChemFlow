@@ -1,47 +1,254 @@
-# Copyright (c) 2026 Yonglan Liu
-# Licensed under the MIT License.
-
-from __future__ import annotations
-
-import argparse
-import json
-from pathlib import Path
-from types import SimpleNamespace
-
-import torch
-import torch.nn.functional as F
+import torch 
 from rdkit import Chem
-
-from src.deep_learning.utils import namespace_to_dict
-from src.deep_learning.graphormer import GraphormerGraphEncoder
+from src.deep_learning.graphormer import GraphormerGraphEncoder, GraphormerFeaturizer
 from src.deep_learning.diffusion.modules.denoiser import GraphormerDenoiser
 from src.deep_learning.diffusion.modules.diffuser import GraphormerDiffuser
-from src.deep_learning.graphormer import GraphormerFeaturizer
-from src.deep_learning.diffusion.modules.noise.mask_noise import rebuild_graphormer_inputs_from_types
+
+from types import SimpleNamespace
+from src.deep_learning.utils import namespace_to_dict
+
+from src.deep_learning.diffusion.modules.noise.mask_noise import (
+    rebuild_graphormer_inputs_from_types,
+)
+from pathlib import Path
+import json
+from torch.nn import functional as F
+# ============================================================
+# Utilities
+# ============================================================
+
+ATOM_LABELS = {
+    1: "H",
+    5: "B",
+    6: "C",
+    7: "N",
+    8: "O",
+    9: "F",
+    15: "P",
+    16: "S",
+    17: "Cl",
+    35: "Br",
+    53: "I",
+}
+
+BOND_LABELS = {
+    1: "-",
+    2: "=",
+    3: "#",
+    4: ":",
+}
 
 
-class GraphormerDiffusionSampler:
+def load_config(config_path: str | Path) -> dict:
+    config_path = Path(config_path).expanduser().resolve()
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+def get_sample_device(device_arg: str) -> torch.device:
+    if device_arg == "auto":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    return torch.device(device_arg)
+
+
+def build_model_from_config(
+    full_config: dict,
+    checkpoint_path: str | Path,
+    device: torch.device,
+) -> tuple[GraphormerDiffuser, GraphormerFeaturizer]:
+
+    encoder_config = SimpleNamespace(**full_config["GraphormerEncoderConfig"])
+    denoiser_config = SimpleNamespace(**full_config["GraphormerDenoiserConfig"])
+    diffuser_config = SimpleNamespace(**full_config["GraphormerDiffusionConfig"])
+    featurizer_config = SimpleNamespace(**full_config["FeaturizerConfig"])
+
+    featurizer = GraphormerFeaturizer(
+        **namespace_to_dict(featurizer_config)
+    )
+
+    encoder = GraphormerGraphEncoder(
+        **namespace_to_dict(encoder_config)
+    )
+
+    denoiser = GraphormerDenoiser(
+        encoder=encoder,
+        hidden_dim=denoiser_config.hidden_dim,
+        num_atom_types=featurizer.num_atom_types,
+        num_bond_types=featurizer.num_bond_types,
+        num_timesteps=diffuser_config.num_timesteps,
+        dropout=denoiser_config.dropout,
+        bond_pair_mode=getattr(denoiser_config, "bond_pair_mode", "sum"),
+    )
+
+    model = GraphormerDiffuser(
+        denoiser=denoiser,
+        num_timesteps=diffuser_config.num_timesteps,
+        atom_mask_token=featurizer.atom_mask_token,
+        bond_mask_token=featurizer.bond_mask_token,
+        atom_pad_token=featurizer.atom_pad_token,
+        bond_pad_token=featurizer.bond_pad_token,
+        atom_loss_weight=getattr(diffuser_config, "atom_loss_weight", 1.0),
+        bond_loss_weight=getattr(diffuser_config, "bond_loss_weight", 1.0),
+    )
+
+    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+
+    return model, featurizer
+
+
+def keep_largest_fragment(mol: Chem.Mol) -> Chem.Mol | None:
+    frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
+    if not frags:
+        return None
+    return max(frags, key=lambda m: m.GetNumAtoms())
+
+
+def graph_to_mol(
+    atom_types: torch.Tensor,
+    bond_types: torch.Tensor,
+) -> Chem.Mol | None:
+
+    atom_types = atom_types.detach().cpu().tolist()
+    bond_types = bond_types.detach().cpu().tolist()
+
+    rw_mol = Chem.RWMol()
+    atom_idx_map = {}
+
+    max_valence = {
+        6: 4,
+        7: 3,
+        8: 2,
+        9: 1,
+        15: 5,
+        16: 6,
+        17: 1,
+        35: 1,
+        53: 1,
+    }
+
+    bond_map = {
+        1: Chem.BondType.SINGLE,
+        2: Chem.BondType.DOUBLE,
+        3: Chem.BondType.TRIPLE,
+        4: Chem.BondType.AROMATIC,
+    }
+
+    bond_order = {
+        1: 1,
+        2: 2,
+        3: 3,
+        4: 1.5,
+    }
+
+    current_valence = {}
+
+    for i, atomic_num in enumerate(atom_types):
+        atomic_num = int(atomic_num)
+
+        if atomic_num <= 0 or atomic_num > 118:
+            continue
+
+        atom = Chem.Atom(atomic_num)
+        idx = rw_mol.AddAtom(atom)
+
+        atom_idx_map[i] = idx
+        current_valence[i] = 0.0
+
+    N = len(atom_types)
+    candidate_bonds = []
+
+    for i in range(N):
+        for j in range(i + 1, N):
+            b = int(bond_types[i][j])
+
+            if b == 0:
+                continue
+
+            if b not in bond_map:
+                continue
+
+            if i not in atom_idx_map or j not in atom_idx_map:
+                continue
+
+            candidate_bonds.append((i, j, b))
+
+    candidate_bonds.sort(key=lambda x: bond_order[x[2]])
+
+    for i, j, b in candidate_bonds:
+        ai = int(atom_types[i])
+        aj = int(atom_types[j])
+
+        vi_max = max_valence.get(ai, 4)
+        vj_max = max_valence.get(aj, 4)
+
+        bo = bond_order[b]
+
+        if current_valence[i] + bo > vi_max:
+            continue
+
+        if current_valence[j] + bo > vj_max:
+            continue
+
+        try:
+            rw_mol.AddBond(
+                atom_idx_map[i],
+                atom_idx_map[j],
+                bond_map[b],
+            )
+            current_valence[i] += bo
+            current_valence[j] += bo
+        except Exception:
+            continue
+
+    mol = rw_mol.GetMol()
+
+    if mol.GetNumAtoms() == 0:
+        return None
+
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:
+        return None
+
+    return mol
+
+# ============================================================
+# Sampler with trajectory
+# ============================================================
+
+class MaskGraphormerDiffusionSampler:
     def __init__(
         self,
         model,
+        featurizer,
         device,
-        num_atom_types: int,
-        num_bond_types: int,
-        atom_mask_token: int,
-        bond_mask_token: int,
-        atom_pad_token: int = 0,
-        bond_no_bond_token: int = 0,
         spatial_pos_max: int = 20,
         multi_hop_max_dist: int = 5,
     ):
         self.model = model
+        self.featurizer = featurizer
         self.device = device
-        self.num_atom_types = num_atom_types
-        self.num_bond_types = num_bond_types
-        self.atom_mask_token = atom_mask_token
-        self.bond_mask_token = bond_mask_token
-        self.atom_pad_token = atom_pad_token
-        self.bond_no_bond_token = bond_no_bond_token
+
+        self.num_atom_types = featurizer.num_atom_types
+        self.num_bond_types = featurizer.num_bond_types
+
+        self.atom_mask_token = featurizer.atom_mask_token
+        self.bond_mask_token = featurizer.bond_mask_token
+        self.atom_pad_token = featurizer.atom_pad_token
+        self.bond_pad_token = featurizer.bond_pad_token
+
+        self.bond_no_bond_token = featurizer.bond_pad_token
+
         self.spatial_pos_max = spatial_pos_max
         self.multi_hop_max_dist = multi_hop_max_dist
 
@@ -50,10 +257,12 @@ class GraphormerDiffusionSampler:
         self,
         batch_size: int,
         num_nodes: int,
-        num_steps: int = 50,
+        num_steps: int,
         temperature: float = 1.0,
         top_k: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_trajectory: bool = False,
+    ):
+
         self.model.eval()
 
         atom_types = torch.full(
@@ -80,6 +289,8 @@ class GraphormerDiffusionSampler:
         eye = torch.eye(num_nodes, dtype=torch.bool, device=self.device)
         bond_types[:, eye] = self.bond_no_bond_token
 
+        trajectory = []
+
         for step in reversed(range(num_steps)):
             batch = self._build_batch(
                 atom_types=atom_types,
@@ -87,45 +298,25 @@ class GraphormerDiffusionSampler:
                 node_mask=node_mask,
             )
 
+            batch["t"] = torch.full(
+                (batch_size,),
+                step,
+                dtype=torch.long,
+                device=self.device,
+            )
+
             atom_logits, bond_logits = self.model.denoiser(batch)
 
-            # Only common organic atoms first
-            allowed_atoms = torch.tensor(
-                [6, 7, 8, 9, 17],
-                device=self.device,
-                dtype=torch.long,
-            )
-
-            atom_logits[..., 9] -= 2.0    # F
-            atom_logits[..., 17] -= 1.5   # Cl
-
-            atom_mask = torch.ones_like(atom_logits, dtype=torch.bool)
-            atom_mask[..., allowed_atoms] = False
-            atom_logits = atom_logits.masked_fill(atom_mask, -1e9)
-
-            # Only NO_BOND and SINGLE bond first
-            bond_logits[..., 2:] = -1e9
-
-            atom_sample = self._sample_logits(
-                atom_logits,
-                temperature=temperature,
-                top_k=top_k,
-            )
-
-            bond_sample = self._sample_logits(
-                bond_logits,
-                temperature=temperature,
-                top_k=top_k,
-            )
-
-            # Do not sample PAD or MASK as final atom.
             atom_logits[..., self.atom_pad_token] = -1e9
             if self.atom_mask_token < atom_logits.size(-1):
                 atom_logits[..., self.atom_mask_token] = -1e9
 
-            # Do not sample MASK as final bond.
             if self.bond_mask_token < bond_logits.size(-1):
                 bond_logits[..., self.bond_mask_token] = -1e9
+
+            # Conservative sampling: only no-bond and single bond.
+            # Remove this line later if you want double/triple/aromatic bonds.
+            bond_logits[..., 3:] = -1e9
 
             atom_sample = self._sample_logits(
                 atom_logits,
@@ -161,8 +352,20 @@ class GraphormerDiffusionSampler:
             bond_types = torch.maximum(bond_types, bond_types.transpose(1, 2))
             bond_types[:, eye] = self.bond_no_bond_token
 
+            if return_trajectory:
+                trajectory.append(
+                    {
+                        "t": step,
+                        "atom_types": atom_types.detach().cpu().clone(),
+                        "bond_types": bond_types.detach().cpu().clone(),
+                    }
+                )
+
         atom_types = atom_types.clamp(0, self.num_atom_types - 1)
         bond_types = bond_types.clamp(0, self.num_bond_types - 1)
+
+        if return_trajectory:
+            return atom_types, bond_types, trajectory
 
         return atom_types, bond_types
 
@@ -174,6 +377,7 @@ class GraphormerDiffusionSampler:
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> list[str | None]:
+
         atom_types, bond_types = self.sample(
             batch_size=batch_size,
             num_nodes=num_nodes,
@@ -189,10 +393,9 @@ class GraphormerDiffusionSampler:
                 atom_types=atom_types[i],
                 bond_types=bond_types[i],
             )
+
             if mol is not None:
                 mol = keep_largest_fragment(mol)
-
-            smiles_list.append(None if mol is None else Chem.MolToSmiles(mol))
 
             if mol is None:
                 smiles_list.append(None)
@@ -207,6 +410,7 @@ class GraphormerDiffusionSampler:
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> torch.Tensor:
+
         logits = logits / max(temperature, 1e-8)
 
         if top_k is not None:
@@ -233,6 +437,7 @@ class GraphormerDiffusionSampler:
         bond_types: torch.Tensor,
         node_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+
         return rebuild_graphormer_inputs_from_types(
             atom_types=atom_types,
             bond_types=bond_types,
@@ -243,290 +448,3 @@ class GraphormerDiffusionSampler:
             spatial_pos_max=self.spatial_pos_max,
             multi_hop_max_dist=self.multi_hop_max_dist,
         )
-
-def keep_largest_fragment(mol: Chem.Mol) -> Chem.Mol | None:
-    frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
-    if not frags:
-        return None
-    return max(frags, key=lambda m: m.GetNumAtoms())
-
-def graph_to_mol(
-    atom_types: torch.Tensor,
-    bond_types: torch.Tensor,
-) -> Chem.Mol | None:
-    atom_types = atom_types.detach().cpu().tolist()
-    bond_types = bond_types.detach().cpu().tolist()
-
-    rw_mol = Chem.RWMol()
-    atom_idx_map = {}
-
-    max_valence = {
-        6: 4,   # C
-        7: 3,   # N
-        8: 2,   # O
-        9: 1,   # F
-        15: 5,  # P
-        16: 6,  # S
-        17: 1,  # Cl
-        35: 1,  # Br
-        53: 1,  # I
-    }
-
-    bond_map = {
-        1: Chem.BondType.SINGLE,
-        2: Chem.BondType.DOUBLE,
-        3: Chem.BondType.TRIPLE,
-        4: Chem.BondType.AROMATIC,
-    }
-
-    bond_order = {
-        1: 1,
-        2: 2,
-        3: 3,
-        4: 1.5,
-    }
-
-    current_valence = {}
-
-    for i, atomic_num in enumerate(atom_types):
-        atomic_num = int(atomic_num)
-
-        if atomic_num <= 0 or atomic_num > 118:
-            continue
-
-        atom = Chem.Atom(atomic_num)
-        idx = rw_mol.AddAtom(atom)
-
-        atom_idx_map[i] = idx
-        current_valence[i] = 0.0
-
-    N = len(atom_types)
-
-    candidate_bonds = []
-
-    for i in range(N):
-        for j in range(i + 1, N):
-            b = int(bond_types[i][j])
-
-            if b == 0:
-                continue
-
-            if b not in bond_map:
-                continue
-
-            if i not in atom_idx_map or j not in atom_idx_map:
-                continue
-
-            candidate_bonds.append((i, j, b))
-
-    # Prefer lower-order bonds first
-    candidate_bonds.sort(key=lambda x: bond_order[x[2]])
-
-    for i, j, b in candidate_bonds:
-        ai = int(atom_types[i])
-        aj = int(atom_types[j])
-
-        vi_max = max_valence.get(ai, 4)
-        vj_max = max_valence.get(aj, 4)
-
-        bo = bond_order[b]
-
-        if current_valence[i] + bo > vi_max:
-            continue
-
-        if current_valence[j] + bo > vj_max:
-            continue
-
-        try:
-            rw_mol.AddBond(
-                atom_idx_map[i],
-                atom_idx_map[j],
-                bond_map[b],
-            )
-            current_valence[i] += bo
-            current_valence[j] += bo
-        except Exception:
-            continue
-
-    mol = rw_mol.GetMol()
-
-    try:
-        Chem.SanitizeMol(mol)
-    except Exception:
-        try:
-            Chem.SanitizeMol(
-                mol,
-                sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
-                ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES,
-            )
-        except Exception:
-            return None
-
-    if mol.GetNumAtoms() == 0:
-        return None
-
-    return mol
-
-def load_config(config_path: str | Path) -> dict:
-    config_path = Path(config_path).expanduser().resolve()
-
-    with open(config_path, "r") as f:
-        return json.load(f)
-
-
-def build_model_from_config(
-    full_config: dict,
-    checkpoint_path: str | Path,
-    device: torch.device,
-) -> tuple[GraphormerDiffuser, GraphormerFeaturizer]:
-    encoder_config = SimpleNamespace(**full_config["GraphormerEncoderConfig"])
-    denoiser_config = SimpleNamespace(**full_config["GraphormerDenoiserConfig"])
-    diffuser_config = SimpleNamespace(**full_config["GraphormerDiffusionConfig"])
-    featurizer_config = SimpleNamespace(**full_config["FeaturizerConfig"])
-
-    featurizer = GraphormerFeaturizer(
-        **namespace_to_dict(featurizer_config)
-    )
-
-    encoder = GraphormerGraphEncoder(
-        **namespace_to_dict(encoder_config)
-    )
-
-    denoiser = GraphormerDenoiser(
-        encoder=encoder,
-        hidden_dim=denoiser_config.hidden_dim,
-        num_atom_types=featurizer.num_atom_types,
-        num_bond_types=featurizer.num_bond_types,
-        dropout=denoiser_config.dropout,
-        bond_pair_mode=getattr(denoiser_config, "bond_pair_mode", "sum"),
-        debug=False,
-    )
-
-    model = GraphormerDiffuser(
-        denoiser=denoiser,
-        num_timesteps=diffuser_config.num_timesteps,
-        atom_mask_token=featurizer.atom_mask_token,
-        bond_mask_token=featurizer.bond_mask_token,
-        atom_pad_token=featurizer.atom_pad_token,
-        bond_pad_token=featurizer.bond_pad_token,
-        atom_loss_weight=getattr(diffuser_config, "atom_loss_weight", 1.0),
-        bond_loss_weight=getattr(diffuser_config, "bond_loss_weight", 1.0),
-        debug=False,
-        sanitize_attn_bias=True,
-    )
-
-    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
-
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location=device,
-    )
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.to(device)
-    model.eval()
-
-    return model, featurizer
-
-
-def save_smiles(smiles: list[str | None], output_path: str | Path) -> None:
-    output_path = Path(output_path).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, "w") as f:
-        for s in smiles:
-            if s is not None:
-                f.write(s + "\n")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Sample molecules from a trained Graphormer diffusion model."
-    )
-
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="/Users/yonglanliu/Desktop/ChemFlow/diffusion_training/config.json",
-    )
-
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default="/Users/yonglanliu/Desktop/ChemFlow/diffusion_training/checkpoints/best_model.pt",
-    )
-
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="/Users/yonglanliu/Desktop/ChemFlow/diffusion_training/generated.smi",
-    )
-
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--num-nodes", type=int, default=40)
-    parser.add_argument("--num-steps", type=int, default=50)
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top-k", type=int, default=None)
-    parser.add_argument("--device", type=str, default="auto")
-
-    return parser.parse_args()
-
-
-def get_sample_device(device_arg: str) -> torch.device:
-    if device_arg == "auto":
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        return torch.device("cpu")
-
-    return torch.device(device_arg)
-
-
-def main():
-    args = parse_args()
-
-    device = get_sample_device(args.device)
-    print(f"Using device: {device}")
-
-    full_config = load_config(args.config)
-
-    model, featurizer = build_model_from_config(
-        full_config=full_config,
-        checkpoint_path=args.checkpoint,
-        device=device,
-    )
-
-    sampler = GraphormerDiffusionSampler(
-        model=model,
-        device=device,
-        num_atom_types=featurizer.num_atom_types,
-        num_bond_types=featurizer.num_bond_types,
-        atom_mask_token=featurizer.atom_mask_token,
-        bond_mask_token=featurizer.bond_mask_token,
-        atom_pad_token=featurizer.atom_pad_token,
-        bond_no_bond_token=featurizer.bond_pad_token,
-    )
-
-    smiles = sampler.sample_smiles(
-        batch_size=args.batch_size,
-        num_nodes=args.num_nodes,
-        num_steps=args.num_steps,
-        temperature=args.temperature,
-        top_k=args.top_k,
-    )
-
-    valid_smiles = [s for s in smiles if s is not None]
-
-    print("\nGenerated molecules:")
-    for i, s in enumerate(smiles, start=1):
-        print(f"{i:03d}: {s}")
-
-    print(f"\nValid molecules: {len(valid_smiles)}/{len(smiles)}")
-
-    save_smiles(smiles, args.output)
-    print(f"Saved valid SMILES to {args.output}")
-
-
-if __name__ == "__main__":
-    main()

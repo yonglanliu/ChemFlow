@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import sys
-import csv
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional, Dict
@@ -24,7 +23,6 @@ from src.deep_learning.utils import (
     disable_tqdm,
     setup_distributed,
     cleanup_distributed,
-    unwrap_model,
     barrier,
     step_scheduler,
     build_scheduler,
@@ -42,7 +40,9 @@ from src.deep_learning.diffusion.train_utils import (
     load_checkpoint_for_resume,
     save_checkpoint,
     append_history_csv,
+    load_graphormer_backbone,
 )
+
 from src.deep_learning.graphormer import (
     GraphormerGraphEncoder,
     GraphormerFeaturizer,
@@ -55,7 +55,6 @@ from src.deep_learning.graphormer.dataset import (
 
 from src.deep_learning.diffusion.modules.denoiser import GraphormerDenoiser
 from src.deep_learning.diffusion.modules.diffuser import GraphormerDiffuser
-
 
 
 # ============================================================
@@ -72,7 +71,6 @@ def train_step(
     model.train()
 
     batch = move_batch_to_device(batch, device)
-
     optimizer.zero_grad(set_to_none=True)
 
     out = model(batch)
@@ -80,6 +78,11 @@ def train_step(
     loss = out["loss"]
     atom_loss = out["atom_loss"]
     bond_loss = out["bond_loss"]
+
+    bond_acc = out["bond_acc"]
+    real_bond_acc = out["real_bond_acc"]
+    no_bond_ratio = out["no_bond_ratio"]
+    pred_no_bond_ratio = out["pred_no_bond_ratio"]
 
     if not torch.isfinite(loss):
         raise RuntimeError(
@@ -103,6 +106,10 @@ def train_step(
         "loss": float(loss.detach().item()),
         "atom_loss": float(atom_loss.detach().item()),
         "bond_loss": float(bond_loss.detach().item()),
+        "bond_acc": float(bond_acc.detach().item()),
+        "real_bond_acc": float(real_bond_acc.detach().item()),
+        "no_bond_ratio": float(no_bond_ratio.detach().item()),
+        "pred_no_bond_ratio": float(pred_no_bond_ratio.detach().item()),
     }
 
 
@@ -111,15 +118,25 @@ def evaluate(
     model,
     loader,
     device,
-):
+) -> Dict[str, float]:
     model.eval()
 
     total_loss = 0.0
     total_atom_loss = 0.0
     total_bond_loss = 0.0
+
+    total_bond_acc = 0.0
+    total_real_bond_acc = 0.0
+    total_no_bond_ratio = 0.0
+    total_pred_no_bond_ratio = 0.0
+
     valid_steps = 0
 
-    progress = tqdm(loader, desc="Validation", disable=disable_tqdm())
+    progress = tqdm(
+        loader,
+        desc="Validation",
+        disable=disable_tqdm(),
+    )
 
     for step, batch in enumerate(progress):
         batch = move_batch_to_device(batch, device)
@@ -128,6 +145,11 @@ def evaluate(
         loss = out["loss"]
         atom_loss = out["atom_loss"]
         bond_loss = out["bond_loss"]
+
+        bond_acc = out["bond_acc"]
+        real_bond_acc = out["real_bond_acc"]
+        no_bond_ratio = out["no_bond_ratio"]
+        pred_no_bond_ratio = out["pred_no_bond_ratio"]
 
         if not torch.isfinite(loss):
             raise RuntimeError(
@@ -140,6 +162,12 @@ def evaluate(
         total_loss += float(loss.item())
         total_atom_loss += float(atom_loss.item())
         total_bond_loss += float(bond_loss.item())
+
+        total_bond_acc += float(bond_acc.item())
+        total_real_bond_acc += float(real_bond_acc.item())
+        total_no_bond_ratio += float(no_bond_ratio.item())
+        total_pred_no_bond_ratio += float(pred_no_bond_ratio.item())
+
         valid_steps += 1
 
     n = max(valid_steps, 1)
@@ -148,12 +176,18 @@ def evaluate(
         "loss": total_loss / n,
         "atom_loss": total_atom_loss / n,
         "bond_loss": total_bond_loss / n,
+        "bond_acc": total_bond_acc / n,
+        "real_bond_acc": total_real_bond_acc / n,
+        "no_bond_ratio": total_no_bond_ratio / n,
+        "pred_no_bond_ratio": total_pred_no_bond_ratio / n,
     }
 
     if is_dist_available_and_initialized():
-        local_metrics["loss"] = reduce_mean(local_metrics["loss"], device=device)
-        local_metrics["atom_loss"] = reduce_mean(local_metrics["atom_loss"], device=device)
-        local_metrics["bond_loss"] = reduce_mean(local_metrics["bond_loss"], device=device)
+        for key in local_metrics:
+            local_metrics[key] = reduce_mean(
+                local_metrics[key],
+                device=device,
+            )
 
     return local_metrics
 
@@ -184,9 +218,17 @@ def run_training(
             "train_loss": [],
             "train_atom_loss": [],
             "train_bond_loss": [],
+            "train_bond_acc": [],
+            "train_real_bond_acc": [],
+            "train_no_bond_ratio": [],
+            "train_pred_no_bond_ratio": [],
             "val_loss": [],
             "val_atom_loss": [],
             "val_bond_loss": [],
+            "val_bond_acc": [],
+            "val_real_bond_acc": [],
+            "val_no_bond_ratio": [],
+            "val_pred_no_bond_ratio": [],
             "learning_rate": [],
         }
 
@@ -230,6 +272,12 @@ def run_training(
         running_loss = 0.0
         running_atom_loss = 0.0
         running_bond_loss = 0.0
+
+        running_bond_acc = 0.0
+        running_real_bond_acc = 0.0
+        running_no_bond_ratio = 0.0
+        running_pred_no_bond_ratio = 0.0
+
         num_batches = 0
 
         progress = tqdm(
@@ -250,27 +298,50 @@ def run_training(
             running_loss += metrics["loss"]
             running_atom_loss += metrics["atom_loss"]
             running_bond_loss += metrics["bond_loss"]
+
+            running_bond_acc += metrics["bond_acc"]
+            running_real_bond_acc += metrics["real_bond_acc"]
+            running_no_bond_ratio += metrics["no_bond_ratio"]
+            running_pred_no_bond_ratio += metrics["pred_no_bond_ratio"]
+
             num_batches += 1
 
             if is_main_process() and not progress.disable:
                 progress.set_postfix({
-                    "train_loss": f"{metrics['loss']:.4f}",
-                    "atom_loss": f"{metrics['atom_loss']:.4f}",
-                    "bond_loss": f"{metrics['bond_loss']:.4f}",
+                    "loss": f"{metrics['loss']:.4f}",
+                    "atom": f"{metrics['atom_loss']:.4f}",
+                    "bond": f"{metrics['bond_loss']:.4f}",
+                    "real_bond_acc": f"{metrics['real_bond_acc']:.4f}",
+                    "pred_no_bond": f"{metrics['pred_no_bond_ratio']:.4f}",
                 })
 
-        local_train_loss = running_loss / max(num_batches, 1)
-        local_train_atom_loss = running_atom_loss / max(num_batches, 1)
-        local_train_bond_loss = running_bond_loss / max(num_batches, 1)
+        n_train = max(num_batches, 1)
+
+        local_train_loss = running_loss / n_train
+        local_train_atom_loss = running_atom_loss / n_train
+        local_train_bond_loss = running_bond_loss / n_train
+
+        local_train_bond_acc = running_bond_acc / n_train
+        local_train_real_bond_acc = running_real_bond_acc / n_train
+        local_train_no_bond_ratio = running_no_bond_ratio / n_train
+        local_train_pred_no_bond_ratio = running_pred_no_bond_ratio / n_train
+
+        train_metrics = {
+            "loss": local_train_loss,
+            "atom_loss": local_train_atom_loss,
+            "bond_loss": local_train_bond_loss,
+            "bond_acc": local_train_bond_acc,
+            "real_bond_acc": local_train_real_bond_acc,
+            "no_bond_ratio": local_train_no_bond_ratio,
+            "pred_no_bond_ratio": local_train_pred_no_bond_ratio,
+        }
 
         if is_dist_available_and_initialized():
-            avg_train_loss = reduce_mean(local_train_loss, device=device)
-            avg_train_atom_loss = reduce_mean(local_train_atom_loss, device=device)
-            avg_train_bond_loss = reduce_mean(local_train_bond_loss, device=device)
-        else:
-            avg_train_loss = local_train_loss
-            avg_train_atom_loss = local_train_atom_loss
-            avg_train_bond_loss = local_train_bond_loss
+            for key in train_metrics:
+                train_metrics[key] = reduce_mean(
+                    train_metrics[key],
+                    device=device,
+                )
 
         val_metrics = evaluate(
             model=model,
@@ -279,8 +350,6 @@ def run_training(
         )
 
         val_loss = val_metrics["loss"]
-        val_atom_loss = val_metrics["atom_loss"]
-        val_bond_loss = val_metrics["bond_loss"]
 
         step_scheduler(
             scheduler=scheduler,
@@ -292,34 +361,57 @@ def run_training(
 
         if is_main_process():
             history["epoch"].append(epoch)
-            history["train_loss"].append(avg_train_loss)
-            history["train_atom_loss"].append(avg_train_atom_loss)
-            history["train_bond_loss"].append(avg_train_bond_loss)
-            history["val_loss"].append(val_loss)
-            history["val_atom_loss"].append(val_atom_loss)
-            history["val_bond_loss"].append(val_bond_loss)
+
+            history["train_loss"].append(train_metrics["loss"])
+            history["train_atom_loss"].append(train_metrics["atom_loss"])
+            history["train_bond_loss"].append(train_metrics["bond_loss"])
+            history["train_bond_acc"].append(train_metrics["bond_acc"])
+            history["train_real_bond_acc"].append(train_metrics["real_bond_acc"])
+            history["train_no_bond_ratio"].append(train_metrics["no_bond_ratio"])
+            history["train_pred_no_bond_ratio"].append(
+                train_metrics["pred_no_bond_ratio"]
+            )
+
+            history["val_loss"].append(val_metrics["loss"])
+            history["val_atom_loss"].append(val_metrics["atom_loss"])
+            history["val_bond_loss"].append(val_metrics["bond_loss"])
+            history["val_bond_acc"].append(val_metrics["bond_acc"])
+            history["val_real_bond_acc"].append(val_metrics["real_bond_acc"])
+            history["val_no_bond_ratio"].append(val_metrics["no_bond_ratio"])
+            history["val_pred_no_bond_ratio"].append(
+                val_metrics["pred_no_bond_ratio"]
+            )
+
             history["learning_rate"].append(lr)
 
             append_history_csv(
                 checkpoint_dir / "history.csv",
                 epoch=epoch,
-                train_loss=avg_train_loss,
-                train_atom_loss=avg_train_atom_loss,
-                train_bond_loss=avg_train_bond_loss,
-                val_loss=val_loss,
-                val_atom_loss=val_atom_loss,
-                val_bond_loss=val_bond_loss,
+                train_loss=train_metrics["loss"],
+                train_atom_loss=train_metrics["atom_loss"],
+                train_bond_loss=train_metrics["bond_loss"],
+                val_loss=val_metrics["loss"],
+                val_atom_loss=val_metrics["atom_loss"],
+                val_bond_loss=val_metrics["bond_loss"],
                 learning_rate=lr,
             )
 
             print(
                 f"[GraphormerDiffusion] epoch={epoch}/{epochs} "
-                f"train_loss={avg_train_loss:.4f} "
-                f"train_atom_loss={avg_train_atom_loss:.4f} "
-                f"train_bond_loss={avg_train_bond_loss:.4f} "
-                f"val_loss={val_loss:.4f} "
-                f"val_atom_loss={val_atom_loss:.4f} "
-                f"val_bond_loss={val_bond_loss:.4f} "
+                f"train_loss={train_metrics['loss']:.4f} "
+                f"train_atom_loss={train_metrics['atom_loss']:.4f} "
+                f"train_bond_loss={train_metrics['bond_loss']:.4f} "
+                f"train_bond_acc={train_metrics['bond_acc']:.4f} "
+                f"train_real_bond_acc={train_metrics['real_bond_acc']:.4f} "
+                f"train_no_bond_ratio={train_metrics['no_bond_ratio']:.4f} "
+                f"train_pred_no_bond_ratio={train_metrics['pred_no_bond_ratio']:.4f} "
+                f"val_loss={val_metrics['loss']:.4f} "
+                f"val_atom_loss={val_metrics['atom_loss']:.4f} "
+                f"val_bond_loss={val_metrics['bond_loss']:.4f} "
+                f"val_bond_acc={val_metrics['bond_acc']:.4f} "
+                f"val_real_bond_acc={val_metrics['real_bond_acc']:.4f} "
+                f"val_no_bond_ratio={val_metrics['no_bond_ratio']:.4f} "
+                f"val_pred_no_bond_ratio={val_metrics['pred_no_bond_ratio']:.4f} "
                 f"lr={lr:.6g}",
                 flush=True,
             )
@@ -339,12 +431,12 @@ def run_training(
                 optimizer=optimizer,
                 scheduler=scheduler,
                 epoch=epoch,
-                train_loss=avg_train_loss,
-                train_atom_loss=avg_train_atom_loss,
-                train_bond_loss=avg_train_bond_loss,
-                val_loss=val_loss,
-                val_atom_loss=val_atom_loss,
-                val_bond_loss=val_bond_loss,
+                train_loss=train_metrics["loss"],
+                train_atom_loss=train_metrics["atom_loss"],
+                train_bond_loss=train_metrics["bond_loss"],
+                val_loss=val_metrics["loss"],
+                val_atom_loss=val_metrics["atom_loss"],
+                val_bond_loss=val_metrics["bond_loss"],
                 best_val_loss=best_val_loss,
                 best_epoch=best_epoch,
                 patience_counter=patience_counter,
@@ -359,18 +451,19 @@ def run_training(
                     optimizer=optimizer,
                     scheduler=scheduler,
                     epoch=epoch,
-                    train_loss=avg_train_loss,
-                    train_atom_loss=avg_train_atom_loss,
-                    train_bond_loss=avg_train_bond_loss,
-                    val_loss=val_loss,
-                    val_atom_loss=val_atom_loss,
-                    val_bond_loss=val_bond_loss,
+                    train_loss=train_metrics["loss"],
+                    train_atom_loss=train_metrics["atom_loss"],
+                    train_bond_loss=train_metrics["bond_loss"],
+                    val_loss=val_metrics["loss"],
+                    val_atom_loss=val_metrics["atom_loss"],
+                    val_bond_loss=val_metrics["bond_loss"],
                     best_val_loss=best_val_loss,
                     best_epoch=best_epoch,
                     patience_counter=patience_counter,
                     history=history,
                     config=full_config,
                 )
+
                 print(f"Saved best checkpoint to {best_path}", flush=True)
             else:
                 print(
@@ -400,8 +493,6 @@ def run_training(
     return history, best_path
 
 
-
-
 # ============================================================
 # Main training entry
 # ============================================================
@@ -425,12 +516,24 @@ def train(config_path: str | Path):
 
         full_config = config
 
-        training_config = SimpleNamespace(**full_config["GraphormerDiffusionTrainingConfig"])
-        encoder_config = SimpleNamespace(**full_config["GraphormerEncoderConfig"])
-        denoiser_config = SimpleNamespace(**full_config["GraphormerDenoiserConfig"])
-        diffuser_config = SimpleNamespace(**full_config["GraphormerDiffusionConfig"])
-        featurizer_config = SimpleNamespace(**full_config["FeaturizerConfig"])
-        dataset_config = SimpleNamespace(**full_config["DatasetConfig"])
+        training_config = SimpleNamespace(
+            **full_config["GraphormerDiffusionTrainingConfig"]
+        )
+        encoder_config = SimpleNamespace(
+            **full_config["GraphormerEncoderConfig"]
+        )
+        denoiser_config = SimpleNamespace(
+            **full_config["GraphormerDenoiserConfig"]
+        )
+        diffuser_config = SimpleNamespace(
+            **full_config["GraphormerDiffusionConfig"]
+        )
+        featurizer_config = SimpleNamespace(
+            **full_config["FeaturizerConfig"]
+        )
+        dataset_config = SimpleNamespace(
+            **full_config["DatasetConfig"]
+        )
 
         seed = getattr(training_config, "seed", 42)
         set_seed(seed + get_rank())
@@ -438,19 +541,14 @@ def train(config_path: str | Path):
         workdir = Path(training_config.workdir).expanduser().resolve()
         checkpoint_dir = workdir / "checkpoints"
         cache_dir = workdir / "cache"
-        tokenizer_dir = workdir / "tokenizer"
 
-        for directory in [workdir, checkpoint_dir, cache_dir, tokenizer_dir]:
+        for directory in [workdir, checkpoint_dir, cache_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
         main_print(f"Using device: {device}")
         main_print(f"Distributed: {distributed}")
         main_print(f"World size: {get_world_size()}")
         main_print(f"Rank: {get_rank()}")
-
-        # ----------------------------------------------------
-        # Featurizer
-        # ----------------------------------------------------
 
         featurizer = GraphormerFeaturizer(
             **namespace_to_dict(featurizer_config)
@@ -465,12 +563,6 @@ def train(config_path: str | Path):
         main_print(f"Bond mask token: {bond_mask_token}")
         main_print(f"Atom pad token: {atom_pad_token}")
         main_print(f"Bond pad token: {bond_pad_token}")
-
-        # ----------------------------------------------------
-        # Cache dataset
-        # Rank 0 builds cache first.
-        # All ranks then load manifest/dataset.
-        # ----------------------------------------------------
 
         if is_main_process():
             main_print("Featurizing and caching dataset...")
@@ -505,10 +597,6 @@ def train(config_path: str | Path):
             f"{len(val_dataset):,} validation samples"
         )
 
-        # ----------------------------------------------------
-        # Sampler / DataLoader
-        # ----------------------------------------------------
-
         if distributed:
             train_sampler = DistributedSampler(
                 train_dataset,
@@ -528,10 +616,8 @@ def train(config_path: str | Path):
 
             train_shuffle = False
             val_shuffle = False
-
         else:
             train_sampler = None
-            val_sampler = None
             train_shuffle = True
             val_shuffle = False
 
@@ -554,20 +640,44 @@ def train(config_path: str | Path):
                 training_config.batch_size,
             ),
             shuffle=val_shuffle,
-            sampler=val_sampler,
+            sampler=None,
             drop_last=False,
             num_workers=getattr(training_config, "num_workers", 0),
             pin_memory=(device.type == "cuda"),
             collate_fn=graphormer_collate_fn,
         )
 
-        # ----------------------------------------------------
-        # Model
-        # ----------------------------------------------------
+        if getattr(training_config, "use_pretrained_encoder", False):
+            graphormer_encoder = GraphormerGraphEncoder(
+                **namespace_to_dict(encoder_config)
+            )
 
-        graphormer_encoder = GraphormerGraphEncoder(
-            **namespace_to_dict(encoder_config)
-        )
+            checkpoint_path = getattr(
+                training_config,
+                "pretrained_encoder_checkpoint",
+                None,
+            )
+
+            if checkpoint_path is None:
+                raise ValueError(
+                    "Missing pretrained encoder checkpoint path. "
+                    "Please specify pretrained_encoder_checkpoint in config."
+                )
+
+            main_print(
+                f"Loading pretrained Graphormer encoder from {checkpoint_path}..."
+            )
+
+            graphormer_encoder = load_graphormer_backbone(
+                graphormer_encoder,
+                ckpt_path=checkpoint_path,
+            )
+
+            main_print("Loaded pretrained Graphormer encoder.")
+        else:
+            graphormer_encoder = GraphormerGraphEncoder(
+                **namespace_to_dict(encoder_config)
+            )
 
         full_config["encoder_config"] = graphormer_encoder.get_config()
 
@@ -583,6 +693,7 @@ def train(config_path: str | Path):
             num_bond_types=featurizer.num_bond_types,
             dropout=denoiser_config.dropout,
             bond_pair_mode=getattr(denoiser_config, "bond_pair_mode", "sum"),
+            num_timesteps=diffuser_config.num_timesteps,
         )
 
         full_config["denoiser_config"] = denoiser.get_config()
@@ -596,6 +707,16 @@ def train(config_path: str | Path):
             bond_pad_token=bond_pad_token,
             atom_loss_weight=getattr(diffuser_config, "atom_loss_weight", 1.0),
             bond_loss_weight=getattr(diffuser_config, "bond_loss_weight", 1.0),
+            no_bond_class_weight=getattr(
+                diffuser_config,
+                "no_bond_class_weight",
+                0.05,
+            ),
+            real_bond_class_weight=getattr(
+                diffuser_config,
+                "real_bond_class_weight",
+                5.0,
+            ),
         ).to(device)
 
         full_config["diffuser_config"] = model.get_config()
@@ -615,7 +736,7 @@ def train(config_path: str | Path):
         }
 
         if is_main_process():
-            save_json(resolved_config, workdir / "resolved_config.json")
+            save_json(resolved_config, workdir / "config.json")
 
         if distributed:
             model = torch.nn.parallel.DistributedDataParallel(
@@ -625,9 +746,34 @@ def train(config_path: str | Path):
                 find_unused_parameters=False,
             )
 
+        base_model = model.module if hasattr(model, "module") else model
+
+        encoder_params = [
+            p for p in base_model.denoiser.encoder.parameters()
+            if p.requires_grad
+        ]
+
+        other_params = [
+            p for n, p in base_model.named_parameters()
+            if p.requires_grad and not n.startswith("denoiser.encoder.")
+        ]
+
+        param_groups = []
+
+        if encoder_params:
+            param_groups.append({
+                "params": encoder_params,
+                "lr": training_config.encoder_learning_rate,
+            })
+
+        if other_params:
+            param_groups.append({
+                "params": other_params,
+                "lr": training_config.learning_rate,
+            })
+
         optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=training_config.learning_rate,
+            param_groups,
             weight_decay=training_config.weight_decay,
         )
 
@@ -642,10 +788,6 @@ def train(config_path: str | Path):
             training_config=training_config,
             total_epochs=epochs,
         )
-
-        # ----------------------------------------------------
-        # Resume
-        # ----------------------------------------------------
 
         start_epoch = 1
         best_val_loss = float("inf")
@@ -662,6 +804,11 @@ def train(config_path: str | Path):
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
+                load_optimizer=not getattr(
+                    training_config,
+                    "resume_model_only",
+                    False,
+                ),
             )
 
             start_epoch = resume_state["start_epoch"]
@@ -676,10 +823,6 @@ def train(config_path: str | Path):
             main_print(f"Best epoch so far: {best_epoch}")
 
         barrier()
-
-        # ----------------------------------------------------
-        # Training
-        # ----------------------------------------------------
 
         history, best_model_path = run_training(
             model=model,
@@ -722,10 +865,7 @@ def main():
     if len(sys.argv) < 2:
         raise ValueError(
             "Missing config path. Usage:\n"
-            "Single GPU:\n"
-            "  python train_graphormer_diffusion.py path/to/config.toml\n\n"
-            "Multi GPU:\n"
-            "  torchrun --nproc_per_node=4 train_graphormer_diffusion.py path/to/config.toml"
+            "  python train_graphormer_diffusion.py path/to/config.toml"
         )
 
     config_path = Path(sys.argv[1]).expanduser().resolve()
