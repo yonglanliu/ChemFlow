@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
+from src.deep_learning.graphormer.utils.data_collator import graphormer_collate_fn
 
 from src.deep_learning.utils import (
     is_dist_available_and_initialized,
@@ -35,7 +36,6 @@ from src.deep_learning.utils import (
 
 from src.deep_learning.diffusion.train_utils import (
     move_batch_to_device,
-    graphormer_collate_fn,
     plot_training_history,
     load_checkpoint_for_resume,
     save_checkpoint,
@@ -74,22 +74,6 @@ def train_step(
     optimizer.zero_grad(set_to_none=True)
 
     out = model(batch)
-    # if torch.rand(1).item() < 0.001:
-    #     noisy_batch = out["noisy_batch"]
-
-    #     print("\n========== TRAIN ==========")
-
-    #     print("t:")
-    #     print(
-    #         noisy_batch["t"].min().item(),
-    #         noisy_batch["t"].float().mean().item(),
-    #         noisy_batch["t"].max().item(),
-    #     )
-
-    #     print("bond_mask ratio:")
-    #     print(
-    #         noisy_batch["bond_mask"].float().mean().item()
-    #     )
 
     loss = out["loss"]
     atom_loss = out["atom_loss"]
@@ -126,6 +110,8 @@ def train_step(
         "real_bond_acc": float(real_bond_acc.detach().item()),
         "no_bond_ratio": float(no_bond_ratio.detach().item()),
         "pred_no_bond_ratio": float(pred_no_bond_ratio.detach().item()),
+        "real_bond_recall": float(out["real_bond_recall"].detach().item()),
+        "real_bond_type_acc_when_pred_real": float(out["real_bond_type_acc_when_pred_real"].detach().item()),
     }
 
 
@@ -146,7 +132,8 @@ def evaluate(
     total_real_bond_acc = 0.0
     total_no_bond_ratio = 0.0
     total_pred_no_bond_ratio = 0.0
-
+    total_real_bond_recall = 0.0
+    total_real_bond_type_acc_when_pred_real = 0.0
     valid_steps = 0
 
     progress = tqdm(
@@ -158,23 +145,6 @@ def evaluate(
     for step, batch in enumerate(progress):
         batch = move_batch_to_device(batch, device)
         out = model(batch)
-        # ----------debugging: print the first batch's t and bond_mask
-        # if step == 0:
-        #     noisy_batch = out["noisy_batch"]
-
-        #     print("\n========== VALIDATION ==========")
-
-        #     print("t:")
-        #     print(
-        #         noisy_batch["t"].min().item(),
-        #         noisy_batch["t"].float().mean().item(),
-        #         noisy_batch["t"].max().item(),
-        #     )
-
-        #     bond_mask = noisy_batch["bond_mask"]
-
-        #     print("bond_mask ratio:")
-        #     print(bond_mask.float().mean().item())
 
         loss = out["loss"]
         atom_loss = out["atom_loss"]
@@ -184,6 +154,8 @@ def evaluate(
         real_bond_acc = out["real_bond_acc"]
         no_bond_ratio = out["no_bond_ratio"]
         pred_no_bond_ratio = out["pred_no_bond_ratio"]
+        real_bond_recall = out["real_bond_recall"]
+        real_bond_type_acc_when_pred_real = out["real_bond_type_acc_when_pred_real"]    
 
         if not torch.isfinite(loss):
             raise RuntimeError(
@@ -201,6 +173,8 @@ def evaluate(
         total_real_bond_acc += float(real_bond_acc.item())
         total_no_bond_ratio += float(no_bond_ratio.item())
         total_pred_no_bond_ratio += float(pred_no_bond_ratio.item())
+        total_real_bond_recall += float(real_bond_recall.item())
+        total_real_bond_type_acc_when_pred_real += float(real_bond_type_acc_when_pred_real.item())
 
         valid_steps += 1
 
@@ -214,6 +188,8 @@ def evaluate(
         "real_bond_acc": total_real_bond_acc / n,
         "no_bond_ratio": total_no_bond_ratio / n,
         "pred_no_bond_ratio": total_pred_no_bond_ratio / n,
+        "real_bond_recall": total_real_bond_recall / n,
+        "real_bond_type_acc_when_pred_real": total_real_bond_type_acc_when_pred_real / n,
     }
 
     if is_dist_available_and_initialized():
@@ -238,7 +214,8 @@ def run_training(
     device,
     full_config: dict,
     start_epoch: int = 1,
-    best_val_loss: float = float("inf"),
+    # best_val_loss: float = float("inf"),
+    best_pred_no_bond_ratio: float = float("inf"),
     best_epoch: int = 0,
     patience_counter: int = 0,
     history: Optional[dict] = None,
@@ -256,6 +233,8 @@ def run_training(
             "train_real_bond_acc": [],
             "train_no_bond_ratio": [],
             "train_pred_no_bond_ratio": [],
+            "train_real_bond_recall": [],
+            "train_real_bond_type_acc_when_pred_real": [],
             "val_loss": [],
             "val_atom_loss": [],
             "val_bond_loss": [],
@@ -263,6 +242,8 @@ def run_training(
             "val_real_bond_acc": [],
             "val_no_bond_ratio": [],
             "val_pred_no_bond_ratio": [],
+            "val_real_bond_recall": [],
+            "val_real_bond_type_acc_when_pred_real": [],
             "learning_rate": [],
         }
 
@@ -311,6 +292,8 @@ def run_training(
         running_real_bond_acc = 0.0
         running_no_bond_ratio = 0.0
         running_pred_no_bond_ratio = 0.0
+        running_real_bond_recall = 0.0
+        running_real_bond_type_acc_when_pred_real = 0.0
 
         num_batches = 0
 
@@ -337,6 +320,8 @@ def run_training(
             running_real_bond_acc += metrics["real_bond_acc"]
             running_no_bond_ratio += metrics["no_bond_ratio"]
             running_pred_no_bond_ratio += metrics["pred_no_bond_ratio"]
+            running_real_bond_recall += metrics["real_bond_recall"]
+            running_real_bond_type_acc_when_pred_real += metrics["real_bond_type_acc_when_pred_real"]
 
             num_batches += 1
 
@@ -347,6 +332,8 @@ def run_training(
                     "bond": f"{metrics['bond_loss']:.4f}",
                     "real_bond_acc": f"{metrics['real_bond_acc']:.4f}",
                     "pred_no_bond": f"{metrics['pred_no_bond_ratio']:.4f}",
+                    "real_bond_recall": f"{metrics['real_bond_recall']:.4f}",
+                    "real_bond_type_acc_when_pred_real": f"{metrics['real_bond_type_acc_when_pred_real']:.4f}",
                 })
 
         n_train = max(num_batches, 1)
@@ -359,6 +346,8 @@ def run_training(
         local_train_real_bond_acc = running_real_bond_acc / n_train
         local_train_no_bond_ratio = running_no_bond_ratio / n_train
         local_train_pred_no_bond_ratio = running_pred_no_bond_ratio / n_train
+        local_train_real_bond_recall = running_real_bond_recall / n_train
+        local_train_real_bond_type_acc_when_pred_real = running_real_bond_type_acc_when_pred_real / n_train
 
         train_metrics = {
             "loss": local_train_loss,
@@ -368,6 +357,9 @@ def run_training(
             "real_bond_acc": local_train_real_bond_acc,
             "no_bond_ratio": local_train_no_bond_ratio,
             "pred_no_bond_ratio": local_train_pred_no_bond_ratio,
+            "real_bond_recall": local_train_real_bond_recall,
+            "real_bond_type_acc_when_pred_real": local_train_real_bond_type_acc_when_pred_real,
+
         }
 
         if is_dist_available_and_initialized():
@@ -401,6 +393,8 @@ def run_training(
             history["train_bond_loss"].append(train_metrics["bond_loss"])
             history["train_bond_acc"].append(train_metrics["bond_acc"])
             history["train_real_bond_acc"].append(train_metrics["real_bond_acc"])
+            history["train_real_bond_recall"].append(train_metrics["real_bond_recall"])
+            history["train_real_bond_type_acc_when_pred_real"].append(train_metrics["real_bond_type_acc_when_pred_real"])
             history["train_no_bond_ratio"].append(train_metrics["no_bond_ratio"])
             history["train_pred_no_bond_ratio"].append(train_metrics["pred_no_bond_ratio"])
 
@@ -409,6 +403,8 @@ def run_training(
             history["val_bond_loss"].append(val_metrics["bond_loss"])
             history["val_bond_acc"].append(val_metrics["bond_acc"])
             history["val_real_bond_acc"].append(val_metrics["real_bond_acc"])
+            history["val_real_bond_recall"].append(val_metrics["real_bond_recall"])
+            history["val_real_bond_type_acc_when_pred_real"].append(val_metrics["real_bond_type_acc_when_pred_real"])
             history["val_no_bond_ratio"].append(val_metrics["no_bond_ratio"])
             history["val_pred_no_bond_ratio"].append(val_metrics["pred_no_bond_ratio"])
 
@@ -422,6 +418,8 @@ def run_training(
                 train_bond_loss=train_metrics["bond_loss"],
                 train_bond_acc=train_metrics["bond_acc"],
                 train_real_bond_acc=train_metrics["real_bond_acc"],
+                train_real_bond_recall=train_metrics["real_bond_recall"],
+                train_real_bond_type_acc_when_pred_real=train_metrics["real_bond_type_acc_when_pred_real"],
                 train_no_bond_ratio=train_metrics["no_bond_ratio"],
                 train_pred_no_bond_ratio=train_metrics["pred_no_bond_ratio"],
                 val_loss=val_metrics["loss"],
@@ -429,6 +427,8 @@ def run_training(
                 val_bond_loss=val_metrics["bond_loss"],
                 val_bond_acc=val_metrics["bond_acc"],
                 val_real_bond_acc=val_metrics["real_bond_acc"],
+                val_real_bond_recall=val_metrics["real_bond_recall"],
+                val_real_bond_type_acc_when_pred_real=val_metrics["real_bond_type_acc_when_pred_real"],
                 val_no_bond_ratio=val_metrics["no_bond_ratio"],
                 val_pred_no_bond_ratio=val_metrics["pred_no_bond_ratio"],
                 learning_rate=lr,
@@ -443,6 +443,8 @@ def run_training(
                 f"train_real_bond_acc={train_metrics['real_bond_acc']:.4f} "
                 f"train_no_bond_ratio={train_metrics['no_bond_ratio']:.4f} "
                 f"train_pred_no_bond_ratio={train_metrics['pred_no_bond_ratio']:.4f} "
+                f"train_real_bond_recall={train_metrics['real_bond_recall']:.4f} "
+                f"train_real_bond_type_acc_when_pred_real={train_metrics['real_bond_type_acc_when_pred_real']:.4f} "
                 f"val_loss={val_metrics['loss']:.4f} "
                 f"val_atom_loss={val_metrics['atom_loss']:.4f} "
                 f"val_bond_loss={val_metrics['bond_loss']:.4f} "
@@ -450,14 +452,18 @@ def run_training(
                 f"val_real_bond_acc={val_metrics['real_bond_acc']:.4f} "
                 f"val_no_bond_ratio={val_metrics['no_bond_ratio']:.4f} "
                 f"val_pred_no_bond_ratio={val_metrics['pred_no_bond_ratio']:.4f} "
+                f"val_real_bond_recall={val_metrics['real_bond_recall']:.4f} "
+                f"val_real_bond_type_acc_when_pred_real={val_metrics['real_bond_type_acc_when_pred_real']:.4f} "
                 f"lr={lr:.6g}",
                 flush=True,
             )
 
-            improved = val_loss < best_val_loss
+            # improved = val_loss < best_val_loss
+            improved = val_metrics['pred_no_bond_ratio'] < best_pred_no_bond_ratio
 
             if improved:
-                best_val_loss = val_loss
+                #best_val_loss = val_loss
+                best_pred_no_bond_ratio = val_metrics['pred_no_bond_ratio']
                 best_epoch = epoch
                 patience_counter = 0
             else:
@@ -475,7 +481,8 @@ def run_training(
                 val_loss=val_metrics["loss"],
                 val_atom_loss=val_metrics["atom_loss"],
                 val_bond_loss=val_metrics["bond_loss"],
-                best_val_loss=best_val_loss,
+                #best_val_loss=best_val_loss,
+                best_pred_no_bond_ratio=best_pred_no_bond_ratio,
                 best_epoch=best_epoch,
                 patience_counter=patience_counter,
                 history=history,
@@ -495,7 +502,8 @@ def run_training(
                     val_loss=val_metrics["loss"],
                     val_atom_loss=val_metrics["atom_loss"],
                     val_bond_loss=val_metrics["bond_loss"],
-                    best_val_loss=best_val_loss,
+                    #best_val_loss=best_val_loss,
+                    best_pred_no_bond_ratio=best_pred_no_bond_ratio,
                     best_epoch=best_epoch,
                     patience_counter=patience_counter,
                     history=history,
@@ -743,13 +751,10 @@ def train(config_path: str | Path):
             bond_mask_token=bond_mask_token,
             atom_pad_token=atom_pad_token,
             bond_pad_token=bond_pad_token,
-            atom_loss_weight=getattr(diffuser_config, "atom_loss_weight", 1.0),
-            bond_loss_weight=getattr(diffuser_config, "bond_loss_weight", 1.0),
-            negative_sampling_ratio = getattr(
-                diffuser_config,
-                "negative_sampling_ratio",
-                1.0,
-            ),
+            atom_loss_weight=diffuser_config.atom_loss_weight,
+            bond_loss_weight=diffuser_config.bond_loss_weight,
+            bond_binary_loss_weight = diffuser_config.bond_binary_loss_weight,
+            bond_type_loss_weight = diffuser_config.bond_type_loss_weight,
         ).to(device)
 
         full_config["diffuser_config"] = model.get_config()
@@ -823,7 +828,8 @@ def train(config_path: str | Path):
         )
 
         start_epoch = 1
-        best_val_loss = float("inf")
+        # best_val_loss = float("inf")
+        best_pred_no_bond_ratio = float("inf")
         best_epoch = 0
         patience_counter = 0
         resume_history = None
@@ -845,14 +851,16 @@ def train(config_path: str | Path):
             )
 
             start_epoch = resume_state["start_epoch"]
-            best_val_loss = resume_state["best_val_loss"]
+            # best_val_loss = resume_state["best_val_loss"]
+            best_pred_no_bond_ratio = resume_state["best_pred_no_bond_ratio"]
             best_epoch = resume_state["best_epoch"]
             patience_counter = resume_state["patience_counter"]
             resume_history = resume_state["history"]
 
             main_print(f"Resumed from: {resume_state['checkpoint_path']}")
             main_print(f"Starting from epoch: {start_epoch}")
-            main_print(f"Best val loss so far: {best_val_loss:.6f}")
+            # main_print(f"Best val loss so far: {best_val_loss:.6f}")
+            main_print(f"Best pred no bond ratio so far: {best_pred_no_bond_ratio:.6f}")
             main_print(f"Best epoch so far: {best_epoch}")
 
         barrier()
@@ -869,7 +877,8 @@ def train(config_path: str | Path):
             device=device,
             full_config=full_config,
             start_epoch=start_epoch,
-            best_val_loss=best_val_loss,
+            #best_val_loss=best_val_loss,
+            best_pred_no_bond_ratio=best_pred_no_bond_ratio,
             best_epoch=best_epoch,
             patience_counter=patience_counter,
             history=resume_history,

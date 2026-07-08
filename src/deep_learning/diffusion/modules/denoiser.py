@@ -16,7 +16,7 @@ class GraphormerDenoiser(nn.Module):
         num_bond_types: int,
         num_timesteps: int,
         dropout: float = 0.1,
-        bond_pair_mode: str = "sum",
+        bond_pair_mode: str = "sum_mul",
     ) -> None:
         super().__init__()
 
@@ -47,17 +47,30 @@ class GraphormerDenoiser(nn.Module):
             self.node_pair_left = nn.Linear(hidden_dim, hidden_dim)
             self.node_pair_right = nn.Linear(hidden_dim, hidden_dim)
             bond_in_dim = hidden_dim
-
+        elif bond_pair_mode == "sum_mul":
+            self.node_pair_left = nn.Linear(hidden_dim, hidden_dim)
+            self.node_pair_right = nn.Linear(hidden_dim, hidden_dim)
+            bond_in_dim = hidden_dim
         else:
             raise ValueError(f"Unknown bond_pair_mode: {bond_pair_mode}")
 
-        self.bond_head = nn.Sequential(
+        self.bond_exist_head = nn.Sequential(
             nn.LayerNorm(bond_in_dim),
+            nn.Linear(bond_in_dim, hidden_dim),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(bond_in_dim, self.num_bond_classes),
+            nn.Linear(hidden_dim, 2),
         )
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        self.bond_type_head = nn.Sequential(
+            nn.LayerNorm(bond_in_dim),
+            nn.Linear(bond_in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_bond_types - 1),
+        )
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         inner_states, _ = self.encoder(
             batch,
@@ -93,12 +106,19 @@ class GraphormerDenoiser(nn.Module):
             z_j = self.node_pair_right(node_h)
             pair_h = z_i.unsqueeze(2) * z_j.unsqueeze(1)
 
-        bond_logits = self.bond_head(pair_h)
+        elif self.bond_pair_mode == "sum_mul":
+            z_i = self.node_pair_left(node_h)
+            z_j = self.node_pair_right(node_h)
+            pair_h = z_i.unsqueeze(2) + z_j.unsqueeze(1)
+            pair_h = pair_h + z_i.unsqueeze(2) * z_j.unsqueeze(1)
 
-        assert torch.isfinite(atom_logits).all(), "atom_logits has NaN/Inf"
-        assert torch.isfinite(bond_logits).all(), "bond_logits has NaN/Inf"
-
-        return atom_logits, bond_logits
+        bond_exist_logits = self.bond_exist_head(pair_h)
+        bond_type_logits = self.bond_type_head(pair_h)
+        return (
+            atom_logits,
+            bond_exist_logits,
+            bond_type_logits,
+        )
 
 
     def get_config(self) -> dict:

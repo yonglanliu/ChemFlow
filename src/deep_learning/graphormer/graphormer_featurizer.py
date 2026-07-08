@@ -151,14 +151,18 @@ class GraphormerFeaturizer:
         return mol
 
     def smiles2graph(self, smiles: str) -> dict:
+        """
+        num_atom_features = 9 : range(0, 8) + 1 for misc
+        num_bond_features = 3 : range(0, 2) + 1 for misc
+        """
         mol = self.smiles_to_mol(smiles)
 
-        atom_features = [atom_to_feature_vector(atom) for atom in mol.GetAtoms()]
-        x = np.asarray(atom_features, dtype=np.int64)
+        atom_features = [atom_to_feature_vector(atom) for atom in mol.GetAtoms()]  
+        x = np.asarray(atom_features, dtype=np.int64)  # shape: (num_atoms, num_atom_features)
         num_nodes = x.shape[0]
 
-        edge_index, edge_attr, _ = self._get_edges(mol, num_nodes)
-        spatial_pos = self._get_spatial_pos(mol)
+        edge_index, edge_attr, _ = self._get_edges(mol, num_nodes)  # shape: (2, num_edges), (num_edges, num_bond_features)
+        spatial_pos = self._get_spatial_pos(mol)  # shape: (num_nodes, num_nodes)
 
         edge_input = self._get_edge_input(
             num_nodes=num_nodes,
@@ -167,6 +171,10 @@ class GraphormerFeaturizer:
             spatial_pos=spatial_pos,
         )
 
+        # ============================================================
+        # Atom and bond types for diffusion target
+        # ============================================================
+        # Atom types: 1~118 = atomic numbers, 119 = misc
         atom_types = np.asarray(
             [
                 atom.GetAtomicNum()
@@ -177,6 +185,7 @@ class GraphormerFeaturizer:
             dtype=np.int64,
         )
 
+        # Bond types: 1 = SINGLE, 2 = DOUBLE, 3 = TRIPLE, 4 = AROMATIC, 5 = misc
         bond_types = np.zeros((num_nodes, num_nodes), dtype=np.int64)
 
         for bond in mol.GetBonds():
@@ -184,7 +193,7 @@ class GraphormerFeaturizer:
             j = bond.GetEndAtomIdx()
 
             bond_feat = bond_to_feature_vector(bond)
-            bond_type = int(bond_feat[0]) + 1
+            bond_type = int(bond_feat[0]) + 1  # 0 is possible_bond_type_list
 
             bond_types[i, j] = bond_type
             bond_types[j, i] = bond_type
@@ -199,7 +208,6 @@ class GraphormerFeaturizer:
             "edge_input": torch.from_numpy(edge_input).long(),
             "atom_types": torch.from_numpy(atom_types).long(),
             "bond_types": torch.from_numpy(bond_types).long(),
-            "smiles": smiles,
         }
 
     def __call__(self, smiles: str) -> Data:
@@ -273,6 +281,17 @@ class GraphormerFeaturizer:
         edge_feat: np.ndarray,
         spatial_pos: np.ndarray,
     ) -> np.ndarray:
+        """
+        num_nodes: number of nodes in the graph
+        edge_index: shape (2, num_edges) example: [[0, 1, 2], [1, 2, 0]] for edges (0,1), (1,2), (2,0)
+        edge_feat: shape (num_edges, num_bond_features) example: [[0, 1, 0], [1, 0, 0], [2, 0, 1]] for bond features of the edges
+        spatial_pos: shape (num_nodes, num_nodes) example: [[0, 1, 2], [1, 0, 1], [2, 1, 0]] for shortest distances between nodes
+
+        return:
+            edge_input: shape (num_nodes, num_nodes, multi_hop_max_dist, num_edge_features) 
+            example: edge_input[i, j, d, :] = edge features of the edge
+
+        """
         num_edge_features = edge_feat.shape[-1] if edge_feat.shape[0] > 0 else len(get_bond_feature_dims())
 
         edge_input = np.zeros(
@@ -303,7 +322,7 @@ class GraphormerFeaturizer:
                     continue
 
                 if (i, j) in edge_dict:
-                    edge_input[i, j, 0, :] = edge_dict[(i, j)]  
+                    edge_input[i, j, 0, :] = edge_dict[(i, j)]  # assign edge freaturs for direct edges (1-hop). If no direct edge, it will be all zeros (no bond/pad)
 
         return edge_input 
 
@@ -315,12 +334,16 @@ class GraphormerFeaturizer:
         x = item.x
         edge_index = item.edge_index
         edge_attr = item.edge_attr
-        edge_input = item.edge_input
 
+        if x is None:
+            raise ValueError("Node features (x) cannot be None.")
+        if edge_index is None:
+            raise ValueError("Edge index cannot be None.")
+        if edge_attr is None:
+            raise ValueError("Edge attributes (edge_attr) cannot be None.")
         N = x.size(0)
 
-        item.x = convert_to_single_emb(x)
-        item.node_feat = item.x
+        x = convert_to_single_emb(x)
 
         adj = torch.zeros((N, N), dtype=torch.bool)
 
@@ -340,22 +363,23 @@ class GraphormerFeaturizer:
 
         # Set attention edge types based on edge_index and edge_attr
         if edge_index.numel() > 0:
-            attn_edge_type[edge_index[0], edge_index[1]] = (
+            attn_edge_type[edge_index[0, :], edge_index[1, :]] = (
                 convert_to_single_emb(edge_attr) + 1
             )
 
         # Add a virtual node (index N) to the attention bias and edge type tensors
+        item.x = x
+        item.node_feat = x
         item.attn_bias = torch.zeros((N + 1, N + 1), dtype=torch.float)
         item.attn_edge_type = attn_edge_type
+        item.spatial_pos = item.spatial_pos.long()
 
         item.in_degree = adj.long().sum(dim=1).view(-1)
         item.out_degree = item.in_degree.clone()
 
-        item.edge_input = edge_input.long()
+        item.edge_input = item.edge_input.long()
 
         item.atom_types = item.atom_types.long()
         item.bond_types = item.bond_types.long()
-
-        item.node_mask = torch.ones(N, dtype=torch.bool)
 
         return item

@@ -8,150 +8,6 @@ from src.deep_learning.utils import (
 )
 from src.deep_learning.utils.distributed import main_print
 
-# ============================================================
-# Collate utilities
-# ============================================================
-
-def get_item(item, key):
-    if isinstance(item, dict):
-        return item[key]
-    return getattr(item, key)
-
-
-def has_item(item, key):
-    if isinstance(item, dict):
-        return key in item
-    return hasattr(item, key)
-
-
-def pad_1d(x, target_nodes, pad_value=0):
-    out = x.new_full((target_nodes,), pad_value)
-    out[: x.size(0)] = x
-    return out
-
-
-def pad_2d(x, target_nodes, pad_value=0):
-    out = x.new_full((target_nodes, x.size(1)), pad_value)
-    out[: x.size(0), :] = x
-    return out
-
-
-def pad_square(x: torch.Tensor, size: int, pad_value: int = 0) -> torch.Tensor:
-    if x.dim() == 2:
-        out = x.new_full((size, size), pad_value)
-        out[: x.size(0), : x.size(1)] = x
-        return out
-
-    if x.dim() == 3:
-        out = x.new_full((size, size, x.size(2)), pad_value)
-        out[: x.size(0), : x.size(1), :] = x
-        return out
-
-    raise ValueError(f"pad_square only supports 2D or 3D tensors, got {x.shape}")
-
-
-def pad_spatial_pos(
-    x: torch.Tensor,
-    size: int,
-    pad_value: int = 0,
-    max_pos: int = 20,
-) -> torch.Tensor:
-    out = x.new_full((size, size), pad_value)
-    out[: x.size(0), : x.size(1)] = x
-    return out.clamp(min=0, max=max_pos)
-
-
-def pad_attn_bias(x, target_nodes, pad_value=0):
-    out = x.new_full((target_nodes + 1, target_nodes + 1), pad_value)
-    out[: x.size(0), : x.size(1)] = x
-    return out
-
-
-def graphormer_collate_fn(batch):
-    max_nodes = max(get_item(item, "x").size(0) for item in batch)
-    batch_size = len(batch)
-
-    collated = {}
-
-    collated["x"] = torch.stack([
-        pad_2d(get_item(item, "x"), max_nodes)
-        for item in batch
-    ])
-
-    collated["node_feat"] = collated["x"]
-
-    collated["attn_bias"] = torch.stack([
-        pad_attn_bias(get_item(item, "attn_bias"), max_nodes)
-        for item in batch
-    ])
-
-    collated["attn_edge_type"] = torch.stack([
-        pad_square(get_item(item, "attn_edge_type"), max_nodes)
-        for item in batch
-    ])
-
-    collated["spatial_pos"] = torch.stack([
-        pad_spatial_pos(get_item(item, "spatial_pos"), max_nodes, max_pos=20)
-        for item in batch
-    ])
-
-    collated["in_degree"] = torch.stack([
-        pad_1d(get_item(item, "in_degree"), max_nodes)
-        for item in batch
-    ])
-
-    collated["out_degree"] = torch.stack([
-        pad_1d(get_item(item, "out_degree"), max_nodes)
-        for item in batch
-    ])
-
-    edge_input_list = []
-    for item in batch:
-        edge_input = get_item(item, "edge_input")
-        max_dist = edge_input.size(2)
-        feat_dim = edge_input.size(3)
-
-        out = edge_input.new_full(
-            (max_nodes, max_nodes, max_dist, feat_dim),
-            0,
-        )
-        out[: edge_input.size(0), : edge_input.size(1), :, :] = edge_input
-        edge_input_list.append(out)
-
-    collated["edge_input"] = torch.stack(edge_input_list)
-
-    collated["atom_types"] = torch.stack([
-        pad_1d(get_item(item, "atom_types").long(), max_nodes, pad_value=0)
-        for item in batch
-    ])
-
-    collated["bond_types"] = torch.stack([
-        pad_square(get_item(item, "bond_types").long(), max_nodes, pad_value=0)
-        for item in batch
-    ])
-
-    node_mask = torch.zeros(batch_size, max_nodes, dtype=torch.bool)
-    for i, item in enumerate(batch):
-        n = get_item(item, "x").size(0)
-        node_mask[i, :n] = True
-
-    collated["node_mask"] = node_mask
-
-    if has_item(batch[0], "smiles"):
-        collated["smiles"] = [get_item(item, "smiles") for item in batch]
-
-    if has_item(batch[0], "y"):
-        ys = [get_item(item, "y") for item in batch]
-        if all(y is not None for y in ys):
-            collated["y"] = torch.stack([
-                y if torch.is_tensor(y) else torch.tensor(y)
-                for y in ys
-            ])
-        else:
-            collated["y"] = None
-
-    return collated
-
 
 def move_batch_to_device(batch, device):
     out = {}
@@ -290,7 +146,8 @@ def save_checkpoint(
     val_loss: float,
     val_atom_loss: float,
     val_bond_loss: float,
-    best_val_loss: float,
+    #best_val_loss: float,
+    best_pred_no_bond_ratio: float,
     best_epoch: int,
     patience_counter: int,
     history: dict,
@@ -312,7 +169,8 @@ def save_checkpoint(
             "val_loss": val_loss,
             "val_atom_loss": val_atom_loss,
             "val_bond_loss": val_bond_loss,
-            "best_val_loss": best_val_loss,
+            #"best_val_loss": best_val_loss,
+            "best_pred_no_bond_ratio": best_pred_no_bond_ratio,
             "best_epoch": best_epoch,
             "patience_counter": patience_counter,
             "history": history,
@@ -331,6 +189,8 @@ def append_history_csv(
     train_bond_loss: float,
     train_bond_acc: float,
     train_real_bond_acc: float,
+    train_real_bond_recall: float,
+    train_real_bond_type_acc_when_pred_real: float,
     train_no_bond_ratio: float,
     train_pred_no_bond_ratio: float,
     val_loss: float,
@@ -338,6 +198,8 @@ def append_history_csv(
     val_bond_loss: float,
     val_bond_acc: float,
     val_real_bond_acc: float,
+    val_real_bond_recall: float,
+    val_real_bond_type_acc_when_pred_real: float,
     val_no_bond_ratio: float,
     val_pred_no_bond_ratio: float,
     learning_rate: float,
@@ -352,22 +214,26 @@ def append_history_csv(
 
         if write_header:
             writer.writerow([
-                epoch,
-                train_loss,
-                train_atom_loss,
-                train_bond_loss,
-                train_bond_acc,
-                train_real_bond_acc,
-                train_no_bond_ratio,
-                train_pred_no_bond_ratio,
-                val_loss,
-                val_atom_loss,
-                val_bond_loss,
-                val_bond_acc,
-                val_real_bond_acc,
-                val_no_bond_ratio,
-                val_pred_no_bond_ratio,
-                learning_rate,
+                "epoch",
+                "train_loss",
+                "train_atom_loss",
+                "train_bond_loss",
+                "train_bond_acc",
+                "train_real_bond_acc",
+                "train_real_bond_recall",
+                "train_real_bond_type_acc_when_pred_real",
+                "train_no_bond_ratio",
+                "train_pred_no_bond_ratio",
+                "val_loss",
+                "val_atom_loss",
+                "val_bond_loss",
+                "val_bond_acc",
+                "val_real_bond_acc",
+                "val_real_bond_recall",
+                "val_real_bond_type_acc_when_pred_real",
+                "val_no_bond_ratio",
+                "val_pred_no_bond_ratio",
+                "learning_rate",
             ])
 
         writer.writerow([
@@ -377,16 +243,20 @@ def append_history_csv(
             train_bond_loss,
             train_bond_acc,
             train_real_bond_acc,
+            train_real_bond_recall,
+            train_real_bond_type_acc_when_pred_real,
             train_no_bond_ratio,
             train_pred_no_bond_ratio,
             val_loss,
             val_atom_loss,
             val_bond_loss,
-            learning_rate,
             val_bond_acc,
             val_real_bond_acc,
+            val_real_bond_recall,
+            val_real_bond_type_acc_when_pred_real,
             val_no_bond_ratio,
             val_pred_no_bond_ratio,
+            learning_rate,
         ])
 
 def load_graphormer_backbone(model, ckpt_path):

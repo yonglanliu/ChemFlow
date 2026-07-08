@@ -32,12 +32,12 @@ def mask_diffusion_batch(
     Create a noisy molecular graph and rebuild Graphormer inputs from it.
 
     Clean targets:
-        atom_types: [B, N]
+        atom_types: [B, max_nodes]
             0 = PAD
             1~118 = atomic numbers
             119 = misc
 
-        bond_types: [B, N, N]
+        bond_types: [B, max_nodes, max_nodes]
             0 = NO_BOND
             1 = SINGLE
             2 = DOUBLE
@@ -86,12 +86,77 @@ def mask_diffusion_batch(
     eye = torch.eye(N, dtype=torch.bool, device=device)
     valid_edge_mask = valid_edge_mask & (~eye.unsqueeze(0))
 
-    bond_random = torch.rand(B, N, N, device=device)
-    bond_mask = bond_random < noise_prob[:, None, None]
-    bond_mask = bond_mask & valid_edge_mask
+    # bond_random = torch.rand(B, N, N, device=device)
+    # bond_mask = bond_random < noise_prob[:, None, None]
+    # bond_mask = bond_mask & valid_edge_mask
 
-    # Force symmetric bond mask.
-    bond_mask = bond_mask | bond_mask.transpose(1, 2)
+    # # Force symmetric bond mask.
+    # bond_mask = bond_mask | bond_mask.transpose(1, 2)
+    # =================================================================
+    """
+    Extract valid edges and sample real bonds and no-bonds separately 
+    to ensure a balanced representation of positive and negative samples 
+    in the noisy graph. This approach helps maintain the structural integrity 
+    of the molecular graph while introducing noise for training purposes.
+    """
+    # valid edge only, no diagonal
+    valid_edge_mask = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)
+
+    eye = torch.eye(N, dtype=torch.bool, device=device)
+    valid_edge_mask = valid_edge_mask & (~eye.unsqueeze(0))
+
+    # only sample upper triangle first
+    upper = torch.triu(
+        torch.ones(N, N, dtype=torch.bool, device=device),
+        diagonal=1,
+    ).unsqueeze(0)
+
+    valid_edge_mask = valid_edge_mask & upper
+
+    # positive = real bonds
+    real_bond_edge_mask = clean_bond_types.gt(bond_no_bond_token) & valid_edge_mask
+
+    # negative = no bonds
+    no_bond_edge_mask = clean_bond_types.eq(bond_no_bond_token) & valid_edge_mask
+
+    # sample real bonds according to diffusion noise probability
+    real_random = torch.rand(B, N, N, device=device)
+    real_bond_mask = (
+        real_random < noise_prob[:, None, None]
+    ) & real_bond_edge_mask
+
+    negative_ratio = 1.0
+    real_count = real_bond_mask.sum(dim=(1, 2))
+
+    no_bond_mask = torch.zeros_like(real_bond_mask)
+
+    for b in range(B):
+        num_real = int(real_count[b].item())
+
+        if num_real == 0:
+            continue
+
+        candidates = no_bond_edge_mask[b].nonzero(as_tuple=False)
+
+        if candidates.numel() == 0:
+            continue
+
+        num_negative = min(
+            candidates.size(0),
+            max(1, round(num_real * negative_ratio)),
+        )
+
+        perm = torch.randperm(candidates.size(0), device=device)
+        selected = candidates[perm[:num_negative]]
+
+        no_bond_mask[b, selected[:, 0], selected[:, 1]] = True
+
+    # combine positive and negative masks
+    bond_mask_upper = real_bond_mask | no_bond_mask
+
+    # make symmetric. bond_mask is selected bond and no-bond edges for training
+    bond_mask = bond_mask_upper | bond_mask_upper.transpose(1, 2)
+    # ===============================================================
 
     noisy_atom_types = clean_atom_types.clone()
     noisy_bond_types = clean_bond_types.clone()
@@ -156,7 +221,7 @@ def rebuild_graphormer_inputs_from_types(
         N + 1,
         dtype=torch.float32,
         device=device,
-    )
+    )   # shape: (B, N+1, N+1), including the virtual node
 
     known_bond_mask = (
         bond_types.ne(bond_no_bond_token)
@@ -210,11 +275,29 @@ def build_noisy_atom_features(
     node_mask: torch.Tensor,
     atom_mask_token: int,
 ) -> torch.Tensor:
+    
     """
-    Build Graphormer x: [B, N, 9].
+    atom_types: [B, N], including PAD and MISC
+    node_mask: [B, N], True for valid nodes, False for padding
+    atom_mask_token: int = 119, the token used for masked atoms
+
+    Build Graphormer x: [B, N, 9].  9 is the number of atom features used in Graphormer.
+    The features are:
+    0: atomic number index (1~118 for atomic numbers 1~118, 119 for misc, 120 for mask)
+    1: chirality
+    2: degree
+    3: formal charge
+    4: numH
+    5: radical electrons
+    6: hybridization
+    7: aromatic
+    8: ring
 
     The returned x is already converted with convert_to_single_emb(),
     matching Graphormer preprocessing.
+    atom_types: [B, N], including PAD and MISC
+    node_mask: [B, N], True for valid nodes, False for padding
+    atom_mask_token: int = 119, the token used for masked atoms
     """
 
     device = atom_types.device
@@ -229,7 +312,7 @@ def build_noisy_atom_features(
     #   atomic number 118 -> raw index 117
     # misc -> 118
     # mask -> 119
-    atomic_feature = torch.full_like(atom_types, 118)
+    atomic_feature = torch.full_like(atom_types, 118)  # shape: (B, N), default to misc
 
     real_atom_mask = atom_types.ge(1) & atom_types.le(118)  # Valid atomic numbers
     atomic_feature[real_atom_mask] = atom_types[real_atom_mask] - 1
