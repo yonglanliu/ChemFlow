@@ -1,4 +1,5 @@
 [project]
+
 name = "chemflow"
 version = "0.1.0"
 description = "End-to-end cheminformatics and AI drug discovery platform"
@@ -16,6 +17,12 @@ dependencies = [
     "rdkit",
     "chembl-webresource-client",
 ]
+
+# ===========================
+# CLI Entry Point
+# ===========================
+[project.scripts]
+chemflow = "src.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
