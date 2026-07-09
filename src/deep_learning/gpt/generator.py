@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import torch
 from transformers import AutoTokenizer
 
+from src.deep_learning.fine_tune.lora import add_lora_to_attention_layers
+from src.deep_learning.fine_tune.lora import add_lora_to_attention_layers
 from src.deep_learning.gpt.model import GPT
 
 
@@ -90,6 +92,7 @@ def load_tokenizer(tokenizer_path: str | Path):
 def load_model_from_checkpoint(
     checkpoint_path: str | Path,
     tokenizer_path: str | Path,
+    adapter_checkpoint_path: str | Path | None = None,
     device: str | torch.device | None = None,
 ):
     checkpoint_path = Path(checkpoint_path)
@@ -169,7 +172,26 @@ def load_model_from_checkpoint(
         checkpoint["model_state_dict"],
         strict=True,
     )
+    if adapter_checkpoint_path is not None:
+        adaptor_checkpoint = torch.load(
+            adapter_checkpoint_path,
+            map_location=device,)
 
+        full_config = adaptor_checkpoint["config"]
+        training_config = full_config["GPTTrainingConfig"]
+        adapter_config = training_config["Finetune"]["Lora"]
+
+        model = add_lora_to_attention_layers(
+            model,
+            r=adapter_config["lora_r"],
+            alpha=adapter_config["lora_alpha"],
+            dropout=0.0,
+            use_k_proj=adapter_config["lora_use_k_proj"],
+        )
+        model.load_state_dict(
+            adaptor_checkpoint["adapter_state_dict"],
+            strict=False,
+        )
     model.to(device)
     model.eval()
 
@@ -242,10 +264,12 @@ def generate_smiles(
 if __name__ == "__main__":
     checkpoint_path = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training/checkpoints/best_model.pt"
     tokenizer_path = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training/tokenizer"
+    adapter_checkpoint_path = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training/checkpoints/best_adapter.pt"
 
     model, tokenizer, config, checkpoint, device = load_model_from_checkpoint(
         checkpoint_path=checkpoint_path,
         tokenizer_path=tokenizer_path,
+        adapter_checkpoint_path=adapter_checkpoint_path,
     )
 
     # None means unconditional generation.

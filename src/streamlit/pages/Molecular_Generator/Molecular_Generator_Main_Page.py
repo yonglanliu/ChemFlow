@@ -13,6 +13,7 @@ from rdkit import Chem
 from rdkit.Chem import Draw
 
 from src.config import PROJECT_ROOT
+from src.deep_learning.fine_tune.lora import add_lora_to_attention_layers
 from src.utils.style import load_css as inject_css
 from src.deep_learning.gpt.model import GPT
 from src.deep_learning.gpt.generator import generate
@@ -165,14 +166,23 @@ def split_valid_invalid_smiles(smiles_list: list[str]):
 # ============================================================
 
 @st.cache_resource
-def load_gpt_generator_model(checkpoint_path: str):
+def load_gpt_generator_model(checkpoint_path: str,
+                             adapter_checkpoint_path: str | None = None,
+                             ):
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    adapter_checkpoint_path = Path(adapter_checkpoint_path).expanduser().resolve() if adapter_checkpoint_path else None
+
     device = get_device()
 
     checkpoint = torch.load(
         checkpoint_path,
         map_location=device,
     )
+
+    adapter_checkpoint = torch.load(
+        adapter_checkpoint_path,
+        map_location=device,
+    ) if adapter_checkpoint_path else None
 
     if not isinstance(checkpoint, dict):
         raise TypeError(f"Unsupported checkpoint type: {type(checkpoint)}")
@@ -184,11 +194,15 @@ def load_gpt_generator_model(checkpoint_path: str):
         raise KeyError("Checkpoint does not contain 'model_state_dict'.")
 
     config = checkpoint["config"]
+    full_config = adapter_checkpoint["config"] if adapter_checkpoint else config
 
     if "GPTConfig" not in config:
         raise KeyError("Checkpoint config does not contain 'GPTConfig'.")
 
     gpt_config = SimpleNamespace(**config["GPTConfig"])
+    full_config = adapter_checkpoint["config"] if adapter_checkpoint else None
+    training_config = full_config["GPTTrainingConfig"] if full_config else None
+    adapter_config = training_config["Finetune"]["Lora"] if training_config else None
 
     resolved_config = config.get("ResolvedConfig", {})
     tokenizer_dir = resolved_config.get("tokenizer_dir", None)
@@ -243,12 +257,24 @@ def load_gpt_generator_model(checkpoint_path: str):
             8,
         ),
     )
-
+    
     model.load_state_dict(
         checkpoint["model_state_dict"],
         strict=True,
     )
-
+    if adapter_config is not None and adapter_checkpoint is not None:
+        model = add_lora_to_attention_layers(
+            model,
+            r=adapter_config["lora_r"],
+            alpha=adapter_config["lora_alpha"],
+            dropout=0.0,
+            use_k_proj=adapter_config["lora_use_k_proj"],
+        )
+        model.load_state_dict(
+            adapter_checkpoint["adapter_state_dict"],
+            strict=False,
+        )
+        st.info(f"Loaded adapter from {adapter_checkpoint_path} with LoRA configuration: r={adapter_config['lora_r']}, alpha={adapter_config['lora_alpha']}, use_k_proj={adapter_config['lora_use_k_proj']}")
     model.to(device)
     model.eval()
 
@@ -280,10 +306,17 @@ divider()
 section_title("Select GPT Generator Model")
 
 selected_model = st.text_input(
-    "Model checkpoint path",
+    "Base model checkpoint path",
     value=str(PROJECT_ROOT / "checkpoints" / "best_model.pt"),
     placeholder="Enter the path to the GPT generator checkpoint.",
     help="Path to best_model.pt or last_model.pt.",
+)
+
+selected_adapter = st.text_input(
+    "Adapter checkpoint path",
+    value=str(PROJECT_ROOT / "checkpoints" / "best_adapter.pt"),
+    placeholder="Enter the path to the adapter checkpoint.",
+    help="Path to best_adapter.pt or last_adapter.pt.",
 )
 
 num_molecules = st.number_input(
@@ -381,7 +414,8 @@ if generate_clicked:
             config,
             condition_tokens,
             tokenizer_path,
-        ) = load_gpt_generator_model(str(checkpoint_path))
+        ) = load_gpt_generator_model(str(checkpoint_path),
+                                     str(selected_adapter) if selected_adapter else None)
 
     except Exception as e:
         st.error("Failed to load GPT generator model.")

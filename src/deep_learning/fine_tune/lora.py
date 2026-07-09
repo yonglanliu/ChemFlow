@@ -39,3 +39,61 @@ class LoRALinear(nn.Module):
         return self.base_layer(x) + self.lora_B(
             self.lora_A(self.dropout(x))
         ) * self.scaling
+
+def add_lora_to_attention_layers(
+    model: nn.Module,
+    r: int = 8,
+    alpha: int = 16,
+    dropout: float = 0.05,
+    use_k_proj: bool = False,
+) -> nn.Module:
+    for block in model.blocks:
+        block.attention_layer.q_proj = LoRALinear(
+            block.attention_layer.q_proj,
+            r=r,
+            alpha=alpha,
+            dropout=dropout,
+        )
+
+        block.attention_layer.v_proj = LoRALinear(
+            block.attention_layer.v_proj,
+            r=r,
+            alpha=alpha,
+            dropout=dropout,
+        )
+
+        if use_k_proj:
+            block.attention_layer.k_proj = LoRALinear(
+                block.attention_layer.k_proj,
+                r=r,
+                alpha=alpha,
+                dropout=dropout,
+            )
+
+    return model
+
+
+def add_lora_to_ffn_layers(
+    model: nn.Module,
+    r: int = 4,
+    alpha: int = 16,
+    dropout: float = 0.05,
+    use_fc2: bool = False,
+) -> nn.Module:
+    for block in model.blocks:
+        block.ffn[0] = LoRALinear(
+            block.ffn[0],
+            r=r,
+            alpha=alpha,
+            dropout=dropout,
+        )
+
+        if use_fc2:
+            block.ffn[2] = LoRALinear(
+                block.ffn[2],
+                r=r,
+                alpha=alpha,
+                dropout=dropout,
+            )
+
+    return model
