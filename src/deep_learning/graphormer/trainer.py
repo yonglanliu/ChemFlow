@@ -49,6 +49,7 @@ from src.deep_learning.utils import (
     set_seed,
     setup_distributed,
     step_scheduler,
+    unwrap_model,
 )
 from functools import partial
 
@@ -110,8 +111,8 @@ def config_get(config: Any, key: str, default: Any = None) -> Any:
     return getattr(config, key, default)
 
 
-def unwrap_model(model: nn.Module) -> nn.Module:
-    return model.module if isinstance(model, DDP) else model
+# def unwrap_model(model: nn.Module) -> nn.Module:
+#     return model.module if isinstance(model, DDP) else model
 
 
 def move_batch_to_device(batch: Any, device: torch.device) -> Any:
@@ -884,27 +885,122 @@ class GraphormerDDPTrainer:
         device: torch.device | str = "cpu",
         fallback_best_metric: float = float("inf"),
     ) -> dict:
-        checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+        checkpoint_path = Path(
+            checkpoint_path
+        ).expanduser().resolve()
+
         if not checkpoint_path.is_file():
-            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+            raise FileNotFoundError(
+                f"Checkpoint not found: {checkpoint_path}"
+            )
 
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        unwrap_model(model).load_state_dict(checkpoint["model_state_dict"], strict=True)
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+        )
 
-        if optimizer is not None and checkpoint.get("optimizer_state_dict"):
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            move_optimizer_state_to_device(optimizer, torch.device(device))
-        if scheduler is not None and checkpoint.get("scheduler_state_dict"):
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        model_to_load = unwrap_model(model)
 
-        return {
-            "start_epoch": int(checkpoint.get("epoch", 0)) + 1,
-            "best_metric": float(checkpoint.get("best_metric", fallback_best_metric)),
-            "best_epoch": int(checkpoint.get("best_epoch", 0)),
-            "patience_counter": int(checkpoint.get("patience_counter", 0)),
-            "history": checkpoint.get("history"),
-            "checkpoint_path": str(checkpoint_path),
-        }
+        # ============================================================
+        # Full training checkpoint
+        # ============================================================
+        if "model_state_dict" in checkpoint:
+            model_to_load.load_state_dict(
+                checkpoint["model_state_dict"],
+                strict=True,
+            )
+
+            if (
+                optimizer is not None
+                and checkpoint.get("optimizer_state_dict")
+            ):
+                optimizer.load_state_dict(
+                    checkpoint["optimizer_state_dict"]
+                )
+                move_optimizer_state_to_device(
+                    optimizer,
+                    torch.device(device),
+                )
+
+            if (
+                scheduler is not None
+                and checkpoint.get("scheduler_state_dict")
+            ):
+                scheduler.load_state_dict(
+                    checkpoint["scheduler_state_dict"]
+                )
+
+            return {
+                "start_epoch": int(
+                    checkpoint.get("epoch", 0)
+                ) + 1,
+                "best_metric": float(
+                    checkpoint.get(
+                        "best_metric",
+                        fallback_best_metric,
+                    )
+                ),
+                "best_epoch": int(
+                    checkpoint.get(
+                        "best_epoch",
+                        checkpoint.get("epoch", 0),
+                    )
+                ),
+                "patience_counter": int(
+                    checkpoint.get(
+                        "patience_counter",
+                        0,
+                    )
+                ),
+                "history": checkpoint.get("history"),
+                "checkpoint_path": str(checkpoint_path),
+                "checkpoint_type": "full",
+            }
+
+        # ============================================================
+        # Adapter-only checkpoint
+        # ============================================================
+        if "adapter_state_dict" in checkpoint:
+            incompatible = model_to_load.load_state_dict(
+                checkpoint["adapter_state_dict"],
+                strict=False,
+            )
+
+            if incompatible.unexpected_keys:
+                raise RuntimeError(
+                    "Unexpected adapter checkpoint keys: "
+                    f"{incompatible.unexpected_keys}"
+                )
+
+            print(
+                f"Loaded adapter checkpoint from "
+                f"{checkpoint_path}"
+            )
+            print(
+                f"Missing keys are expected for the frozen "
+                f"base encoder: {len(incompatible.missing_keys)}"
+            )
+
+            # Adapter loading is not a strict resume:
+            # optimizer/scheduler/history start fresh.
+            return {
+                "start_epoch": int(
+                    checkpoint.get("epoch", 0)
+                ) + 1,
+                "best_metric": fallback_best_metric,
+                "best_epoch": 0,
+                "patience_counter": 0,
+                "history": None,
+                "checkpoint_path": str(checkpoint_path),
+                "checkpoint_type": "adapter",
+            }
+
+        raise KeyError(
+            "Unsupported checkpoint format. Expected either "
+            "'model_state_dict' for a full checkpoint or "
+            "'adapter_state_dict' for an adapter checkpoint. "
+            f"Available keys: {list(checkpoint.keys())}"
+        )
 
     def append_history_csv(
         self,
@@ -960,7 +1056,7 @@ class GraphormerDDPTrainer:
             plt.close()
 
         for name, values in history.items():
-            if name.startswith("val_") and name != "val_loss" and len(values) == len(epochs):
+            if (name.startswith("val_") or name.endswith("_lr")) and name != "val_loss" and len(values) == len(epochs):
                 plt.figure(figsize=(7, 5))
                 plt.plot(epochs, values)
                 plt.xlabel("Epoch")
@@ -969,16 +1065,16 @@ class GraphormerDDPTrainer:
                 plt.savefig(output_dir / f"{name}.png", dpi=dpi)
                 plt.close()
 
-        if "learning_rates" in history and len(history["learning_rates"]) == len(epochs):
-            plt.figure(figsize=(7, 5))
-            for name, values in history["learning_rates"].items():
-                plt.plot(epochs, values, label=name)
-            plt.xlabel("Epoch")
-            plt.ylabel("Learning Rate")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(output_dir / "learning_rates.png", dpi=dpi)
-            plt.close()
+        # if "learning_rates" in history and len(history["learning_rates"]) == len(epochs):
+        #     plt.figure(figsize=(7, 5))
+        #     for name, values in history["learning_rates"].items():
+        #         plt.plot(epochs, values, label=name)
+        #     plt.xlabel("Epoch")
+        #     plt.ylabel("Learning Rate")
+        #     plt.legend()
+        #     plt.tight_layout()
+        #     plt.savefig(output_dir / "learning_rates.png", dpi=dpi)
+        #     plt.close()
 
     def load_dataset(
         self,
