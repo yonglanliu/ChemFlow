@@ -37,11 +37,35 @@ def namespace_to_dict(obj: Any) -> Any:
 
     return obj
 
-def save_json(data: dict, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _json_default(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    raise TypeError(
+        f"{type(obj)} is not JSON serializable."
+    )
+
+def save_json(
+    data,
+    path: str | Path,
+):
+    path = Path(path)
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            data,
+            f,
+            indent=4,
+            ensure_ascii=False,
+            default=_json_default,
+        )
 
 
 # ============================================================

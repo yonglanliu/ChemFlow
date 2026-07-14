@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Optional
 
 import matplotlib.pyplot as plt
+from sklearn.metrics import ConfusionMatrixDisplay
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -24,7 +25,7 @@ from src.deep_learning.graphormer.config import (
 )
 from src.deep_learning.graphormer.evaluation.classification import ClassificationEvaluator
 from src.deep_learning.graphormer.evaluation.regression import RegressionEvaluator
-from src.deep_learning.graphormer.models.graphormer_fine_tune_model import (
+from src.deep_learning.graphormer.models.graphormer_finetune_model import (
     GraphormerFineTuneClassificationModel,
     GraphormerFineTuneRegressionModel,
 )
@@ -52,6 +53,7 @@ from src.deep_learning.utils import (
     unwrap_model,
 )
 from functools import partial
+import numpy as np
 
 def update_dataclass_from_config(target: Any, source: Any, *, strict: bool = False) -> Any:
     if not is_dataclass(target):
@@ -268,13 +270,7 @@ class GraphormerDDPTrainer:
         if not self.config_path.is_file():
             raise FileNotFoundError(f"Config file does not exist: {self.config_path}")
 
-        (
-            self.base_config,
-            self.training_config,
-            raw_model_config,
-            featurizer_config,
-            self.dataset_config,
-        ) = self.load_configs()
+        (self.base_config, self.training_config, raw_model_config, self.featurizer_config, self.dataset_config) = self.load_configs()
 
         set_seed(int(config_get(self.training_config, "seed", 42)) + get_rank())
 
@@ -306,8 +302,34 @@ class GraphormerDDPTrainer:
             # Intentionally update only from GraphormerConfig.
             self.model_config = update_dataclass_from_config(config, raw_model_config)
             self.model = GraphormerFineTuneClassificationModel(cfg=self.model_config)
+            loss_type = self.model_config.loss_type.lower()
+            num_classes = int(self.model_config.num_classes)
+
+            if loss_type == "bce":
+                evaluator_loss_type = "binary"
+
+            elif loss_type == "cross_entropy":
+                if num_classes == 2:
+                    evaluator_loss_type = "binary"
+                elif num_classes > 2:
+                    evaluator_loss_type = "multiclass"
+                else:
+                    raise ValueError(
+                        "cross_entropy requires num_classes >= 2, "
+                        f"got num_classes={num_classes}."
+                    )
+
+            else:
+                raise ValueError(
+                    f"Unsupported classification loss_type: {loss_type!r}. "
+                    "Expected 'bce' or 'cross_entropy'."
+                )
+
+            main_print(
+                f"Using evaluator task type: {evaluator_loss_type}"
+            )
             self.evaluator = ClassificationEvaluator(
-                loss_type=self.model_config.loss_type,
+                loss_type=evaluator_loss_type,
                 num_classes=self.model_config.num_classes,
             )
         else:
@@ -316,7 +338,7 @@ class GraphormerDDPTrainer:
             )
 
         if hasattr(self.model_config, "multi_hop_max_dist"):
-            featurizer_config.multi_hop_max_dist = self.model_config.multi_hop_max_dist
+            self.featurizer_config.multi_hop_max_dist = self.model_config.multi_hop_max_dist
             self.dataset_config.multi_hop_max_dist = self.model_config.multi_hop_max_dist
         if hasattr(self.model_config, "max_nodes"):
             self.dataset_config.max_nodes = self.model_config.max_nodes
@@ -326,14 +348,14 @@ class GraphormerDDPTrainer:
         # -------------------------------------------------------------
         # Setup featurizer
         # -------------------------------------------------------------
-        self.featurizer = GraphormerFeaturizer(**namespace_to_dict(featurizer_config))
+        self.featurizer = GraphormerFeaturizer(**namespace_to_dict(self.featurizer_config))
         self._print_featurizer_tokens()
 
 
         # -------------------------------------------------------------
         # Load dataset and create DataLoaders
         # -------------------------------------------------------------
-        self.train_loader, self.val_loader, self.train_sampler = self.load_dataset(
+        (self.train_loader, self.val_loader, self.test_loader, self.train_sampler) = self.load_dataset(
             dataset_config=self.dataset_config,
             featurizer=self.featurizer,
             cache_dir=self.cache_dir,
@@ -383,6 +405,9 @@ class GraphormerDDPTrainer:
                 "GraphormerTrainingConfig": config_to_dict(self.training_config),
                 "GraphormerConfig": config_to_dict(self.model_config),
                 "DatasetConfig": config_to_dict(self.dataset_config),
+                "FeaturizerConfig": config_to_dict(
+                    self.featurizer_config
+                ),
                 "ResolvedConfig": {
                     "workdir": str(self.workdir),
                     "checkpoint_dir": str(self.checkpoint_dir),
@@ -448,12 +473,54 @@ class GraphormerDDPTrainer:
                 },
             )
 
+            # Save final training history and best model checkpoint
             if is_main_process():
                 torch.save(history, self.checkpoint_dir / "history.pt")
                 save_json(history, self.checkpoint_dir / "history.json")
                 print(f"Best model saved to {best_path}")
                 if bool(config_get(self.training_config, "plot_training_history", True)):
                     self.plot_training_history(history, self.workdir / "plots")
+
+            # -------------------------------------------------------------
+            # Evaluate on hold-out test set if available
+            # -------------------------------------------------------------
+            if bool(config_get(self.training_config, "evaluate_test", True)) and self.test_loader is not None:
+                barrier()
+
+                best_checkpoint = self.load_model_checkpoint(checkpoint_path=best_path, model=self.model, device=self.device)
+
+                barrier()
+
+                test_metrics, curve_data = self.evaluate(model=self.model, loader=self.test_loader, device=self.device, prefix="test", return_curve_data=True)
+
+                if is_main_process():
+                    
+                    save_json(
+                        {
+                            "checkpoint": str(best_path),
+                            "best_epoch": int(
+                                best_checkpoint.get("best_epoch", 0)
+                            ),
+                            **test_metrics,
+                        },
+                        self.workdir / "test_metrics.json",
+                    )
+
+                    if curve_data is not None:
+                        save_json(curve_data, self.workdir / "test_curve_data.json")
+                        self.plot_classification_curves(
+                            curve_data=curve_data,
+                            output_dir=self.workdir / "plots",
+                            prefix="test",
+                        )
+
+
+                    print(f"Best model loaded from {best_path}")
+
+                    print("[Hold-out Test] " + " ".join(f"{name}={value:.4f}" for name, value in test_metrics.items()))
+
+                    # if bool(config_get(self.training_config, "plot_evaluation_metrics", True)):
+                    #     self.plot_training_history(history, self.workdir / "plots")
         finally:
             cleanup_distributed()
 
@@ -697,61 +764,81 @@ class GraphormerDDPTrainer:
         return float(loss.detach().item())
 
     @torch.no_grad()
-    def evaluate(
-        self,
-        model: nn.Module,
-        loader: DataLoader,
-        device: torch.device,
-    ) -> dict[str, float]:
+    def evaluate(self, model: nn.Module, loader: DataLoader, device: torch.device, prefix: str = "val", return_curve_data: bool = False) -> dict[str, float]:
+
         model.eval()
+
         predictions_list = []
         targets_list = []
+
         total_loss = 0.0
         total_samples = 0
 
-        for batch in tqdm(loader, desc="Validation", disable=disable_tqdm()):
+        description = ("Validation" if prefix == "val" else "Hold-out test")
+
+        for batch in tqdm(loader, desc=description, disable=disable_tqdm()):
+
             batch = move_batch_to_device(batch, device)
             outputs = self.forward_batch(model, batch)
-            loss = self.extract_loss(outputs)
-
+            loss = self.extract_loss(outputs)  
             predictions = outputs.get("predictions", outputs.get("logits"))
+
             if predictions is None:
                 raise KeyError("Output must contain predictions or logits.")
 
-            targets = batch.get("y") if isinstance(batch, dict) else getattr(batch, "y", None)
+            # if batch is a dict, get targets from 'y'; if it's an object, get targets from attribute 'y'
+            targets = (batch.get("y") if isinstance(batch, dict) else getattr(batch, "y", None))
+
             if targets is None:
-                raise KeyError("Validation batch does not contain y.")
+                raise KeyError(f"{description} batch does not contain y.")
 
             batch_size = int(targets.size(0))
+
             total_loss += float(loss.item()) * batch_size
             total_samples += batch_size
+
             predictions_list.append(predictions.detach())
             targets_list.append(targets.detach())
 
         if not predictions_list:
-            raise RuntimeError("Validation loader produced no batches.")
+            raise RuntimeError(f"{description} loader produced no batches.")
 
+        # Combine predictions and targets across all batches
         local_predictions = torch.cat(predictions_list, dim=0)
         local_targets = torch.cat(targets_list, dim=0)
+
         training_dtype = next(model.parameters()).dtype
-        loss_stats = torch.tensor(
-            [total_loss, total_samples],
-            dtype=training_dtype,
-            device=device,
-        )
+
+        # Combine loss and sample counts across all processes
+        loss_stats = torch.tensor([total_loss, total_samples], dtype=training_dtype, device=device)
+
+        # Use all_reduce to sum the loss and sample counts across all processes
         if is_dist_available_and_initialized():
             dist.all_reduce(loss_stats, op=dist.ReduceOp.SUM)
-        val_loss = float((loss_stats[0] / loss_stats[1].clamp_min(1)).item())
+
+        average_loss = float((loss_stats[0] / loss_stats[1].clamp_min(1)).item())
 
         predictions = self.gather_variable_tensors(local_predictions).cpu()
         targets = self.gather_variable_tensors(local_targets).cpu()
 
-        metrics = self.evaluator.compute(
+        metrics = self.evaluator.compute(predictions=predictions, targets=targets, loss=average_loss, prefix=prefix)
+        metrics = {name: float(value) for name, value in metrics.items()}
+
+        if not return_curve_data:
+            return metrics
+
+        if not isinstance(
+            self.evaluator,
+            ClassificationEvaluator,
+        ):
+            return metrics, {}
+
+        curve_data = self.evaluator.compute_curve_data(
             predictions=predictions,
             targets=targets,
-            loss=val_loss,
         )
-        return {name: float(value) for name, value in metrics.items()}
+
+        return metrics, curve_data
 
     @staticmethod
     def gather_variable_tensors(tensor: torch.Tensor) -> torch.Tensor:
@@ -775,10 +862,8 @@ class GraphormerDDPTrainer:
 
         gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
         dist.all_gather(gathered, tensor)
-        return torch.cat(
-            [item[:size] for item, size in zip(gathered, sizes_int)],
-            dim=0,
-        )
+
+        return torch.cat([item[:size] for item, size in zip(gathered, sizes_int)], dim=0)
 
     @staticmethod
     def forward_batch(model: nn.Module, batch: Any) -> Any:
@@ -1065,16 +1150,6 @@ class GraphormerDDPTrainer:
                 plt.savefig(output_dir / f"{name}.png", dpi=dpi)
                 plt.close()
 
-        # if "learning_rates" in history and len(history["learning_rates"]) == len(epochs):
-        #     plt.figure(figsize=(7, 5))
-        #     for name, values in history["learning_rates"].items():
-        #         plt.plot(epochs, values, label=name)
-        #     plt.xlabel("Epoch")
-        #     plt.ylabel("Learning Rate")
-        #     plt.legend()
-        #     plt.tight_layout()
-        #     plt.savefig(output_dir / "learning_rates.png", dpi=dpi)
-        #     plt.close()
 
     def load_dataset(
         self,
@@ -1105,6 +1180,11 @@ class GraphormerDDPTrainer:
         train_dataset = GraphormerMoleculeDataset(manifest["train"])
         val_dataset = GraphormerMoleculeDataset(manifest["val"])
 
+        if bool(config_get(self.training_config, "evaluate_test", True)) and config_get(dataset_config, "test_fraction", 0.0) > 0.0:
+            test_dataset = GraphormerMoleculeDataset(manifest["test"])
+        else:
+            test_dataset = None
+
         if distributed:
             train_sampler = DistributedSampler(
                 train_dataset,
@@ -1120,10 +1200,22 @@ class GraphormerDDPTrainer:
                 shuffle=False,
                 drop_last=False,
             )
+            if test_dataset is not None:
+                test_sampler = DistributedSampler(
+                    test_dataset,
+                    num_replicas=get_world_size(),
+                    rank=get_rank(),
+                    shuffle=False,
+                    drop_last=False,
+                )
+            else:
+                test_sampler = None
+
             shuffle = False
         else:
             train_sampler = None
             val_sampler = None
+            test_sampler = None
             shuffle = True
 
         collate_fn = partial(
@@ -1156,7 +1248,19 @@ class GraphormerDDPTrainer:
             drop_last=False,
             **common,
         )
-        return train_loader, val_loader, train_sampler
+
+        test_loader = None
+
+        if test_dataset is not None:
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=int(config_get(training_config,"eval_batch_size",training_config.batch_size,)),
+                shuffle=False,
+                sampler=test_sampler,
+                drop_last=False,
+                **common,
+            )
+        return (train_loader, val_loader, test_loader, train_sampler)
 
     @staticmethod
     def print_trainable_parameters(model: nn.Module) -> None:
@@ -1197,3 +1301,295 @@ class GraphormerDDPTrainer:
             raise KeyError(f"Missing TOML sections: {missing}")
 
         return tuple(dict_to_namespace(config[name]) for name in sections)
+
+    def load_model_checkpoint(
+        self,
+        checkpoint_path: str | Path,
+        model: nn.Module,
+        device: torch.device | str = "cpu",
+    ) -> dict:
+        checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model_to_load = unwrap_model(model)
+
+        if "model_state_dict" in checkpoint:
+            model_to_load.load_state_dict(checkpoint["model_state_dict"], strict=True)
+            print(f"Loaded full model checkpoint from {checkpoint_path}")
+            return checkpoint
+
+        if "adapter_state_dict" in checkpoint:
+            incompatible = model_to_load.load_state_dict(
+                checkpoint["adapter_state_dict"], strict=False
+            )
+            if incompatible.unexpected_keys:
+                raise RuntimeError(
+                    f"Unexpected adapter checkpoint keys: {incompatible.unexpected_keys}"
+                )
+            print(f"Loaded adapter checkpoint from {checkpoint_path}")
+            print(
+                f"Missing keys are expected for the frozen base encoder: "
+                f"{len(incompatible.missing_keys)}"
+            )
+            return checkpoint
+
+        raise KeyError(
+            "Unsupported checkpoint format. Expected either 'model_state_dict' for a full "
+            "checkpoint or 'adapter_state_dict' for an adapter checkpoint. "
+            f"Available keys: {list(checkpoint.keys())}"
+        )
+    def plot_classification_curves(
+        self,
+        curve_data: dict[str, Any],
+        output_dir: str | Path,
+        prefix: str = "test",
+    ) -> None:
+        """
+        Plot ROC curve, precision-recall curve, and confusion matrix.
+
+        Parameters
+        ----------
+        curve_data
+            Curve data returned by ClassificationEvaluator.compute_curve_data().
+
+        output_dir
+            Directory in which plots will be saved.
+
+        prefix
+            Filename prefix, such as ``"test"``.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        dpi = int(
+            config_get(
+                self.training_config,
+                "plot_dpi",
+                300,
+            )
+        )
+
+        prefix = prefix.rstrip("_")
+
+        if "roc" in curve_data:
+            self._plot_roc_curve(
+                roc_data=curve_data["roc"],
+                output_path=output_dir / f"{prefix}_roc_curve.png",
+                dpi=dpi,
+            )
+
+        if "pr" in curve_data:
+            self._plot_precision_recall_curve(
+                pr_data=curve_data["pr"],
+                output_path=output_dir / f"{prefix}_pr_curve.png",
+                dpi=dpi,
+            )
+
+        if "confusion_matrix" in curve_data:
+            self._plot_confusion_matrix(
+                matrix=curve_data["confusion_matrix"],
+                output_path=output_dir / f"{prefix}_confusion_matrix.png",
+                dpi=dpi,
+                class_names=curve_data.get("class_names"),
+            )
+
+
+    @staticmethod
+    def _plot_roc_curve(
+        roc_data: dict[str, Any],
+        output_path: str | Path,
+        dpi: int = 300,
+    ) -> None:
+        """
+        Plot a binary ROC curve.
+        """
+        fpr = np.asarray(roc_data["fpr"], dtype=np.float64)
+        tpr = np.asarray(roc_data["tpr"], dtype=np.float64)
+
+        if fpr.shape != tpr.shape:
+            raise ValueError(
+                "ROC fpr and tpr must have the same shape, "
+                f"got {fpr.shape} and {tpr.shape}."
+            )
+
+        auc_value = roc_data.get("auc")
+
+        plt.figure(figsize=(7, 6))
+
+        if auc_value is None:
+            plt.plot(
+                fpr,
+                tpr,
+                linewidth=2,
+                label="ROC curve",
+            )
+        else:
+            plt.plot(
+                fpr,
+                tpr,
+                linewidth=2,
+                label=f"ROC curve (AUC = {float(auc_value):.4f})",
+            )
+
+        # Random-classifier baseline.
+        plt.plot(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            linestyle="--",
+            linewidth=1.5,
+            label="Random classifier",
+        )
+
+        plt.xlim(0.0, 1.0)
+        plt.ylim(0.0, 1.05)
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title("Receiver Operating Characteristic")
+        plt.legend(loc="lower right")
+        plt.grid(alpha=0.25)
+        plt.tight_layout()
+
+        plt.savefig(
+            output_path,
+            dpi=dpi,
+            bbox_inches="tight",
+        )
+        plt.close()
+
+
+    @staticmethod
+    def _plot_precision_recall_curve(
+        pr_data: dict[str, Any],
+        output_path: str | Path,
+        dpi: int = 300,
+    ) -> None:
+        """
+        Plot a binary precision-recall curve.
+        """
+        precision = np.asarray(
+            pr_data["precision"],
+            dtype=np.float64,
+        )
+        recall = np.asarray(
+            pr_data["recall"],
+            dtype=np.float64,
+        )
+
+        if precision.shape != recall.shape:
+            raise ValueError(
+                "PR precision and recall must have the same shape, "
+                f"got {precision.shape} and {recall.shape}."
+            )
+
+        average_precision = pr_data.get("average_precision")
+        positive_prevalence = pr_data.get("positive_prevalence")
+
+        plt.figure(figsize=(7, 6))
+
+        if average_precision is None:
+            plt.plot(
+                recall,
+                precision,
+                linewidth=2,
+                label="Precision–recall curve",
+            )
+        else:
+            plt.plot(
+                recall,
+                precision,
+                linewidth=2,
+                label=(
+                    "Precision–recall curve "
+                    f"(AP = {float(average_precision):.4f})"
+                ),
+            )
+
+        # For PR curves, the random baseline is the positive-class prevalence.
+        if positive_prevalence is not None:
+            prevalence = float(positive_prevalence)
+
+            plt.axhline(
+                y=prevalence,
+                linestyle="--",
+                linewidth=1.5,
+                label=f"Baseline = {prevalence:.4f}",
+            )
+
+        plt.xlim(0.0, 1.0)
+        plt.ylim(0.0, 1.05)
+        plt.xlabel("Recall")
+        plt.ylabel("Precision")
+        plt.title("Precision–Recall Curve")
+        plt.legend(loc="lower left")
+        plt.grid(alpha=0.25)
+        plt.tight_layout()
+
+        plt.savefig(
+            output_path,
+            dpi=dpi,
+            bbox_inches="tight",
+        )
+        plt.close()
+
+
+    @staticmethod
+    def _plot_confusion_matrix(
+        matrix: Any,
+        output_path: str | Path,
+        dpi: int = 300,
+        class_names: list[str] | None = None,
+    ) -> None:
+        """
+        Plot a confusion matrix.
+        """
+        matrix = np.asarray(matrix)
+
+        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            raise ValueError(
+                "Confusion matrix must be a square 2D array, "
+                f"got shape {matrix.shape}."
+            )
+
+        num_classes = matrix.shape[0]
+
+        if class_names is None:
+            class_names = [
+                str(index)
+                for index in range(num_classes)
+            ]
+
+        if len(class_names) != num_classes:
+            raise ValueError(
+                "class_names length must match confusion-matrix size: "
+                f"{len(class_names)} versus {num_classes}."
+            )
+
+        figure_size = max(6.0, num_classes * 1.2)
+
+        figure, axis = plt.subplots(
+            figsize=(figure_size, figure_size),
+        )
+
+        display = ConfusionMatrixDisplay(
+            confusion_matrix=matrix,
+            display_labels=class_names,
+        )
+
+        display.plot(
+            ax=axis,
+            values_format="d",
+            colorbar=False,
+        )
+
+        axis.set_title("Confusion Matrix")
+        figure.tight_layout()
+
+        figure.savefig(
+            output_path,
+            dpi=dpi,
+            bbox_inches="tight",
+        )
+        plt.close(figure)
