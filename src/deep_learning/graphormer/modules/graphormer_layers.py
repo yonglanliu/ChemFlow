@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
-from src.deep_learning.graphormer.multihead_attention import MultiheadAttention
+from src.deep_learning.graphormer.modules.multihead_attention import MultiheadAttention
 from src.deep_learning.utils.quant_noise import quant_noise
 import math
 

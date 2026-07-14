@@ -22,20 +22,20 @@ def train_gpt(args):
     trainer.train()
 
 
-# def train_graphormer(args):
-#     from src.deep_learning.graphormer.trainer import GraphormerTrainer
+def train_graphormer(args):
+    from src.deep_learning.graphormer.trainer import GraphormerDDPTrainer
 
-#     config_path = Path(args.config).expanduser().resolve()
+    config_path = Path(args.config).expanduser().resolve()
 
-#     if not config_path.exists():
-#         raise FileNotFoundError(f"Config file not found: {config_path}")
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
-#     set_seed(args.seed)
+    set_seed(args.seed)
 
-#     trainer = GraphormerTrainer(
-#         config_dir=config_path,
-#     )
-#     trainer.train()
+    trainer = GraphormerDDPTrainer(
+        config_path=config_path,
+    )
+    trainer.train()
 
 
 def add_train_parser(subparsers):
@@ -59,10 +59,10 @@ def add_train_parser(subparsers):
 
 
 
-    # graphormer_parser = model_subparsers.add_parser(
-    #     "graphormer",
-    #     help="Train Graphormer model",
-    # )
-    # graphormer_parser.add_argument("config", type=str)
-    # graphormer_parser.add_argument("--seed", type=int, default=42)
-    # graphormer_parser.set_defaults(func=train_graphormer)
+    graphormer_parser = model_subparsers.add_parser(
+        "graphormer",
+        help="Train Graphormer model",
+    )
+    graphormer_parser.add_argument("config", type=str)
+    graphormer_parser.add_argument("--seed", type=int, default=42)
+    graphormer_parser.set_defaults(func=train_graphormer)

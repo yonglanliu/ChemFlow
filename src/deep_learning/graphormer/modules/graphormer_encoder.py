@@ -11,9 +11,9 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from src.deep_learning.graphormer.multihead_attention import MultiheadAttention
+from src.deep_learning.graphormer.modules import MultiheadAttention
 from src.deep_learning.utils.quant_noise import quant_noise
-from src.deep_learning.graphormer.graphormer_layers import (
+from src.deep_learning.graphormer.modules.graphormer_layers import (
     GraphormerGraphEncoderLayer,
     GraphNodeFeature,
     GraphAttnBias,

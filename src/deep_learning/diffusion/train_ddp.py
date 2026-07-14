@@ -48,7 +48,7 @@ from src.deep_learning.graphormer import (
     GraphormerFeaturizer,
 )
 
-from src.deep_learning.graphormer.dataset import (
+from src.deep_learning.graphormer.modules.dataset import (
     GraphormerMoleculeDataset,
     featurize_and_cache_dataset,
 )

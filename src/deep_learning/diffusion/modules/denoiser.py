@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from src.deep_learning.graphormer.graphormer_encoder import GraphormerGraphEncoder
+from src.deep_learning.graphormer.modules.graphormer_encoder import GraphormerGraphEncoder
 
 class GraphormerDenoiser(nn.Module):
     def __init__(

@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 
-def _iter_smiles_batches(dataset_path: Path, smiles_column: str, batch_size: int):
+def _iter_smiles_batches(dataset_path: Path, smiles_column: str, batch_size: int, target_column: str | None = None):
     suffix = dataset_path.suffix.lower()
 
     if suffix in [".parquet", ".pq"]:
@@ -17,28 +17,44 @@ def _iter_smiles_batches(dataset_path: Path, smiles_column: str, batch_size: int
 
         for batch in parquet_file.iter_batches(
             batch_size=batch_size,
-            columns=[smiles_column],
+            columns=[smiles_column] + ([target_column] if target_column is not None else []),
         ):
             df = batch.to_pandas()
+            if target_column is not None:
+                df = df[[smiles_column, target_column]].dropna(subset=[smiles_column, target_column])
             smiles = (
                 df[smiles_column]
-                .dropna()
                 .astype(str)
                 .str.strip()
                 .tolist()
             )
-            yield smiles
+            if target_column is not None:
+                targets = df[target_column].tolist()
+                yield smiles, targets
+            else:
+                yield smiles
 
     elif suffix == ".csv":
         for df in pd.read_csv(dataset_path, chunksize=batch_size):
-            smiles = (
-                df[smiles_column]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
-            )
-            yield smiles
+            if target_column is not None:
+                df = df[[smiles_column, target_column]].dropna(subset=[smiles_column, target_column])
+                smiles = (
+                    df[smiles_column]
+                    .astype(str)
+                    .str.strip()
+                    .tolist()
+                )
+                targets = df[target_column].tolist()
+                yield smiles, targets
+            else:
+                smiles = (
+                    df[smiles_column]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .tolist()
+                )
+                yield smiles
 
     elif suffix == ".json":
         df = pd.read_json(dataset_path)
@@ -52,6 +68,8 @@ def _iter_smiles_batches(dataset_path: Path, smiles_column: str, batch_size: int
         yield smiles
 
     elif suffix == ".smi":
+        if target_column is not None:
+            raise ValueError("Target column is not supported for .smi files.")
         smiles = []
 
         with dataset_path.open("r") as f:
