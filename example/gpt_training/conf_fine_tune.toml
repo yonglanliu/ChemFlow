@@ -85,7 +85,7 @@ lora_use_fc2 = false
 
 [DatasetConfig]
 
-dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/combined/combined_pivot.parquet"
+dataset_path = "./dataset/combined/combined_pivot.parquet"
 
 smiles_column = "SMILES"
 

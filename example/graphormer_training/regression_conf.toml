@@ -1,0 +1,117 @@
+# ============================================================
+# Base
+# ============================================================
+
+[BaseConfig]
+
+workdir = "./example/graphormer_training_regression"
+
+task = "regression"
+
+seed = 42
+
+
+# ============================================================
+# Dataset
+# ============================================================
+
+[DatasetConfig]
+
+dataset_path = "./example/dataset/combined/pi3k_alpha_combined_labeled.csv"
+
+smiles_column = "SMILES"
+target_column = "pIC50"  # Replace with the actual target column
+
+val_fraction = 0.1
+test_fraction = 0.1
+
+preprocess_batch_size = 100000
+
+max_nodes = 128
+multi_hop_max_dist = 5
+spatial_pos_max = 1024
+
+reorder_atoms = false
+remove_hs = true
+
+seed = 42
+
+
+# ============================================================
+# Featurizer
+# ============================================================
+
+[FeaturizerConfig]
+
+multi_hop_max_dist = 5
+remove_hs = true
+reorder_atoms = false
+
+
+# ============================================================
+# Training
+# ============================================================
+
+[GraphormerTrainingConfig]
+
+seed = 42
+
+batch_size = 16
+eval_batch_size = 16
+num_epochs = 20
+num_workers = 0
+
+# --- Learning Settings ---
+learning_rate = 1e-4
+encoder_learning_rate = 1e-5
+lora_learning_rate = 1e-4
+head_learning_rate = 1e-4
+weight_decay = 0.01
+scheduler = "cosine"
+gradient_clip_value = 1.0
+
+# --- Plotting Setting ---
+plot_training_history = true
+plot_dpi = 300
+
+# --- Resume Settings ---
+resume = false
+# resume_checkpoint = "/path/to/checkpoints/last_model.pt"
+
+# --- Early Stopping Settings ---
+early_stopping = true
+early_stopping_patience = 10
+monitor_metric = "val_rmse"  # Options: "val_loss", "val_mae", "val_rmse", "val_r2"
+monitor_mode = "min"  # Options: "min", "max"
+
+# --- Evaluate Hold-out Test Set ---
+evaluate_test = true
+plot_evaluation_metrics = true
+
+
+
+# ============================================================
+# Graphormer model and fine-tuning
+# ============================================================
+
+[GraphormerConfig]
+
+pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
+
+freeze_encoder = true
+use_lora = true
+
+head_intermediate_dim = 256
+head_dropout = 0.1
+
+# LoRA
+lora_target = "attention"  # attention | ffn | all
+
+lora_r = 8
+lora_alpha = 16.0
+lora_dropout = 0.1
+apply_lora_to_k_proj = false
+
+lora_ffn_r = 8
+lora_ffn_alpha = 16.0
+lora_use_fc2 = false
