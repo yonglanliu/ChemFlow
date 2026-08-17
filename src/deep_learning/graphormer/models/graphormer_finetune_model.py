@@ -51,22 +51,10 @@ class GraphormerFineTuneRegressionModel(nn.Module):
             apply_graphormer_init=cfg.apply_graphormer_init,
             activation_fn=cfg.activation_fn,
             embed_scale=getattr(cfg, "embed_scale", None),
-            freeze_layer_indices=getattr(
-                cfg,
-                "freeze_layer_indices",
-                None,
-            ),
+            freeze_layer_indices=getattr(cfg, "freeze_layer_indices", None),
             traceable=getattr(cfg, "traceable", False),
-            last_state_only=getattr(
-                cfg,
-                "last_state_only",
-                False,
-            ),
-            use_quant_noise=getattr(
-                cfg,
-                "use_quant_noise",
-                False,
-            ),
+            last_state_only=getattr(cfg, "last_state_only", False),
+            use_quant_noise=getattr(cfg, "use_quant_noise", False),
             q_noise=getattr(cfg, "q_noise", 0.0),
             qn_block_size=getattr(cfg, "qn_block_size", 8),
         )
@@ -122,7 +110,20 @@ class GraphormerFineTuneRegressionModel(nn.Module):
 
         self.print_model_summary()
 
-        self.loss_fn = nn.L1Loss()
+        loss_type = getattr(cfg, "loss_type", "huber").lower()
+        print(f"Using loss_type: {loss_type} for multi-task learning.")
+
+        if loss_type == "mse": # MSE loss is also known as L2 loss
+            self.loss_fn = nn.MSELoss(reduction="mean")
+        elif loss_type == "mae":  # MAE (mean absolute error) is also known as L1 loss
+            self.loss_fn = nn.L1Loss(reduction="mean")
+        elif loss_type == "huber": # Huber loss is less sensitive to outliers than MSE and L1
+            self.loss_fn = nn.HuberLoss(reduction="mean")
+        else:
+            raise ValueError(
+                f"Unsupported loss_type: {loss_type}. "
+                "Expected 'mse', 'mae', or 'huber'."
+            )
 
     def forward(
         self,

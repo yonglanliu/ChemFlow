@@ -39,21 +39,54 @@ def featurize_smiles_list(
     featurizer: GraphormerFeaturizer,
     target_list: list[Any] | None = None,
 ) -> list[Data]:
-    if target_list is not None and len(smiles_list) != len(target_list):
-        raise ValueError(
-            "smiles_list and target_list must have the same length: "
-            f"{len(smiles_list)} vs {len(target_list)}."
-        )
+    """
+    Featurize a list of SMILES strings.
+
+    For multi-task regression, target_list should have shape:
+
+        [num_samples, num_tasks]
+
+    Example:
+        target_list = [
+            [1.2, 0.5, 3.1],
+            [1.8, 0.7, 2.5],
+        ]
+
+    Each resulting Data object will contain:
+
+        data.y.shape == (num_tasks,)
+    """
+
+    if target_list is not None:
+        if len(smiles_list) != len(target_list):
+            raise ValueError(
+                "smiles_list and target_list must have the same length: "
+                f"{len(smiles_list)} vs {len(target_list)}."
+            )
 
     data_list: list[Data] = []
+
     for index, smiles in enumerate(smiles_list):
-        target = target_list[index] if target_list is not None else None
-        data = featurize_smiles(smiles, featurizer)
+        data = featurize_smiles(
+            smiles,
+            featurizer,
+        )
+
+        # Skip invalid SMILES.
         if data is None:
             continue
-        if target is not None:
-            data.y = torch.as_tensor(target)
+
+        if target_list is not None:
+            target = target_list[index]
+
+            data.y = torch.as_tensor(target, dtype=torch.float32)
+            # print(
+            #     f"target={target}, "
+            #     f"data.y.shape={data.y.shape}"
+            # )
+
         data_list.append(data)
+
     return data_list
 
 
@@ -62,11 +95,7 @@ def _filter_smiles_and_targets(
     raw_target_batch: list[Any] | None,
 ) -> tuple[list[str], list[Any] | None]:
     if raw_target_batch is None:
-        smiles_batch = [
-            str(smiles).strip()
-            for smiles in raw_smiles_batch
-            if smiles is not None and str(smiles).strip()
-        ]
+        smiles_batch = [str(smiles).strip() for smiles in raw_smiles_batch if smiles is not None and str(smiles).strip()]
         return smiles_batch, None
 
     if len(raw_smiles_batch) != len(raw_target_batch):
@@ -105,12 +134,10 @@ def _split_batch(
     test_fraction: float,
     rng: np.random.Generator,
 ) -> dict[str, dict[str, list[Any] | None]]:
+    
     random_values = rng.random(len(smiles_batch))
     is_test = random_values < test_fraction
-    is_val = (
-        (random_values >= test_fraction)
-        & (random_values < test_fraction + val_fraction)
-    )
+    is_val = ((random_values >= test_fraction) & (random_values < test_fraction + val_fraction))
 
     train_smiles: list[str] = []
     val_smiles: list[str] = []
@@ -149,29 +176,70 @@ def _split_batch(
         "test": {"smiles": test_smiles, "targets": test_targets},
     }
 
+def _count_task_samples(
+    data_list: list[Data],
+    task_names: list[str],
+) -> dict[str, int]:
+    counts = {task_name: 0 for task_name in task_names}
+
+    for data in data_list:
+        if not hasattr(data, "y") or data.y is None:
+            continue
+
+        y = data.y.reshape(-1)
+
+        if y.numel() != len(task_names):
+            raise ValueError(
+                f"Expected {len(task_names)} targets, "
+                f"but got {y.numel()}."
+            )
+
+        valid_mask = ~torch.isnan(y)
+
+        for i, task_name in enumerate(task_names):
+            if valid_mask[i]:
+                counts[task_name] += 1
+
+    return counts
 
 def _save_shard(
-    split_name: str,
-    smiles_list: list[str],
-    target_list: list[Any] | None,
-    featurizer: GraphormerFeaturizer,
-    split_cache_dir: Path,
-    shard_index: int,
-) -> tuple[str | None, int]:
-    if not smiles_list:
-        return None, 0
-
+    split_name,
+    smiles,
+    targets,
+    featurizer,
+    cache_dir,
+    shard_idx,
+    task_names=None,
+):
     data_list = featurize_smiles_list(
-        smiles_list=smiles_list,
-        featurizer=featurizer,
-        target_list=target_list,
+        smiles,
+        featurizer,
+        targets,
     )
-    if not data_list:
-        return None, 0
 
-    shard_path = split_cache_dir / f"{split_name}_{shard_index:06d}.pt"
-    torch.save(data_list, shard_path)
-    return str(shard_path), len(data_list)
+    if not data_list:
+        return None, 0, {}
+
+    shard_path = cache_dir / f"{split_name}_{shard_idx:05d}.pt"
+
+    torch.save(
+        data_list,
+        shard_path,
+    )
+
+    task_counts = {}
+
+    if task_names is not None:
+        task_counts = _count_task_samples(
+            data_list,
+            task_names,
+        )
+
+    return (
+        str(shard_path),
+        len(data_list),
+        task_counts,
+    )
 
 
 def featurize_and_cache_dataset(
@@ -179,55 +247,223 @@ def featurize_and_cache_dataset(
     featurizer: GraphormerFeaturizer,
     cache_dir: str | Path,
 ) -> dict[str, Any]:
-    dataset_path = Path(dataset_config.dataset_path).expanduser().resolve()
-    cache_dir = Path(cache_dir).expanduser().resolve()
 
-    manifest_path = cache_dir / "graphormer_manifest.pt"
+    dataset_path = (
+        Path(dataset_config.dataset_path)
+        .expanduser()
+        .resolve()
+    )
+
+    cache_dir = (
+        Path(cache_dir)
+        .expanduser()
+        .resolve()
+    )
+
+    manifest_path = (
+        cache_dir / "graphormer_manifest.pt"
+    )
+
     train_cache_dir = cache_dir / "train"
     val_cache_dir = cache_dir / "val"
     test_cache_dir = cache_dir / "test"
 
     if manifest_path.exists():
-        print(f"Loading Graphormer cache manifest from {manifest_path}")
-        return safe_torch_load(manifest_path, map_location="cpu")
+        print(
+            f"Loading Graphormer cache manifest "
+            f"from {manifest_path}"
+        )
+
+        return safe_torch_load(
+            manifest_path,
+            map_location="cpu",
+        )
 
     smiles_column = dataset_config.smiles_column
-    target_column = getattr(dataset_config, "target_column", None)
-    val_fraction = float(getattr(dataset_config, "val_fraction", 0.1))
-    test_fraction = float(getattr(dataset_config, "test_fraction", 0.0))
+
+    target_column = getattr(
+        dataset_config,
+        "target_column",
+        None,
+    )
+
+    # ---------------------------------------------------------
+    # Resolve task names
+    # ---------------------------------------------------------
+
+    if target_column is None:
+        target_columns = []
+        task_names = []
+
+    elif isinstance(target_column, str):
+        target_columns = [target_column]
+        task_names = [target_column]
+
+    else:
+        target_columns = list(target_column)
+
+        task_names = getattr(
+            dataset_config,
+            "task_names",
+            None,
+        )
+
+        if task_names is None:
+            task_names = target_columns
+
+        if len(task_names) != len(target_columns):
+            raise ValueError(
+                f"Number of task names ({len(task_names)}) "
+                f"does not match number of target columns "
+                f"({len(target_columns)})."
+            )
+
+    val_fraction = float(
+        getattr(
+            dataset_config,
+            "val_fraction",
+            0.1,
+        )
+    )
+
+    test_fraction = float(
+        getattr(
+            dataset_config,
+            "test_fraction",
+            0.0,
+        )
+    )
 
     if not 0.0 <= val_fraction < 1.0:
-        raise ValueError(f"val_fraction must be in [0, 1), got {val_fraction}.")
+        raise ValueError(
+            f"val_fraction must be in [0, 1), "
+            f"got {val_fraction}."
+        )
+
     if not 0.0 <= test_fraction < 1.0:
-        raise ValueError(f"test_fraction must be in [0, 1), got {test_fraction}.")
+        raise ValueError(
+            f"test_fraction must be in [0, 1), "
+            f"got {test_fraction}."
+        )
+
     if val_fraction + test_fraction >= 1.0:
-        raise ValueError("val_fraction + test_fraction must be less than 1.")
+        raise ValueError(
+            "val_fraction + test_fraction "
+            "must be less than 1."
+        )
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    train_cache_dir.mkdir(parents=True, exist_ok=True)
-    val_cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    train_cache_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    val_cache_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     if test_fraction > 0.0:
-        test_cache_dir.mkdir(parents=True, exist_ok=True)
+        test_cache_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-    seed = int(getattr(dataset_config, "seed", 42))
-    batch_size = int(getattr(dataset_config, "preprocess_batch_size", 100_000))
-    multi_hop_max_dist = getattr(dataset_config, "multi_hop_max_dist", None)
-    spatial_pos_max = getattr(dataset_config, "spatial_pos_max", None)
-    max_nodes = getattr(dataset_config, "max_nodes", None)
-    remove_hs = getattr(dataset_config, "remove_hs", True)
-    reorder_atoms = getattr(dataset_config, "reorder_atoms", False)
+    seed = int(
+        getattr(
+            dataset_config,
+            "seed",
+            42,
+        )
+    )
+
+    batch_size = int(
+        getattr(
+            dataset_config,
+            "preprocess_batch_size",
+            100_000,
+        )
+    )
+
+    multi_hop_max_dist = getattr(
+        dataset_config,
+        "multi_hop_max_dist",
+        None,
+    )
+
+    spatial_pos_max = getattr(
+        dataset_config,
+        "spatial_pos_max",
+        None,
+    )
+
+    max_nodes = getattr(
+        dataset_config,
+        "max_nodes",
+        None,
+    )
+
+    remove_hs = getattr(
+        dataset_config,
+        "remove_hs",
+        True,
+    )
+
+    reorder_atoms = getattr(
+        dataset_config,
+        "reorder_atoms",
+        False,
+    )
 
     rng = np.random.default_rng(seed)
 
     train_shards: list[str] = []
     val_shards: list[str] = []
     test_shards: list[str] = []
-    train_idx = val_idx = test_idx = 0
-    total_count = valid_count = 0
-    split_raw_counts = {"train": 0, "val": 0, "test": 0}
-    split_valid_counts = {"train": 0, "val": 0, "test": 0}
 
-    print(f"Building Graphormer cache from {dataset_path}")
+    train_idx = 0
+    val_idx = 0
+    test_idx = 0
+
+    total_count = 0
+    valid_count = 0
+
+    split_raw_counts = {
+        "train": 0,
+        "val": 0,
+        "test": 0,
+    }
+
+    split_valid_counts = {
+        "train": 0,
+        "val": 0,
+        "test": 0,
+    }
+
+    # ---------------------------------------------------------
+    # Per-task sample counts
+    # ---------------------------------------------------------
+
+    split_task_counts = {
+        split: {
+            task_name: 0
+            for task_name in task_names
+        }
+        for split in (
+            "train",
+            "val",
+            "test",
+        )
+    }
+
+    print(
+        f"Building Graphormer cache "
+        f"from {dataset_path}"
+    )
 
     for batch_idx, batch in enumerate(
         _iter_smiles_batches(
@@ -237,21 +473,35 @@ def featurize_and_cache_dataset(
             target_column=target_column,
         )
     ):
-        raw_smiles_batch = list(batch[0])
-        raw_target_batch = list(batch[1]) if target_column is not None else None
 
-        smiles_batch, target_batch = _filter_smiles_and_targets(
-            raw_smiles_batch,
-            raw_target_batch,
+        raw_smiles_batch = list(
+            batch[0]
         )
+
+        raw_target_batch = (
+            list(batch[1])
+            if target_column is not None
+            else None
+        )
+
+        smiles_batch, target_batch = (
+            _filter_smiles_and_targets(
+                raw_smiles_batch,
+                raw_target_batch,
+            )
+        )
+
         if not smiles_batch:
             continue
 
-        smiles_batch, target_batch = _shuffle_aligned(
-            smiles_batch,
-            target_batch,
-            rng,
+        smiles_batch, target_batch = (
+            _shuffle_aligned(
+                smiles_batch,
+                target_batch,
+                rng,
+            )
         )
+
         split_data = _split_batch(
             smiles_batch,
             target_batch,
@@ -260,61 +510,158 @@ def featurize_and_cache_dataset(
             rng,
         )
 
-        total_count += len(smiles_batch)
+        total_count += len(
+            smiles_batch
+        )
 
         for split_name in ("train", "val", "test"):
             split_raw_counts[split_name] += len(split_data[split_name]["smiles"])
 
-        train_path, train_valid = _save_shard(
+        # -----------------------------------------------------
+        # Train
+        # -----------------------------------------------------
+
+        (
+            train_path,
+            train_valid,
+            train_task_counts,
+        ) = _save_shard(
             "train",
             split_data["train"]["smiles"],
             split_data["train"]["targets"],
             featurizer,
             train_cache_dir,
             train_idx,
+            task_names=task_names,
         )
-        if train_path is not None:
-            train_shards.append(train_path)
-            train_idx += 1
-            valid_count += train_valid
-            split_valid_counts["train"] += train_valid
 
-        val_path, val_valid = _save_shard(
+        if train_path is not None:
+            train_shards.append(
+                train_path
+            )
+
+            train_idx += 1
+
+            valid_count += train_valid
+
+            split_valid_counts[
+                "train"
+            ] += train_valid
+
+            for task_name, count in (
+                train_task_counts.items()
+            ):
+                split_task_counts[
+                    "train"
+                ][task_name] += count
+
+        # -----------------------------------------------------
+        # Validation
+        # -----------------------------------------------------
+
+        (
+            val_path,
+            val_valid,
+            val_task_counts,
+        ) = _save_shard(
             "val",
             split_data["val"]["smiles"],
             split_data["val"]["targets"],
             featurizer,
             val_cache_dir,
             val_idx,
+            task_names=task_names,
         )
+
         if val_path is not None:
-            val_shards.append(val_path)
+            val_shards.append(
+                val_path
+            )
+
             val_idx += 1
+
             valid_count += val_valid
-            split_valid_counts["val"] += val_valid
+
+            split_valid_counts[
+                "val"
+            ] += val_valid
+
+            for task_name, count in (
+                val_task_counts.items()
+            ):
+                split_task_counts[
+                    "val"
+                ][task_name] += count
+
+        # -----------------------------------------------------
+        # Test
+        # -----------------------------------------------------
 
         if test_fraction > 0.0:
-            test_path, test_valid = _save_shard(
+            (
+                test_path,
+                test_valid,
+                test_task_counts,
+            ) = _save_shard(
                 "test",
                 split_data["test"]["smiles"],
                 split_data["test"]["targets"],
                 featurizer,
                 test_cache_dir,
                 test_idx,
+                task_names=task_names,
             )
+
             if test_path is not None:
-                test_shards.append(test_path)
+                test_shards.append(
+                    test_path
+                )
+
                 test_idx += 1
+
                 valid_count += test_valid
-                split_valid_counts["test"] += test_valid
+
+                split_valid_counts[
+                    "test"
+                ] += test_valid
+
+                for task_name, count in (
+                    test_task_counts.items()
+                ):
+                    split_task_counts[
+                        "test"
+                    ][task_name] += count
 
         print(
             f"Processed batch {batch_idx + 1} | "
-            f"total={total_count:,} | valid={valid_count:,} | "
+            f"total={total_count:,} | "
+            f"valid={valid_count:,} | "
             f"train_shards={len(train_shards)} | "
             f"val_shards={len(val_shards)} | "
             f"test_shards={len(test_shards)}"
         )
+
+    # ---------------------------------------------------------
+    # Print task counts
+    # ---------------------------------------------------------
+
+    if task_names:
+        print("\nSamples per task:")
+
+        for task_name in task_names:
+            print(
+                f"{task_name}: "
+                f"train="
+                f"{split_task_counts['train'][task_name]:,}, "
+                f"val="
+                f"{split_task_counts['val'][task_name]:,}, "
+                f"test="
+                f"{split_task_counts['test'][task_name]:,}"
+            )
+
+    # ---------------------------------------------------------
+    # Manifest
+    # ---------------------------------------------------------
 
     manifest: dict[str, Any] = {
         "train": train_shards,
@@ -323,12 +670,17 @@ def featurize_and_cache_dataset(
         "dataset_path": str(dataset_path),
         "smiles_column": smiles_column,
         "target_column": target_column,
+        "task_names": task_names,
         "val_fraction": val_fraction,
         "test_fraction": test_fraction,
         "total_count": total_count,
         "valid_count": valid_count,
         "split_raw_counts": split_raw_counts,
         "split_valid_counts": split_valid_counts,
+
+        # NEW
+        "split_task_counts": split_task_counts,
+
         "max_nodes": max_nodes,
         "multi_hop_max_dist": multi_hop_max_dist,
         "spatial_pos_max": spatial_pos_max,
@@ -338,8 +690,16 @@ def featurize_and_cache_dataset(
         "preprocess_batch_size": batch_size,
     }
 
-    torch.save(manifest, manifest_path)
-    print(f"Saved Graphormer cache manifest to {manifest_path}")
+    torch.save(
+        manifest,
+        manifest_path,
+    )
+
+    print(
+        f"Saved Graphormer cache manifest "
+        f"to {manifest_path}"
+    )
+
     return manifest
 
 

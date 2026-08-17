@@ -253,3 +253,43 @@ class GraphormerFinetuneClassificationConfig(GraphormerPretrainedConfig, LoraCon
         default=None,
         metadata={"help": "Positive class weight for BCE."},
     )
+
+@dataclass
+class GraphormerFinetuneMultitaskConfig(GraphormerPretrainedConfig, LoraConfig):
+    """
+    Configuration for fine-tuning Graphormer models for multi-task learning.
+    """
+    num_tasks: int = field(
+        default=2,
+        metadata={"help": "Number of tasks for multi-task learning."},
+    )
+    adaptor_bottleneck_dim: int = field(
+        default=768,
+        metadata={"help": "Hidden size for the multi-task head."},
+    )
+
+    head_intermediate_dim: int = field(
+        default=256,
+        metadata={"help": "Intermediate size for the multi-task head."},
+    )
+
+    adaptor_dropout: float = field(
+        default=0.1,
+        metadata={"help": "Dropout probability for the multi-task head."},
+    )
+    freeze_encoder: bool = field(
+        default=True,
+        metadata={"help": "Whether to freeze the encoder during fine-tuning."},
+    )
+    use_lora: bool = field(
+        default=True,
+        metadata={"help": "Whether to use LoRA for fine-tuning."},
+    )
+    loss_type: str = field(
+        default="mse",
+        metadata={"help": "Loss function for multi-task learning: mse or mae or huber."},
+    )
+    task_weights: Optional[list[float]] = field(
+        default=None,
+        metadata={"help": "Weights for each task in multi-task learning."},
+    )

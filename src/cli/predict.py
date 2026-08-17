@@ -11,7 +11,6 @@ from src.deep_learning.graphormer.inference.predictor import (
     GraphormerPredictor,
 )
 
-
 SUPPORTED_INPUT_SUFFIXES = {
     ".smi",
     ".smiles",
@@ -19,13 +18,11 @@ SUPPORTED_INPUT_SUFFIXES = {
     ".csv",
     ".parquet",
     ".pq",
+    ".pt"
 }
 
 
-def read_smi_file(
-    path: str | Path,
-    structure_column: str = "structure",
-) -> pd.DataFrame:
+def read_smi_file(path: str | Path, structure_column: str = "structure") -> pd.DataFrame:
     """
     Read a .smi/.smiles file.
 
@@ -60,23 +57,12 @@ def read_smi_file(
             parts = line.split(maxsplit=1)
 
             smiles = parts[0].strip()
-            name = (
-                parts[1].strip()
-                if len(parts) > 1
-                else f"molecule_{len(records) + 1}"
-            )
+            name = (parts[1].strip() if len(parts) > 1 else f"molecule_{len(records) + 1}")
 
-            records.append(
-                {
-                    "molecule_id": name,
-                    structure_column: smiles,
-                }
-            )
+            records.append({"molecule_id": name, structure_column: smiles})
 
     if not records:
-        raise ValueError(
-            f"No molecules were found in SMI file: {path}"
-        )
+        raise ValueError(f"No molecules were found in SMI file: {path}")
 
     return pd.DataFrame(records)
 
@@ -109,12 +95,7 @@ def load_inference_input(
         if not smiles:
             raise ValueError("--smiles cannot be empty.")
 
-        return pd.DataFrame(
-            {
-                "molecule_id": ["query_1"],
-                structure_column: [smiles],
-            }
-        )
+        return pd.DataFrame({"molecule_id": ["query_1"], structure_column: [smiles]})
 
     # ---------------------------------------------------------
     # Input file
@@ -122,9 +103,7 @@ def load_inference_input(
     path = Path(input_path).expanduser().resolve()
 
     if not path.is_file():
-        raise FileNotFoundError(
-            f"Inference input file does not exist: {path}"
-        )
+        raise FileNotFoundError(f"Inference input file does not exist: {path}")
 
     suffix = path.suffix.lower()
 
@@ -135,10 +114,7 @@ def load_inference_input(
         )
 
     if suffix in {".smi", ".smiles", ".txt"}:
-        frame = read_smi_file(
-            path=path,
-            structure_column=structure_column,
-        )
+        frame = read_smi_file(path=path, structure_column=structure_column)
 
     elif suffix == ".csv":
         frame = pd.read_csv(path)
@@ -147,9 +123,7 @@ def load_inference_input(
         frame = pd.read_parquet(path)
 
     else:
-        raise RuntimeError(
-            f"Unhandled input suffix: {suffix}"
-        )
+        raise RuntimeError(f"Unhandled input suffix: {suffix}")
 
     if structure_column not in frame.columns:
         raise KeyError(
@@ -159,16 +133,9 @@ def load_inference_input(
 
     frame = frame.copy()
 
-    frame[structure_column] = (
-        frame[structure_column]
-        .astype("string")
-        .str.strip()
-    )
+    frame[structure_column] = (frame[structure_column].astype("string").str.strip())
 
-    invalid_mask = (
-        frame[structure_column].isna()
-        | frame[structure_column].eq("")
-    )
+    invalid_mask = (frame[structure_column].isna() | frame[structure_column].eq(""))
 
     if invalid_mask.any():
         invalid_rows = frame.index[invalid_mask].tolist()
@@ -182,35 +149,21 @@ def load_inference_input(
     return frame.reset_index(drop=True)
 
 
-def save_prediction_frame(
-    frame: pd.DataFrame,
-    output_path: str | Path,
-) -> Path:
+def save_prediction_frame(frame: pd.DataFrame, output_path: str | Path) -> Path:
     """
     Save predictions as CSV or Parquet.
     """
-    output_path = Path(
-        output_path
-    ).expanduser().resolve()
+    output_path = Path(output_path).expanduser().resolve()
 
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     suffix = output_path.suffix.lower()
 
     if suffix == ".csv":
-        frame.to_csv(
-            output_path,
-            index=False,
-        )
+        frame.to_csv(output_path, index=False)
 
     elif suffix in {".parquet", ".pq"}:
-        frame.to_parquet(
-            output_path,
-            index=False,
-        )
+        frame.to_parquet(output_path, index=False)
 
     else:
         raise ValueError(
@@ -240,6 +193,8 @@ def predict_graphormer(args) -> None:
             f"--num-workers cannot be negative, got {args.num_workers}."
         )
 
+    task_names = [name.strip() for name in args.task_names]
+
     input_frame = load_inference_input(
         smiles=args.smiles,
         input_path=args.input,
@@ -252,17 +207,9 @@ def predict_graphormer(args) -> None:
         threshold=args.threshold,
     )
 
-    structures = (
-        input_frame[args.structure_column]
-        .astype(str)
-        .tolist()
-    )
+    structures = (input_frame[args.structure_column].astype(str).tolist())
 
-    prediction_frame = predictor.predict_smiles(
-        smiles_list=structures,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-    )
+    prediction_frame = predictor.predict_smiles(smiles_list=structures, batch_size=args.batch_size, num_workers=args.num_workers,)
 
     if len(input_frame) != len(prediction_frame):
         raise RuntimeError(
@@ -271,9 +218,7 @@ def predict_graphormer(args) -> None:
             f"{len(input_frame)}."
         )
 
-    duplicate_columns = set(input_frame.columns).intersection(
-        prediction_frame.columns
-    )
+    duplicate_columns = set(input_frame.columns).intersection(prediction_frame.columns)
 
     if duplicate_columns:
         raise ValueError(
@@ -281,18 +226,12 @@ def predict_graphormer(args) -> None:
             f"input data: {sorted(duplicate_columns)}."
         )
 
-    result_frame = pd.concat(
-        [
-            input_frame.reset_index(drop=True),
-            prediction_frame.reset_index(drop=True),
-        ],
-        axis=1,
-    )
+    result_frame = pd.concat([input_frame.reset_index(drop=True), prediction_frame.reset_index(drop=True)], axis=1)
 
-    output_path = save_prediction_frame(
-        frame=result_frame,
-        output_path=args.output,
-    )
+    if task_names:
+        old_cols = result_frame.columns[-len(task_names):].tolist()
+        result_frame.rename(columns=dict(zip(old_cols, task_names)), inplace=True)
+    output_path = save_prediction_frame(frame=result_frame, output_path=args.output)
 
     print(f"Input molecules: {len(input_frame):,}")
     print(f"Predicted molecules: {len(prediction_frame):,}")
@@ -309,6 +248,7 @@ def add_graphormer_predict_parser(subparsers) -> None:
 
         chemflow predict graphormer \
             --smiles "CCO" \
+            --task-names task1 task2 \
             --model-checkpoint best_model.pt \
             --output predictions.csv
 
@@ -317,6 +257,7 @@ def add_graphormer_predict_parser(subparsers) -> None:
         chemflow predict graphormer \
             --input molecules.csv \
             --structure-column SMILES \
+            --task-names task1 task2 \
             --model-checkpoint best_model.pt \
             --output predictions.csv
     """
@@ -370,6 +311,14 @@ def add_graphormer_predict_parser(subparsers) -> None:
             "Column containing SMILES for CSV or Parquet input. "
             "Default: SMILES."
         ),
+    )
+
+    graphormer_parser.add_argument(
+        "--task-names",
+        type=str,
+        nargs="+",
+        required=True,
+        help="Names of the prediction tasks.",
     )
 
     # ---------------------------------------------------------

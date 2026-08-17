@@ -32,9 +32,8 @@ def train_graphormer(args):
 
     set_seed(args.seed)
 
-    trainer = GraphormerDDPTrainer(
-        config_path=config_path,
-    )
+    trainer = GraphormerDDPTrainer(config_path=config_path,)
+    
     trainer.train()
 
 

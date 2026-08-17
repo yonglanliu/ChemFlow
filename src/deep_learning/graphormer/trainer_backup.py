@@ -22,11 +22,9 @@ from tqdm import tqdm
 from src.deep_learning.graphormer.config import (
     GraphormerFinetuneClassificationConfig,
     GraphormerFinetuneRegressionConfig,
-    GraphormerFinetuneMultitaskConfig,
 )
 from src.deep_learning.graphormer.evaluation.classification import ClassificationEvaluator
 from src.deep_learning.graphormer.evaluation.regression import RegressionEvaluator
-from src.deep_learning.graphormer.evaluation.multitask import MultiTaskEvaluator
 from src.deep_learning.graphormer.models.graphormer_finetune_model import (
     GraphormerFineTuneClassificationModel,
     GraphormerFineTuneRegressionModel,
@@ -59,7 +57,6 @@ from src.deep_learning.utils import (
 )
 from functools import partial
 import numpy as np
-
 
 def update_dataclass_from_config(target: Any, source: Any, *, strict: bool = False) -> Any:
     if not is_dataclass(target):
@@ -154,13 +151,11 @@ def build_optimizer_parameter_groups(
     encoder_parameters = []
     lora_parameters = []
     head_parameters = []
-    adaptor_parameters = []
 
     encoder_names = []
     lora_names = []
     head_names = []
-    adaptor_names = []
-    loss_names = []
+
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
@@ -175,7 +170,6 @@ def build_optimizer_parameter_groups(
         elif (
             name.startswith("regression_head.")
             or name.startswith("classification_head.")
-            or "heads." in lower_name
         ):
             head_parameters.append(parameter)
             head_names.append(name)
@@ -183,11 +177,7 @@ def build_optimizer_parameter_groups(
         elif name.startswith("encoder."):
             encoder_parameters.append(parameter)
             encoder_names.append(name)
-        elif "adaptors" in lower_name:
-            adaptor_parameters.append(parameter)
-            adaptor_names.append(name)
-        elif "loss" in lower_name or "log_vars" in lower_name:
-            loss_names.append(name)
+
         else:
             raise ValueError(
                 f"Unclassified trainable parameter: {name}"
@@ -257,11 +247,13 @@ def build_optimizer_parameter_groups(
     return parameter_groups
 
 
-def get_learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
-    return {group.get("name", f"group_{index}"): float(group["lr"]) for index, group in enumerate(optimizer.param_groups)}
-
-
-
+def get_learning_rates(
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, float]:
+    return {
+        group.get("name", f"group_{index}"): float(group["lr"])
+        for index, group in enumerate(optimizer.param_groups)
+    }
 
 class GraphormerDDPTrainer:
     def __init__(self, config_path: str | Path | None = None) -> None:
@@ -329,6 +321,7 @@ class GraphormerDDPTrainer:
                         "cross_entropy requires num_classes >= 2, "
                         f"got num_classes={num_classes}."
                     )
+
             else:
                 raise ValueError(
                     f"Unsupported classification loss_type: {loss_type!r}. "
@@ -342,14 +335,9 @@ class GraphormerDDPTrainer:
                 loss_type=evaluator_loss_type,
                 num_classes=self.model_config.num_classes,
             )
-        # To support multi-task learning, we can add a new task type "multitask" here.
-        elif self.task == "multitask":
-            self.model_config = update_dataclass_from_config(GraphormerFinetuneMultitaskConfig(), raw_model_config)
-            self.model = GraphormerMultiTaskModel(cfg=self.model_config)
-            self.evaluator = MultiTaskEvaluator()  # or a custom evaluator for multi-task
         else:
             raise ValueError(
-                f"Unsupported task '{self.task}'. Expected regression, classification, or multitask."
+                f"Unsupported task '{self.task}'. Expected regression or classification."
             )
 
         if hasattr(self.model_config, "multi_hop_max_dist"):
@@ -608,21 +596,17 @@ class GraphormerDDPTrainer:
             )
 
             for batch in progress:
-                loss_value, task_losses = self.train_step(model, batch, optimizer, device, gradient_clip)
-                running_loss += loss_value
+                value = self.train_step(
+                    model,
+                    batch,
+                    optimizer,
+                    device,
+                    gradient_clip,
+                )
+                running_loss += value
                 num_batches += 1
                 if is_main_process() and not progress.disable:
-                    postfix = {"loss": f"{loss_value:.4f}"}
-                    if task_losses is not None:
-                        postfix.update(
-                            {
-                                f"task_{i}_loss": f"{task_loss:.4f}"
-                                for i, task_loss in enumerate(
-                                    task_losses.detach().cpu().tolist()
-                                )
-                            }
-                        )
-                    progress.set_postfix(**postfix)
+                    progress.set_postfix(loss=f"{value:.4f}")
                     
             training_dtype = next(model.parameters()).dtype
             stats = torch.tensor(
@@ -764,15 +748,11 @@ class GraphormerDDPTrainer:
         optimizer: torch.optim.Optimizer,
         device: torch.device,
         gradient_clip_value: Optional[float] = 1.0,
-    ) -> tuple[float, torch.Tensor | None]:
+    ) -> float:
         model.train()
         optimizer.zero_grad(set_to_none=True)
         outputs = self.forward_batch(model, move_batch_to_device(batch, device))
-
         loss = self.extract_loss(outputs)
-        task_losses = None
-        if self.task == "multitask":
-            task_losses = self.extract_task_losses(outputs)
 
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite training loss: {loss.item()}")
@@ -784,7 +764,7 @@ class GraphormerDDPTrainer:
                 float(gradient_clip_value),
             )
         optimizer.step()
-        return float(loss.detach().item()), task_losses.detach() if task_losses is not None else None
+        return float(loss.detach().item())
 
     @torch.no_grad()
     def evaluate(self, model: nn.Module, loader: DataLoader, device: torch.device, prefix: str = "val", return_curve_data: bool = False) -> dict[str, float]:
@@ -844,12 +824,7 @@ class GraphormerDDPTrainer:
         predictions = self.gather_variable_tensors(local_predictions).cpu()
         targets = self.gather_variable_tensors(local_targets).cpu()
 
-        if self.task == "multitask":
-            task_names = self.dataset_config.task_names
-            metrics = self.evaluator.compute(predictions=predictions, targets=targets, loss=average_loss, task_names=task_names, prefix=prefix)
-        else:
-            metrics = self.evaluator.compute(predictions=predictions, targets=targets, loss=average_loss, prefix=prefix)
-
+        metrics = self.evaluator.compute(predictions=predictions, targets=targets, loss=average_loss, prefix=prefix)
         metrics = {name: float(value) for name, value in metrics.items()}
 
         if not return_curve_data:
@@ -891,7 +866,7 @@ class GraphormerDDPTrainer:
         gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
         dist.all_gather(gathered, tensor)
 
-        return torch.cat([item[:size.item()] for item, size in zip(gathered, sizes)], dim=0)
+        return torch.cat([item[:size] for item, size in zip(gathered, sizes_int)], dim=0)
 
     @staticmethod
     def forward_batch(model: nn.Module, batch: Any) -> Any:
@@ -918,24 +893,6 @@ class GraphormerDDPTrainer:
             raise ValueError("Extracted loss must be a scalar tensor.")
         return loss
 
-    @staticmethod
-    def extract_task_losses(outputs: Any) -> torch.Tensor:
-        task_losses = None
-        if torch.is_tensor(outputs):
-            task_losses = outputs
-        elif isinstance(outputs, Mapping) and "task_losses" in outputs:
-            task_losses = outputs["task_losses"]
-        elif hasattr(outputs, "task_losses"):
-            task_losses = outputs.task_losses
-        elif isinstance(outputs, (tuple, list)) and len(outputs) > 1:
-            task_losses = outputs[1]
-        else:
-            raise TypeError("Could not extract task losses from model output.")
-
-        if not torch.is_tensor(task_losses):
-            raise ValueError("Extracted task losses must be a tensor.")
-        return task_losses
-    
     def save_checkpoint(
         self,
         path: Path,
@@ -1222,15 +1179,9 @@ class GraphormerDDPTrainer:
                 featurizer=featurizer,
                 cache_dir=cache_dir,
             )
-        # Add cached statistics to the dataset configuration.
-        dataset_config.split_task_counts = manifest.get("split_task_counts")
-        dataset_config.task_names = manifest.get("task_names", getattr(dataset_config, "task_names", None))
 
-        train_manifest = manifest["train"]
-        val_manifest = manifest["val"]
-
-        train_dataset = GraphormerMoleculeDataset(train_manifest)
-        val_dataset = GraphormerMoleculeDataset(val_manifest)
+        train_dataset = GraphormerMoleculeDataset(manifest["train"])
+        val_dataset = GraphormerMoleculeDataset(manifest["val"])
 
         if bool(config_get(self.training_config, "evaluate_test", True)) and config_get(dataset_config, "test_fraction", 0.0) > 0.0:
             test_dataset = GraphormerMoleculeDataset(manifest["test"])

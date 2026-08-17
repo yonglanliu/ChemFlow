@@ -16,14 +16,20 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from src.chemflow.machine_learning.data import dataset
 from src.deep_learning.graphormer.config import (
     GraphormerFinetuneClassificationConfig,
+    GraphormerFinetuneMultitaskConfig,
     GraphormerFinetuneRegressionConfig,
 )
 from src.deep_learning.graphormer.models.graphormer_finetune_model import (
     GraphormerFineTuneClassificationModel,
     GraphormerFineTuneRegressionModel,
 )
+from src.deep_learning.graphormer.models.graphormer_multitask_model import (
+    GraphormerMultiTaskModel,
+)
+
 from src.deep_learning.graphormer.modules.dataset import (
     GraphormerMoleculeDataset,
     featurize_and_cache_dataset,
@@ -52,19 +58,12 @@ def dict_to_namespace(value: Any) -> Any:
         )
 
     if isinstance(value, list):
-        return [
-            dict_to_namespace(item)
-            for item in value
-        ]
+        return [dict_to_namespace(item) for item in value]
 
     return value
 
 
-def config_get(
-    config: Any,
-    key: str,
-    default: Any = None,
-) -> Any:
+def config_get(config: Any, key: str, default: Any = None) -> Any:
     if config is None:
         return default
 
@@ -86,10 +85,7 @@ def update_dataclass_from_config(
             f"got {type(target).__name__}."
         )
 
-    target_fields = {
-        item.name
-        for item in fields(target)
-    }
+    target_fields = {item.name for item in fields(target)}
 
     if isinstance(source, Mapping):
         values = dict(source)
@@ -123,15 +119,9 @@ def update_dataclass_from_config(
     return target
 
 
-def move_batch_to_device(
-    batch: Any,
-    device: torch.device,
-) -> Any:
+def move_batch_to_device(batch: Any, device: torch.device) -> Any:
     if torch.is_tensor(batch):
-        return batch.to(
-            device,
-            non_blocking=True,
-        )
+        return batch.to(device, non_blocking=True)
 
     if isinstance(batch, dict):
         return {
@@ -140,10 +130,7 @@ def move_batch_to_device(
         }
 
     if isinstance(batch, tuple):
-        return tuple(
-            move_batch_to_device(value, device)
-            for value in batch
-        )
+        return tuple(move_batch_to_device(value, device) for value in batch)
 
     if isinstance(batch, list):
         return [
@@ -178,40 +165,23 @@ class GraphormerPredictor:
     regression values or classification probabilities.
     """
 
-    def __init__(
-        self,
-        checkpoint_path: str | Path,
-        device: Optional[str] = None,
-        threshold: float = 0.5,
-    ) -> None:
-        self.checkpoint_path = Path(
-            checkpoint_path
-        ).expanduser().resolve()
+    def __init__(self, checkpoint_path: str | Path, device: Optional[str] = None, threshold: float = 0.5,) -> None:
+
+        self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
 
         if not self.checkpoint_path.is_file():
-            raise FileNotFoundError(
-                f"Checkpoint does not exist: "
-                f"{self.checkpoint_path}"
-            )
+            raise FileNotFoundError(f"Checkpoint does not exist: {self.checkpoint_path}")
 
         if not 0.0 <= threshold <= 1.0:
-            raise ValueError(
-                "threshold must be between 0 and 1, "
-                f"got {threshold}."
-            )
+            raise ValueError(f"threshold must be between 0 and 1, got {threshold}.")
 
         self.device = select_device(device)
         self.threshold = float(threshold)
 
-        checkpoint = torch.load(
-            self.checkpoint_path,
-            map_location="cpu",
-        )
+        checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
 
         if not isinstance(checkpoint, Mapping):
-            raise TypeError(
-                "Expected checkpoint to be a dictionary."
-            )
+            raise TypeError("Expected checkpoint to be a dictionary.")
 
         if "model_state_dict" not in checkpoint:
             raise KeyError(
@@ -223,31 +193,21 @@ class GraphormerPredictor:
         checkpoint_config = checkpoint.get("config")
 
         if not checkpoint_config:
-            raise KeyError(
-                "Checkpoint does not contain its resolved config."
-            )
+            raise KeyError("Checkpoint does not contain its resolved config.")
 
         self.checkpoint = checkpoint
         self.full_config = checkpoint_config
 
-        self.base_config = dict_to_namespace(
-            checkpoint_config["BaseConfig"]
-        )
+        self.base_config = dict_to_namespace(checkpoint_config["BaseConfig"])
 
-        self.model_config_source = dict_to_namespace(
-            checkpoint_config["GraphormerConfig"]
-        )
+        self.model_config_source = dict_to_namespace(checkpoint_config["GraphormerConfig"])
 
-        self.dataset_config = dict_to_namespace(
-            checkpoint_config["DatasetConfig"]
-        )
+        self.dataset_config = dict_to_namespace(checkpoint_config["DatasetConfig"])
 
         # Your resolved config should also contain FeaturizerConfig.
         # If it is not currently saved, add it to resolved_config
         # in the Trainer.
-        featurizer_config_data = checkpoint_config.get(
-            "FeaturizerConfig"
-        )
+        featurizer_config_data = checkpoint_config.get("FeaturizerConfig")
 
         if featurizer_config_data is None:
             raise KeyError(
@@ -256,97 +216,56 @@ class GraphormerPredictor:
                 "Trainer's resolved_config before saving checkpoints."
             )
 
-        self.featurizer_config = dict_to_namespace(
-            featurizer_config_data
-        )
+        self.featurizer_config = dict_to_namespace(featurizer_config_data)
 
-        self.task = str(
-            self.base_config.task
-        ).lower()
+        self.task = str(self.base_config.task).lower()
 
         self.model = self._build_model()
+        print(f'use model: {type(self.model).__name__}')
 
-        self.model.load_state_dict(
-            checkpoint["model_state_dict"],
-            strict=True,
-        )
+        self.model.load_state_dict(checkpoint["model_state_dict"], strict=True)
 
         self.model.to(self.device)
         self.model.eval()
 
-        self.featurizer = GraphormerFeaturizer(
-            **namespace_to_dict(
-                self.featurizer_config
-            )
-        )
+        self.featurizer = GraphormerFeaturizer(**namespace_to_dict(self.featurizer_config))
 
-        self.classification_type = (
-            self._resolve_classification_type()
-            if self.task == "classification"
-            else None
-        )
+        self.classification_type = (self._resolve_classification_type() if self.task == "classification" else None)
 
-        print(
-            f"Loaded checkpoint: {self.checkpoint_path}"
-        )
-        print(
-            f"Task: {self.task}"
-        )
-        print(
-            f"Device: {self.device}"
-        )
+        print(f"Loaded checkpoint: {self.checkpoint_path}")
+        print(f"Task: {self.task}")
+        print(f"Device: {self.device}")
 
         if self.classification_type is not None:
-            print(
-                "Classification type: "
-                f"{self.classification_type}"
-            )
+            print(f"Classification type: {self.classification_type}")
 
     def _build_model(self) -> nn.Module:
         if self.task == "regression":
-            model_config = (
-                GraphormerFinetuneRegressionConfig()
-            )
-
-            model_config = update_dataclass_from_config(
-                model_config,
-                self.model_config_source,
-            )
-
+            model_config = (GraphormerFinetuneRegressionConfig())
+            model_config = update_dataclass_from_config(model_config, self.model_config_source)
             self.model_config = model_config
-
-            return GraphormerFineTuneRegressionModel(
-                cfg=model_config,
-            )
+            return GraphormerFineTuneRegressionModel(cfg=model_config)
 
         if self.task == "classification":
-            model_config = (
-                GraphormerFinetuneClassificationConfig()
-            )
-
-            model_config = update_dataclass_from_config(
-                model_config,
-                self.model_config_source,
-            )
-
+            model_config = (GraphormerFinetuneClassificationConfig())
+            model_config = update_dataclass_from_config(model_config, self.model_config_source)
             self.model_config = model_config
-
-            return GraphormerFineTuneClassificationModel(
-                cfg=model_config,
-            )
-
+            return GraphormerFineTuneClassificationModel(cfg=model_config)
+        
+        if self.task == "multitask":
+            model_config = (GraphormerFinetuneMultitaskConfig())
+            model_config = update_dataclass_from_config(model_config, self.model_config_source,)
+            self.model_config = model_config
+            return GraphormerMultiTaskModel(cfg=model_config)
+        
         raise ValueError(
             f"Unsupported task: {self.task!r}."
         )
 
     def _resolve_classification_type(self) -> str:
-        loss_type = str(
-            self.model_config.loss_type
-        ).lower()
+        loss_type = str(self.model_config.loss_type).lower()
 
-        num_classes = int(
-            self.model_config.num_classes
-        )
+        num_classes = int(self.model_config.num_classes)
 
         if loss_type == "bce":
             return "binary"
@@ -358,45 +277,17 @@ class GraphormerPredictor:
             if num_classes > 2:
                 return "multiclass"
 
-            raise ValueError(
-                "cross_entropy requires num_classes >= 2, "
-                f"got {num_classes}."
-            )
+            raise ValueError(f"cross_entropy requires num_classes >= 2, got {num_classes}.")
 
-        raise ValueError(
-            "Unsupported classification loss type: "
-            f"{loss_type!r}."
-        )
+        raise ValueError(f"Unsupported classification loss type: {loss_type!r}.")
 
-    def build_loader(
-        self,
-        dataset: GraphormerMoleculeDataset,
-        batch_size: int = 64,
-        num_workers: int = 0,
-    ) -> DataLoader:
+    def build_loader(self, dataset: GraphormerMoleculeDataset, batch_size: int = 64, num_workers: int = 0) -> DataLoader:
+
         collate_fn = lambda samples: graphormer_collate_fn(
             samples,
-            max_nodes=int(
-                config_get(
-                    self.dataset_config,
-                    "max_nodes",
-                    128,
-                )
-            ),
-            multi_hop_max_dist=int(
-                config_get(
-                    self.dataset_config,
-                    "multi_hop_max_dist",
-                    5,
-                )
-            ),
-            spatial_pos_max=int(
-                config_get(
-                    self.dataset_config,
-                    "spatial_pos_max",
-                    1024,
-                )
-            ),
+            max_nodes=int(config_get(self.dataset_config, "max_nodes", 128)),
+            multi_hop_max_dist=int(config_get(self.dataset_config, "multi_hop_max_dist", 5)),
+            spatial_pos_max=int(config_get(self.dataset_config, "spatial_pos_max", 1024)),
         )
 
         return DataLoader(
@@ -410,14 +301,9 @@ class GraphormerPredictor:
         )
 
     @staticmethod
-    def _forward_batch(
-        model: nn.Module,
-        batch: Any,
-    ) -> Any:
+    def _forward_batch(model: nn.Module, batch: Any) -> Any:
         if isinstance(batch, dict):
-            return model(
-                batched_data=batch,
-            )
+            return model(batched_data=batch)
 
         if isinstance(batch, (tuple, list)):
             return model(*batch)
@@ -425,9 +311,8 @@ class GraphormerPredictor:
         return model(batch)
 
     @staticmethod
-    def _extract_predictions(
-        outputs: Any,
-    ) -> torch.Tensor:
+    def _extract_predictions(outputs: Any) -> torch.Tensor:
+
         if torch.is_tensor(outputs):
             return outputs
 
@@ -453,38 +338,72 @@ class GraphormerPredictor:
                 if torch.is_tensor(value):
                     return value
 
-        raise TypeError(
-            "Could not extract predictions from model output."
-        )
+        raise TypeError("Could not extract predictions from model output.")
 
     @torch.inference_mode()
-    def predict_loader(
-        self,
-        loader: DataLoader,
-    ) -> pd.DataFrame:
+    def predict_loader(self, loader: DataLoader) -> pd.DataFrame:
+
         prediction_batches = []
+        total_predictions = 0
 
-        for batch in tqdm(
-            loader,
-            desc="Inference",
-        ):
-            batch = move_batch_to_device(
-                batch,
-                self.device,
-            )
+        for batch_index, batch in enumerate(tqdm(loader, desc="Inference")):
 
-            outputs = self._forward_batch(
-                self.model,
-                batch,
-            )
+            # Check input batch size BEFORE moving to device
+            if isinstance(batch, Mapping):
+                for key, value in batch.items():
+                    if torch.is_tensor(value) and value.ndim > 0:
+                        #print(f"Batch {batch_index}: "f"input key={key}, shape={tuple(value.shape)}")
+                        break
 
-            predictions = self._extract_predictions(
-                outputs
-            )
+            batch = move_batch_to_device(batch, self.device)
+
+            outputs = self._forward_batch(self.model, batch)
+
+            predictions = self._extract_predictions(outputs)
+
+            if isinstance(predictions, Mapping):
+
+                print(f"\nBatch {batch_index} task outputs:")
+
+                for key, value in predictions.items():
+                    print(f"    {key}: {tuple(value.shape)}")
+
+                predictions = torch.cat(
+                    [
+                        predictions[f"task_{i}"]
+                        for i in range(len(predictions))
+                    ],
+                    dim=1,
+                )
+
+            elif isinstance(predictions, (tuple, list)):
+                predictions = torch.cat(
+                    predictions,
+                    dim=1,
+                )
+
+            elif not torch.is_tensor(predictions):
+                raise TypeError(
+                    "Predictions must be a tensor, a dict of tensors, "
+                    f"or a tuple/list of tensors, got "
+                    f"{type(predictions).__name__}."
+                )
+
+            # print(
+            #     f"Batch {batch_index}: "
+            #     f"prediction shape={tuple(predictions.shape)}"
+            # )
+
+            total_predictions += predictions.shape[0]
 
             prediction_batches.append(
                 predictions.detach().cpu()
             )
+
+        print(
+            "\nTotal predictions before cat:",
+            total_predictions,
+        )
 
         if not prediction_batches:
             raise RuntimeError(
@@ -496,55 +415,37 @@ class GraphormerPredictor:
             dim=0,
         )
 
+        print(
+            "Raw prediction shape:",
+            tuple(raw_predictions.shape),
+        )
+
         return self._format_predictions(
             raw_predictions
         )
 
-    def _format_predictions(
-        self,
-        predictions: torch.Tensor,
-    ) -> pd.DataFrame:
+    def _format_predictions(self, predictions: torch.Tensor) -> pd.DataFrame:
         if self.task == "regression":
-            values = (
-                predictions
-                .reshape(-1)
-                .to(dtype=torch.float32)
-                .numpy()
-            )
+            values = (predictions.reshape(-1).to(dtype=torch.float32).numpy())
 
-            return pd.DataFrame(
-                {
-                    "prediction": values,
-                }
-            )
+            return pd.DataFrame({"prediction": values})
 
         if self.classification_type == "binary":
-            return self._format_binary_predictions(
-                predictions
-            )
+            return self._format_binary_predictions(predictions)
 
         if self.classification_type == "multiclass":
-            return self._format_multiclass_predictions(
-                predictions
-            )
+            return self._format_multiclass_predictions(predictions)
 
-        raise RuntimeError(
-            "Classification type was not resolved."
-        )
+        if self.task == "multitask":
+            return self._format_multitask_predictions(predictions)
 
-    def _format_binary_predictions(
-        self,
-        predictions: torch.Tensor,
-    ) -> pd.DataFrame:
-        loss_type = str(
-            self.model_config.loss_type
-        ).lower()
+        raise RuntimeError("Classification type was not resolved.")
+
+    def _format_binary_predictions(self, predictions: torch.Tensor) -> pd.DataFrame:
+        loss_type = str(self.model_config.loss_type).lower()
 
         if loss_type == "bce":
-            if (
-                predictions.ndim == 2
-                and predictions.shape[1] == 1
-            ):
+            if (predictions.ndim == 2 and predictions.shape[1] == 1):
                 logits = predictions[:, 0]
 
             elif predictions.ndim == 1:
@@ -557,51 +458,29 @@ class GraphormerPredictor:
                     f"{tuple(predictions.shape)}."
                 )
 
-            positive_probabilities = torch.sigmoid(
-                logits
-            )
+            positive_probabilities = torch.sigmoid(logits)
 
         elif loss_type == "cross_entropy":
-            if (
-                predictions.ndim != 2
-                or predictions.shape[1] != 2
-            ):
+            if (predictions.ndim != 2 or predictions.shape[1] != 2):
                 raise ValueError(
                     "Binary cross-entropy inference expects "
                     "two logits per sample with shape (N, 2), "
                     f"got {tuple(predictions.shape)}."
                 )
-
-            probabilities = torch.softmax(
-                predictions,
-                dim=1,
-            )
-
+            probabilities = torch.softmax(predictions, dim=1)
             positive_probabilities = probabilities[:, 1]
 
         else:
-            raise ValueError(
-                f"Unsupported binary loss type: {loss_type}."
-            )
+            raise ValueError(f"Unsupported binary loss type: {loss_type}.")
 
-        positive_probabilities = (
-            positive_probabilities
-            .to(dtype=torch.float32)
-            .numpy()
-        )
+        positive_probabilities = (positive_probabilities.to(dtype=torch.float32).numpy())
 
-        predicted_labels = (
-            positive_probabilities >= self.threshold
-        ).astype(np.int64)
+        predicted_labels = (positive_probabilities >= self.threshold).astype(np.int64)
 
         return pd.DataFrame(
             {
-                "probability_negative": (
-                    1.0 - positive_probabilities
-                ),
-                "probability_positive": (
-                    positive_probabilities
-                ),
+                "probability_negative": (1.0 - positive_probabilities),
+                "probability_positive": (positive_probabilities),
                 "predicted_label": predicted_labels,
             }
         )
@@ -610,47 +489,55 @@ class GraphormerPredictor:
         self,
         predictions: torch.Tensor,
     ) -> pd.DataFrame:
-        num_classes = int(
-            self.model_config.num_classes
-        )
+        num_classes = int(self.model_config.num_classes)
+
+        if predictions.ndim != 2:
+            raise ValueError(f"Multiclass predictions must have shape (N, C), got {tuple(predictions.shape)}.")
+
+        if predictions.shape[1] != num_classes:
+            raise ValueError(f"Prediction class dimension does not match "
+                             f"num_classes: {predictions.shape[1]} versus "
+                             f"{num_classes}.")
+
+        probabilities = torch.softmax(predictions, dim=1)
+        predicted_labels = probabilities.argmax(dim=1)
+        probabilities_np = (probabilities.to(dtype=torch.float32).numpy())
+        result = {f"probability_class_{class_index}": probabilities_np[:, class_index] for class_index in range(num_classes)}
+        result["predicted_label"] = (predicted_labels.numpy())
+
+        return pd.DataFrame(result)
+
+    def _format_multitask_predictions(
+        self,
+        predictions: torch.Tensor,
+    ) -> pd.DataFrame:
+
+        if not torch.is_tensor(predictions):
+            raise TypeError(
+                "Multitask predictions must be a Tensor, "
+                f"got {type(predictions).__name__}."
+            )
+
+        num_tasks = int(self.model_config.num_tasks)
 
         if predictions.ndim != 2:
             raise ValueError(
-                "Multiclass predictions must have shape "
-                f"(N, C), got {tuple(predictions.shape)}."
+                f"Multitask predictions must have shape (N, T), "
+                f"got {tuple(predictions.shape)}."
             )
 
-        if predictions.shape[1] != num_classes:
+        if predictions.shape[1] != num_tasks:
             raise ValueError(
-                "Prediction class dimension does not match "
-                f"num_classes: {predictions.shape[1]} versus "
-                f"{num_classes}."
+                "Prediction task dimension does not match num_tasks: "
+                f"{predictions.shape[1]} versus {num_tasks}."
             )
 
-        probabilities = torch.softmax(
-            predictions,
-            dim=1,
-        )
-
-        predicted_labels = probabilities.argmax(
-            dim=1
-        )
-
-        probabilities_np = (
-            probabilities
-            .to(dtype=torch.float32)
-            .numpy()
-        )
+        predictions = predictions.detach().cpu().float()
 
         result = {
-            f"probability_class_{class_index}":
-                probabilities_np[:, class_index]
-            for class_index in range(num_classes)
+            f"task_{task_index}": predictions[:, task_index].numpy()
+            for task_index in range(num_tasks)
         }
-
-        result["predicted_label"] = (
-            predicted_labels.numpy()
-        )
 
         return pd.DataFrame(result)
 
@@ -660,44 +547,18 @@ class GraphormerPredictor:
         batch_size: int = 64,
         num_workers: int = 0,
     ) -> pd.DataFrame:
-        loader = self.build_loader(
-            dataset=dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
+        loader = self.build_loader(dataset=dataset, batch_size=batch_size, num_workers=num_workers)
 
         return self.predict_loader(loader)
 
-    def predict_manifest(
-        self,
-        shard_paths: list[str | Path],
-        batch_size: int = 64,
-        num_workers: int = 0,
-    ) -> pd.DataFrame:
-        dataset = GraphormerMoleculeDataset(
-            shard_paths=shard_paths,
-        )
+    def predict_manifest(self, shard_paths: list[str | Path], batch_size: int = 64, num_workers: int = 0) -> pd.DataFrame:
+        dataset = GraphormerMoleculeDataset(shard_paths=shard_paths)
+        return self.predict_dataset(dataset=dataset, batch_size=batch_size, num_workers=num_workers)
 
-        return self.predict_dataset(
-            dataset=dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
+    def save_predictions(self, predictions: pd.DataFrame, output_path: str | Path, input_frame: Optional[pd.DataFrame] = None) -> Path:
+        output_path = Path(output_path).expanduser().resolve()
 
-    def save_predictions(
-        self,
-        predictions: pd.DataFrame,
-        output_path: str | Path,
-        input_frame: Optional[pd.DataFrame] = None,
-    ) -> Path:
-        output_path = Path(
-            output_path
-        ).expanduser().resolve()
-
-        output_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if input_frame is not None:
             if len(input_frame) != len(predictions):
@@ -708,45 +569,25 @@ class GraphormerPredictor:
                     f"{len(predictions)}."
                 )
 
-            output_frame = pd.concat(
-                [
-                    input_frame.reset_index(drop=True),
-                    predictions.reset_index(drop=True),
-                ],
-                axis=1,
-            )
+            output_frame = pd.concat([input_frame.reset_index(drop=True), predictions.reset_index(drop=True)], axis=1)
         else:
             output_frame = predictions
 
-        output_frame.to_csv(
-            output_path,
-            index=False,
-        )
+        output_frame.to_csv(output_path, index=False)
 
-        print(
-            f"Saved predictions to: {output_path}"
-        )
+        print(f"Saved predictions to: {output_path}")
 
         return output_path
-    def predict_smiles(
-        self,
-        smiles_list: list[str],
-        batch_size: int = 64,
-        num_workers: int = 0,
-    ) -> pd.DataFrame:
+    
+    def predict_smiles(self, smiles_list: list[str], batch_size: int = 64, num_workers: int = 0) -> pd.DataFrame:
         """
         Predict one or more raw SMILES strings.
         """
-        dataset = GraphormerInferenceDataset(
-            smiles_list=smiles_list,
-            featurizer=self.featurizer,
-        )
-
-        loader = self.build_loader(
-            dataset=dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
+        dataset = GraphormerInferenceDataset(smiles_list=smiles_list, featurizer=self.featurizer)
+        print("Input smiles:", len(smiles_list))
+        print("Dataset size:", len(dataset))
+        loader = self.build_loader(dataset=dataset, batch_size=batch_size, num_workers=num_workers)
+        print("Loader dataset size:", len(loader.dataset))
 
         return self.predict_loader(loader)
 
@@ -755,15 +596,9 @@ class GraphormerInferenceDataset(Dataset):
     In-memory Graphormer dataset for raw SMILES inference.
     """
 
-    def __init__(
-        self,
-        smiles_list: list[str],
-        featurizer: Any,
-    ) -> None:
+    def __init__(self, smiles_list: list[str], featurizer: Any) -> None:
         if not smiles_list:
-            raise ValueError(
-                "smiles_list cannot be empty."
-            )
+            raise ValueError("smiles_list cannot be empty.")
 
         self.smiles_list = [
             str(smiles).strip()
@@ -774,28 +609,17 @@ class GraphormerInferenceDataset(Dataset):
 
         for index, smiles in enumerate(self.smiles_list):
             if not smiles:
-                raise ValueError(
-                    f"SMILES at index {index} is empty."
-                )
+                raise ValueError(f"SMILES at index {index} is empty.")
 
             try:
-                feature = self._featurize(
-                    featurizer=featurizer,
-                    smiles=smiles,
-                )
+                feature = self._featurize(featurizer=featurizer, smiles=smiles)
             except Exception as error:
-                raise ValueError(
-                    f"Failed to featurize SMILES at index "
-                    f"{index}: {smiles!r}"
-                ) from error
+                raise ValueError(f"Failed to featurize SMILES at index {index}: {smiles!r}") from error
 
             self.features.append(feature)
 
     @staticmethod
-    def _featurize(
-        featurizer: Any,
-        smiles: str,
-    ) -> Any:
+    def _featurize(featurizer: Any, smiles: str) -> Any:
         """
         Call the available Graphormer featurization interface.
 

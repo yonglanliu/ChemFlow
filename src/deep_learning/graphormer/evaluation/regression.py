@@ -44,17 +44,11 @@ class RegressionEvaluator(GraphormerEvaluator):
         self,
         predictions: torch.Tensor,
         targets: torch.Tensor,
-        loss: float,
+        loss: float | None = None,
         prefix: str = "val",
     ) -> dict[str, float]:
-        predictions = self._prepare_values(
-            predictions,
-            name="predictions",
-        )
-        targets = self._prepare_values(
-            targets,
-            name="targets",
-        )
+        predictions = self._prepare_values(predictions, name="predictions",)
+        targets = self._prepare_values(targets,name="targets")
 
         if predictions.shape != targets.shape:
             raise ValueError(
@@ -107,7 +101,7 @@ class RegressionEvaluator(GraphormerEvaluator):
         )
 
         return {
-            f"{prefix}_loss": float(loss),
+            f"{prefix}_loss": float(loss) if loss is not None else float("nan"),
             f"{prefix}_mae": float(mae),
             f"{prefix}_rmse": float(rmse),
             f"{prefix}_median_ae": float(median_ae),

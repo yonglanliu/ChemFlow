@@ -53,7 +53,6 @@ ml_training/
 # ============================================================
 # Models
 # ============================================================
-models/
 checkpoints/
 *.pt
 *.pth
@@ -83,6 +82,13 @@ bash/
 notebook/
 app/
 similarity_search_test/
-gpt_training/
 test/
+
+src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt
+graphormer_multitask_training/
+graphormer_training/
+dataset/
+lstm_training/
 diffusion_training/
+graphormer_training_regression/
+train/gpt_train.sh
