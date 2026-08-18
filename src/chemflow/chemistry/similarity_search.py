@@ -16,14 +16,7 @@ from rdkit.Chem import (
 
 
 class SimilarityCalculator:
-    def __init__(
-        self,
-        mode="2d_fingerprint",
-        metric="tanimoto",
-        radius=2,
-        n_bits=2048,
-        use_features=False,
-    ):
+    def __init__(self, mode="2d_fingerprint", metric="tanimoto", radius=2, n_bits=2048, use_features=False):
         """
         mode:
             2d_fingerprint
@@ -41,11 +34,7 @@ class SimilarityCalculator:
         self.n_bits = n_bits
         self.use_features = use_features
 
-        self.fpgen = self._get_morgan_generator(
-            radius=self.radius,
-            n_bits=self.n_bits,
-            use_features=self.use_features,
-        )
+        self.fpgen = self._get_morgan_generator(radius=self.radius, n_bits=self.n_bits, use_features=self.use_features)
 
     # -----------------------------
     # Molecule handling
@@ -125,10 +114,7 @@ class SimilarityCalculator:
                 atomInvariantsGenerator=rdFingerprintGenerator.GetMorganFeatureAtomInvGen(),
             )
 
-        return rdFingerprintGenerator.GetMorganGenerator(
-            radius=int(radius),
-            fpSize=int(n_bits),
-        )
+        return rdFingerprintGenerator.GetMorganGenerator(radius=int(radius), fpSize=int(n_bits))
 
     def calculate_fingerprint(self, smiles):
         mol = self.mol_from_smiles(smiles)

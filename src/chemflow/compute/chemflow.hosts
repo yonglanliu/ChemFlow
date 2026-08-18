@@ -1,0 +1,236 @@
+name:               localhost
+tmpdir:              /tmp
+
+
+
+# ======================================================================
+#   Request a single CPU per subjob
+# ======================================================================
+Name: singlecpu-quick
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 --time=00:30:00 --partition=quick --gres=lscratch:50 --mem=8g
+Host: localhost
+Processors: 64
+
+
+Name: singlecpu
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 --gres=lscratch:50 --mem=8g --partition=norm
+Host: localhost
+Processors: 64
+
+Name: singlecpu-day
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 --time=1-00:00:00 --partition=norm --gres=lscratch:50 --mem=8g
+Host: localhost
+Processors: 64
+
+Name: singlecpu-long
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 --time=4-00:00:00 --partition=norm --gres=lscratch:50 --mem=8g
+Host: localhost
+Processors: 64
+
+
+# ======================================================================
+#   Request %NPROC% Processors, one on each node
+# ======================================================================
+
+Name: multicpu-singlenode-quick
+Queue: SLURM2.1
+Qargs: --nodes=1 --ntasks=%NPROC% --cpus-per-task=1 --time=00:30:00 --partition=quick --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multicpu-singlenode
+Queue: SLURM2.1
+Qargs: --nodes=1 --ntasks=%NPROC% --cpus-per-task=1 --partition=norm --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multicpu-singlenode-day
+Queue: SLURM2.1
+Qargs: --nodes=1 --ntasks=%NPROC% --cpus-per-task=1 --time=1-00:00:00 --partition=norm --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multicpu-singlenode-long
+Queue: SLURM2.1
+Qargs: --nodes=1 --ntasks=%NPROC% --cpus-per-task=1 --time=4-00:00:00 --partition=norm --gres=lscratch:50 --mem=4g
+Host: localhost
+Processors: 64
+
+
+# ======================================================================
+#   Request %NPROC% Processors, spread across nodes, 8 cpus per node
+#   Note: %NPROC% must be a multiple of 8
+# ======================================================================
+
+Name: multicpu-multinode-8CPU-per-node-quick
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/8% --ntasks-per-node=8 --ntasks=%NPROC% --time=00:30:00 --partition=quick --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multicpu-multinode-8CPU-per-node
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/8% --ntasks-per-node=8 --ntasks=%NPROC% --partition=multinode --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multicpu-multinode-8CPU-per-node-day
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/8% --ntasks-per-node=8 --ntasks=%NPROC% --time=1-00:00:00 --partition=multinode --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multicpu-multinode-8CPU-per-node-long
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/8% --ntasks-per-node=8 --ntasks=%NPROC% --time=4-00:00:00 --partition=multinode --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+
+# ======================================================================
+#   Request %TPP% threads per node
+# ======================================================================
+
+Name: multinode-quick
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/TPP% --ntasks-per-node=%TPP% --ntasks=%NPROC% --time=00:30:00 --partition=quick --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multinode
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/TPP% --ntasks-per-node=%TPP% --ntasks=%NPROC% --partition=multinode --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multinode-day
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/TPP% --ntasks-per-node=%TPP% --ntasks=%NPROC% --time=1-00:00:00 --partition=multinode --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: multinode-long
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/TPP% --ntasks-per-node=%TPP% --ntasks=%NPROC% --time=4-00:00:00 --partition=multinode --gres=lscratch:50
+Host: localhost
+Processors: 64
+
+Name: 4-nodes-8-tasks-per-node
+Queue: SLURM2.1
+Qargs: --nodes=%NPROC/8% --ntasks-per-node=8 --ntasks=%NPROC% --cpus-per-task=1 --time=4:00:00 --partition=multinode --gres=lscratch:50
+Host: localhost
+Processors: 64
+Processors_per_node:8
+Parallel: true
+
+
+# ======================================================================
+#   GPU stuff
+# ======================================================================
+
+Name: singlecpu-singlegpu-quick
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:1,lscratch:50 partition=gpu --time=4:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K20xm
+gpgpu: 1, Tesla K20xm
+
+Name: singlecpu-doublegpu-quick
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:2,lscratch:50 partition=gpu --time=4:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K20xm
+gpgpu: 1, Tesla K20xm
+
+Name: singlecpu-singleK80gpu-quick
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:1,lscratch:50 partition=gpu --time=4:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K80
+gpgpu: 1, Tesla K80
+gpgpu: 2, Tesla K80
+gpgpu: 3, Tesla K80
+
+Name: singlecpu-doubleK80gpu-quick
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:2,lscratch:50 partition=gpu --time=4:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K80
+gpgpu: 1, Tesla K80
+gpgpu: 2, Tesla K80
+gpgpu: 3, Tesla K80
+
+Name: singlecpu-quadrupleK80gpu-quick
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:4,lscratch:50 partition=gpu --time=4:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K80
+gpgpu: 1, Tesla K80
+gpgpu: 2, Tesla K80
+gpgpu: 3, Tesla K80
+
+
+Name: singlecpu-singlegpu-long
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:1,lscratch:50 partition=gpu --time=4-00:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K20xm
+gpgpu: 1, Tesla K20xm
+
+Name: singlecpu-doublegpu-long
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:2,lscratch:50 partition=gpu --time=4-00:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K20xm
+gpgpu: 1, Tesla K20xm
+
+Name: singlecpu-singleK80gpu-long
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:1,lscratch:50 partition=gpu --time=4-00:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K80
+gpgpu: 1, Tesla K80
+gpgpu: 2, Tesla K80
+gpgpu: 3, Tesla K80
+
+Name: singlecpu-doubleK80gpu-long
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:2,lscratch:50 partition=gpu --time=4-00:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K80
+gpgpu: 1, Tesla K80
+gpgpu: 2, Tesla K80
+gpgpu: 3, Tesla K80
+
+Name: singlecpu-quadrupleK80gpu-long
+Queue: SLURM2.1
+Qargs: --ntasks=1 --cpus-per-task=1 gres=gpu:k80:4,lscratch:50 partition=gpu --time=4-00:00:00 --mem=8g
+Host: localhost
+Processors: 64
+Parallel: yes
+gpgpu: 0, Tesla K80
+gpgpu: 1, Tesla K80
+gpgpu: 2, Tesla K80
+gpgpu: 3, Tesla K80

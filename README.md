@@ -157,7 +157,7 @@ chemflow train graphormer exmaples/graphormer_regression.toml
 chemflow train gpt examples/gpt.toml
 ```
 
-## HPC Multi-GPU training (compartible with single-/multi-GPU, and MPS training)
+#### HPC Multi-GPU training (compartible with single-/multi-GPU, and MPS training)
 ```bash
 
 #!/bin/bash
@@ -211,7 +211,7 @@ else
 fi
 ```
 
-Generate molecules
+#### Generate molecules
 
 ```bash
 checkpoint_path = ""
@@ -232,8 +232,7 @@ chemflow generate gpt \
     --top_k "${top_k}"
 ```
 
-Predict properties
-
+#### Predict properties
 ```bash
 chemflow predict graphormer --smiles molecules.smi
 chemflow predict graphormer --input .smi/.smiles/.txt/.csv/.parquet \
@@ -241,8 +240,39 @@ chemflow predict graphormer --input .smi/.smiles/.txt/.csv/.parquet \
 --batch_size 16 \
 --num_workers 4 \ # Number of GPU workers, support multi-GPU for ultra large dataset
 --output ${output_path.csv/.parquet/.pq}
+```
+
+#### Similarity Search
+```bash
+# Similarity search for a single query SMILES against a molecular database.
+chemflow search similarity \
+    --query_smiles 'CCCS(=O)(=O)NC1=CC=C(F)C(C(=O)C2=CNC3=NC=C(C4=CC=C(C(=O)NCC)N=C4)C=C23)=C1F' \
+    --database ./dataset/ADMET/CYP/CYP_dataset.csv \
+    --structure-column SMILES \
+    --rep_type ecfp4 \
+    --metric tanimoto \
+    --num_workers 1 \
+    --num_shards 2 \
+    --top_k_ratio 0.1 \
+    --job_name similarity_search_smiles
 
 ```
+
+```bash
+# Similarity search for a single query file (.smi, .txt, .csv) against a molecular database.
+chemflow search similarity \
+    --query_file './query.smi' \
+    --database ./dataset/ADMET/CYP/CYP_dataset.csv \
+    --structure-column SMILES \
+    --rep_type ecfp4 \
+    --metric tanimoto \
+    --num_workers 1 \
+    --num_shards 2 \
+    --top_k_ratio 0.1 \
+    --job_name similarity_search_file
+```
+
+
 
 Launch Streamlit
 
@@ -268,9 +298,10 @@ streamlit run app.py
 
 ### Molecular Similarity
 
-- Morgan Fingerprints
-- MACCS
-- RDKit Fingerprints
+- Fingerprints: ecfp4, ecfp6, fcfp4, fcfp6 (n_bits=2048)
+- MACCS (n_bits=167)
+- RDKit 2d_descriptor: MolWt, MolLogP, TPSA, NumHAcceptors, NumHDonors, NumRotatableBonds, RingCount, HeavyAtomCount, FractionCSP3
+
 
 ### Similarity Method
 - Tanimoto

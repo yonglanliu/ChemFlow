@@ -5,6 +5,7 @@ import argparse
 from src.cli.train import add_train_parser
 from src.cli.generate import add_generate_parser
 from src.cli.predict import add_graphormer_predict_parser
+from src.cli.search import add_search_parser
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -17,6 +18,7 @@ def build_parser():
     add_train_parser(subparsers)
     add_generate_parser(subparsers)
     add_graphormer_predict_parser(subparsers)
+    add_search_parser(subparsers)
 
     return parser
 
