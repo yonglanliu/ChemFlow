@@ -1,0 +1,120 @@
+# ============================================================
+# Base
+# ============================================================
+
+[BaseConfig]
+
+workdir = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_multitask_training/laplace_nll"
+
+task = "multitask"
+
+seed = 42
+
+
+# ============================================================
+# Dataset
+# ============================================================
+
+[DatasetConfig]
+
+dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/ADMET/CYP/CYP_dataset.csv"
+
+smiles_column = "SMILES"
+target_column = ["pIC50_cyp3a4","pIC50_cyp2d6","pIC50_cyp2c9","pIC50_cyp1a2"]  # Replace with the actual target column
+task_names = ["pIC50_cyp3a4","pIC50_cyp2d6","pIC50_cyp2c9","pIC50_cyp1a2"]
+
+val_fraction = 0.1
+test_fraction = 0.1
+
+preprocess_batch_size = 100000
+
+max_nodes = 128
+multi_hop_max_dist = 5
+spatial_pos_max = 1024
+
+reorder_atoms = false
+remove_hs = true
+
+seed = 42
+
+
+# ============================================================
+# Featurizer
+# ============================================================
+
+[FeaturizerConfig]
+
+multi_hop_max_dist = 5
+remove_hs = true
+reorder_atoms = false
+
+
+# ============================================================
+# Training
+# ============================================================
+
+[GraphormerTrainingConfig]
+
+seed = 42
+
+batch_size = 16
+eval_batch_size = 16
+num_epochs = 100
+num_workers = 0
+
+# --- Learning Settings ---
+learning_rate = 1e-4
+encoder_learning_rate = 1e-5
+lora_learning_rate = 1e-4
+head_learning_rate = 1e-4
+weight_decay = 0.01
+scheduler = "cosine"
+gradient_clip_value = 1.0
+
+# --- Plotting Setting ---
+plot_training_history = true
+plot_dpi = 300
+
+# --- Resume Settings ---
+resume = false
+resume_checkpoint = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_multitask_training/checkpoints/last_model.pt"
+
+# --- Early Stopping Settings ---
+early_stopping = true
+early_stopping_patience = 20
+monitor_metric = "val_rmse"  # Options: "val_loss", "val_mae", "val_rmse", "val_r2"
+monitor_mode = "min"  # Options: "min", "max"
+
+# --- Evaluate Hold-out Test Set ---
+evaluate_test = true
+plot_evaluation_metrics = true
+
+
+# ============================================================
+# Graphormer model and fine-tuning
+# ============================================================
+
+[GraphormerConfig]
+
+pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
+num_tasks = 4
+loss_type = "laplace_NLL"  # 'mse', 'mae', 'huber', 'laplace_nll', or 'gaussian_nll'
+task_weights=[0.183, 0.250, 0.253, 0.314]
+
+freeze_encoder = true
+use_lora = true
+
+head_intermediate_dim = 256
+head_dropout = 0.1
+
+# LoRA
+lora_target = "all"  # attention | ffn | all
+
+lora_r = 8
+lora_alpha = 16.0
+lora_dropout = 0.1
+apply_lora_to_k_proj = false
+
+lora_ffn_r = 8
+lora_ffn_alpha = 16.0
+lora_use_fc2 = false
