@@ -234,8 +234,9 @@ chemflow generate gpt \
 
 #### Predict properties
 ```bash
-chemflow predict graphormer --smiles molecules.smi
+chemflow predict graphormer --task-names task_1,task_2,task_3 --smiles molecules.smi
 chemflow predict graphormer --input .smi/.smiles/.txt/.csv/.parquet \
+--task-names task_1,task_2,task_3
 --model-checkpoint ${best_model_checkpoint} \
 --batch_size 16 \
 --num_workers 4 \ # Number of GPU workers, support multi-GPU for ultra large dataset
