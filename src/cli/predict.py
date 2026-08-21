@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.deep_learning.graphormer.inference.predictor import (
@@ -20,6 +21,104 @@ SUPPORTED_INPUT_SUFFIXES = {
     ".pq",
     ".pt"
 }
+
+
+def parse_calibration_pairs(values: list[str] | tuple[str, ...] | None) -> list[tuple[str, str]]:
+    """
+    Parse calibration pairs from either strings like "target_0:predict_0" or
+    already-normalized tuples/lists like ("target_0", "predict_0").
+    """
+    if not values:
+        return []
+
+    pairs: list[tuple[str, str]] = []
+    for item in values:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            target_name, predict_name = [str(part).strip() for part in item]
+        else:
+            item = str(item).strip()
+            if not item:
+                continue
+            if ":" not in item:
+                raise ValueError(
+                    "Calibration pairs must use the form 'target_column:predict_column', "
+                    f"got {item!r}."
+                )
+            target_name, predict_name = [part.strip() for part in item.split(":", 1)]
+
+        if not target_name or not predict_name:
+            raise ValueError(
+                "Calibration pairs must include both target and prediction column names, "
+                f"got {item!r}."
+            )
+        pairs.append((target_name, predict_name))
+    return pairs
+
+
+def fit_calibration_from_frame(frame: pd.DataFrame, calibration_pairs: list[str] | tuple[str, ...] | None) -> dict[str, dict[str, float]]:
+    """
+    Fit robust calibration parameters from a validation frame in which target and
+    prediction columns are stored in the same table. Each pair is calibrated
+    independently; e.g. target_0:predict_0, target_1:predict_1, ...
+    """
+    pairs = parse_calibration_pairs(calibration_pairs)
+    if not pairs:
+        return {}
+
+    result: dict[str, dict[str, float]] = {}
+    for target_name, prediction_name in pairs:
+        if target_name not in frame.columns:
+            raise KeyError(f"Calibration target column '{target_name}' not found in input frame.")
+        if prediction_name not in frame.columns:
+            raise KeyError(f"Calibration prediction column '{prediction_name}' not found in input frame.")
+
+        targets = pd.to_numeric(frame[target_name], errors="coerce").to_numpy(dtype=float)
+        predictions = pd.to_numeric(frame[prediction_name], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(targets) & np.isfinite(predictions)
+        if not np.any(valid):
+            raise ValueError(
+                f"No finite calibration rows remained for pair '{target_name}:{prediction_name}'."
+            )
+
+        residuals = targets[valid] - predictions[valid]
+        offset = float(np.median(residuals))
+        scale = float(np.median(np.abs(residuals - offset)) * 1.4826)
+        if not np.isfinite(scale) or scale <= 1e-6:
+            scale = float(np.std(residuals, ddof=1) if residuals.size > 1 else 1e-6)
+        if not np.isfinite(scale) or scale <= 1e-6:
+            scale = 1e-6
+
+        result[f"{target_name}:{prediction_name}"] = {
+            "offset": offset,
+            "scale": scale,
+            "n_samples": int(valid.sum()),
+        }
+    return result
+
+
+def apply_calibration_to_predictions(frame: pd.DataFrame, calibration_pairs: list[str] | tuple[str, ...] | None) -> pd.DataFrame:
+    """
+    Apply target-specific calibration by adjusting each prediction column using the
+    stored residual bias and uncertainty scale.
+    """
+    pairs = parse_calibration_pairs(calibration_pairs)
+    if not pairs:
+        return frame.copy()
+
+    calibrated = frame.copy()
+    for target_name, prediction_name in pairs:
+        if prediction_name not in calibrated.columns:
+            continue
+
+        calibration_key = f"{target_name}:{prediction_name}"
+        calibration = fit_calibration_from_frame(calibrated, [calibration_key])[calibration_key]
+
+        offset = float(calibration.get("offset", 0.0))
+        scale = float(calibration.get("scale", 1.0))
+        calibrated[prediction_name] = pd.to_numeric(calibrated[prediction_name], errors="coerce") + offset
+        calibrated[f"{prediction_name}_std"] = scale
+        calibrated[f"{prediction_name}_uncertainty"] = scale
+    return calibrated
 
 
 def read_smi_file(path: str | Path, structure_column: str = "structure") -> pd.DataFrame:
@@ -174,6 +273,36 @@ def save_prediction_frame(frame: pd.DataFrame, output_path: str | Path) -> Path:
     return output_path
 
 
+def align_prediction_columns_for_calibration(
+    result_frame: pd.DataFrame,
+    prediction_frame: pd.DataFrame,
+    calibration_pairs: list[tuple[str, str]],
+) -> pd.DataFrame:
+    """
+    Ensure each pair's prediction column exists in the output data frame before
+    applying calibration. This supports the paired validation-file workflow where
+    calibration is specified as target_i:predict_i while inference may still emit
+    a generic prediction column name such as 'prediction' or 'task_0'.
+    """
+    expected_prediction_names = {prediction_name for _, prediction_name in calibration_pairs}
+    missing_prediction_names = expected_prediction_names - set(result_frame.columns)
+
+    if not missing_prediction_names:
+        return result_frame
+
+    if len(prediction_frame.columns) == 1 and len(expected_prediction_names) == 1:
+        prediction_name = next(iter(expected_prediction_names))
+        result_frame[prediction_name] = pd.to_numeric(prediction_frame.iloc[:, 0], errors="coerce")
+        return result_frame
+
+    if len(prediction_frame.columns) == len(calibration_pairs):
+        for index, (_, prediction_name) in enumerate(calibration_pairs):
+            result_frame[prediction_name] = pd.to_numeric(prediction_frame.iloc[:, index], errors="coerce")
+        return result_frame
+
+    return result_frame
+
+
 def predict_graphormer(args) -> None:
     """
     Run Graphormer inference from one SMILES or a molecular structure file.
@@ -201,10 +330,27 @@ def predict_graphormer(args) -> None:
         structure_column=args.structure_column,
     )
 
+    calibration_pairs = parse_calibration_pairs(getattr(args, "calibration_pairs", None))
+    calibration_frame = None
+
+    if bool(getattr(args, "calibration_file", None)) != bool(calibration_pairs):
+        raise ValueError(
+            "Calibration requires both --calibration-file and --calibration-pairs, "
+            "or neither. Use pairs like 'target_0:predict_0'."
+        )
+
+    if calibration_pairs:
+        calibration_path = Path(args.calibration_file).expanduser().resolve()
+        if not calibration_path.is_file():
+            raise FileNotFoundError(f"Calibration file does not exist: {calibration_path}")
+        calibration_frame = pd.read_csv(calibration_path)
+
     predictor = GraphormerPredictor(
         checkpoint_path=args.model_checkpoint,
         device=args.device,
         threshold=args.threshold,
+        validation_predictions=None,
+        validation_targets=None,
     )
 
     structures = (input_frame[args.structure_column].astype(str).tolist())
@@ -227,6 +373,26 @@ def predict_graphormer(args) -> None:
         )
 
     result_frame = pd.concat([input_frame.reset_index(drop=True), prediction_frame.reset_index(drop=True)], axis=1)
+
+    if calibration_pairs:
+        result_frame = align_prediction_columns_for_calibration(
+            result_frame=result_frame,
+            prediction_frame=prediction_frame,
+            calibration_pairs=calibration_pairs,
+        )
+
+    if calibration_frame is not None and calibration_pairs:
+        calibrations = fit_calibration_from_frame(calibration_frame, calibration_pairs)
+        for target_name, prediction_name in calibration_pairs:
+            key = f"{target_name}:{prediction_name}"
+            if prediction_name not in result_frame.columns:
+                continue
+            if key not in calibrations:
+                continue
+            calibration = calibrations[key]
+            result_frame[prediction_name] = pd.to_numeric(result_frame[prediction_name], errors="coerce") + calibration["offset"]
+            result_frame[f"{prediction_name}_std"] = calibration["scale"]
+            result_frame[f"{prediction_name}_uncertainty"] = calibration["scale"]
 
     if task_names:
         old_cols = result_frame.columns[-len(task_names):].tolist()
@@ -371,6 +537,27 @@ def add_graphormer_predict_parser(subparsers) -> None:
     # ---------------------------------------------------------
     # Output
     # ---------------------------------------------------------
+    graphormer_parser.add_argument(
+        "--calibration-file",
+        type=str,
+        default=None,
+        help=(
+            "Optional CSV with validation targets and predictions in the same file. "
+            "Use with --calibration-pairs such as 'target_0:predict_0'."
+        ),
+    )
+
+    graphormer_parser.add_argument(
+        "--calibration-pairs",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Pairs of columns to calibrate in the same validation file, e.g. "
+            "'target_0:predict_0 target_1:predict_1'."
+        ),
+    )
+
     graphormer_parser.add_argument(
         "--output",
         type=str,

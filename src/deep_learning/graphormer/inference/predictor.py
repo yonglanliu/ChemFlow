@@ -165,7 +165,14 @@ class GraphormerPredictor:
     regression values or classification probabilities.
     """
 
-    def __init__(self, checkpoint_path: str | Path, device: Optional[str] = None, threshold: float = 0.5,) -> None:
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        device: Optional[str] = None,
+        threshold: float = 0.5,
+        validation_predictions: Optional[np.ndarray | list[float] | tuple[float, ...]] = None,
+        validation_targets: Optional[np.ndarray | list[float] | tuple[float, ...]] = None,
+    ) -> None:
 
         self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
 
@@ -230,7 +237,14 @@ class GraphormerPredictor:
 
         self.featurizer = GraphormerFeaturizer(**namespace_to_dict(self.featurizer_config))
 
+        self.regression_calibration: dict[str, float] | None = None
         self.classification_type = (self._resolve_classification_type() if self.task == "classification" else None)
+
+        if self.task == "regression" and validation_predictions is not None and validation_targets is not None:
+            self.fit_regression_calibration(
+                validation_predictions=validation_predictions,
+                validation_targets=validation_targets,
+            )
 
         print(f"Loaded checkpoint: {self.checkpoint_path}")
         print(f"Task: {self.task}")
@@ -424,9 +438,95 @@ class GraphormerPredictor:
             raw_predictions
         )
 
+    def fit_regression_calibration(
+        self,
+        validation_predictions: np.ndarray | list[float] | tuple[float, ...],
+        validation_targets: np.ndarray | list[float] | tuple[float, ...],
+        *,
+        min_scale: float = 1e-6,
+    ) -> dict[str, float]:
+        # Calibration is fitted on the validation set by comparing model outputs to
+        # the observed target values. The residuals r = y - y_hat capture the model's
+        # systematic bias and spread.
+        predictions = np.asarray(validation_predictions, dtype=np.float64).reshape(-1)
+        targets = np.asarray(validation_targets, dtype=np.float64).reshape(-1)
+
+        if predictions.shape != targets.shape:
+            raise ValueError(
+                "Validation predictions and targets must have the same length: "
+                f"{predictions.shape} versus {targets.shape}."
+            )
+
+        valid_mask = np.isfinite(predictions) & np.isfinite(targets)
+        predictions = predictions[valid_mask]
+        targets = targets[valid_mask]
+
+        if predictions.size == 0:
+            raise ValueError("No finite validation predictions and targets remain for calibration.")
+
+        # Residuals = target - prediction. The median residual gives the average bias
+        # of the model on validation data, while the median absolute deviation (MAD)
+        # estimates the typical spread of that bias. Multiplying by 1.4826 converts
+        # MAD to an estimate comparable to the standard deviation under a Gaussian
+        # assumption. This makes the calibration robust to outliers.
+        residuals = targets - predictions
+        offset = float(np.median(residuals))
+        abs_residuals = np.abs(residuals - offset)
+        scale = float(np.median(abs_residuals) * 1.4826)
+
+        # Fall back to the standard deviation if the robust estimate is unstable or
+        # zero, which prevents degenerate calibration values when the validation set is
+        # very small or unusually concentrated.
+        if not np.isfinite(scale) or scale <= min_scale:
+            scale = float(np.std(residuals, ddof=1) if residuals.size > 1 else min_scale)
+
+        if not np.isfinite(scale) or scale <= min_scale:
+            scale = min_scale
+
+        calibration = {
+            "offset": float(offset),
+            "scale": float(scale),
+            "n_samples": int(predictions.size),
+        }
+
+        self.regression_calibration = calibration
+        return calibration
+
+    def fit_calibration(
+        self,
+        validation_predictions: np.ndarray | list[float] | tuple[float, ...],
+        validation_targets: np.ndarray | list[float] | tuple[float, ...],
+        *,
+        min_scale: float = 1e-6,
+    ) -> dict[str, float]:
+        return self.fit_regression_calibration(
+            validation_predictions=validation_predictions,
+            validation_targets=validation_targets,
+            min_scale=min_scale,
+        )
+
     def _format_predictions(self, predictions: torch.Tensor) -> pd.DataFrame:
         if self.task == "regression":
             values = (predictions.reshape(-1).to(dtype=torch.float32).numpy())
+
+            if self.regression_calibration is not None:
+                # Apply the validation-derived correction to future predictions.
+                # The offset shifts the raw regression output to remove the validation
+                # bias, and the scale is used as a calibrated uncertainty estimate.
+                offset = float(self.regression_calibration.get("offset", 0.0))
+                scale = float(self.regression_calibration.get("scale", 1.0))
+                calibrated_predictions = values + offset
+                calibrated_std = np.full_like(calibrated_predictions, scale, dtype=np.float64)
+
+                return pd.DataFrame(
+                    {
+                        "prediction": calibrated_predictions,
+                        "prediction_std": calibrated_std,
+                        "uncertainty": calibrated_std,
+                        "prediction_lower": calibrated_predictions - 1.96 * calibrated_std,
+                        "prediction_upper": calibrated_predictions + 1.96 * calibrated_std,
+                    }
+                )
 
             return pd.DataFrame({"prediction": values})
 
