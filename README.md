@@ -262,7 +262,7 @@ split_column = "split"
 [GraphormerConfig]
 num_tasks = 3
 loss_type = "laplace_NLL"
-task_weight_method = "sqr_inverse"
+task_weight_method = "sqrt_inverse"  # "sqrt_inverse" | "inverse" | "customed"
 sharing_type = "hard"
 num_adapters = 2
 task_groups = [[0, 1], [2]]
