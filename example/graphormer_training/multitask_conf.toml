@@ -4,7 +4,7 @@
 
 [BaseConfig]
 
-workdir = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_multitask_training/laplace_nll"
+workdir = "/Users/yonglanliu/Desktop/ChemFlow/expansionrx_mtl_training/Multtask_to_OneAdaptor"
 
 task = "multitask"
 
@@ -17,11 +17,15 @@ seed = 42
 
 [DatasetConfig]
 
-dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/ADMET/CYP/CYP_dataset.csv"
+dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/ADMET/ExpansionRX/expansion_data_train.csv"
 
 smiles_column = "SMILES"
-target_column = ["pIC50_cyp3a4","pIC50_cyp2d6","pIC50_cyp2c9","pIC50_cyp1a2"]  # Replace with the actual target column
-task_names = ["pIC50_cyp3a4","pIC50_cyp2d6","pIC50_cyp2c9","pIC50_cyp1a2"]
+target_column = ["LogD", "LogS", "Log(MLM_Clint)", "Log(HLM_Clint)", "Log(Caco2_Papp)", "Log(Caco2_ER)", "Log(MPPB)", "Log(MBPB)", "Log(MGMB)"]
+task_names = ["LogD", "LogS", "Log(MLM_Clint)", "Log(HLM_Clint)", "Log(Caco2_Papp)", "Log(Caco2_ER)", "Log(MPPB)", "Log(MBPB)", "Log(MGMB)"]
+
+# Optional: set this when the dataset already contains split labels like train/val/test.
+# If omitted, the loader falls back to random val/test splitting.
+split_column = "split"
 
 val_fraction = 0.1
 test_fraction = 0.1
@@ -97,15 +101,31 @@ plot_evaluation_metrics = true
 [GraphormerConfig]
 
 pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
-num_tasks = 4
+num_tasks = 9
 loss_type = "laplace_NLL"  # 'mse', 'mae', 'huber', 'laplace_nll', or 'gaussian_nll'
-task_weights=[0.183, 0.250, 0.253, 0.314]
+
+# Automatic availability-based task weighting.
+# Supported methods: "inverse", "sqr_inverse"/"sqrt_inverse", or "customed".
+# Leave task_weights unset to let the trainer compute it automatically.
+task_weight_method = "sqr_inverse"  # "inverse", "sqrt_inverse", or "customed".
+# task_weights = [0.09, 0.10, 0.10, 0.12, 0.11, 0.11, 0.15, 0.12, 0.10]
+
+
+# Multi-adaptor / grouped task-head settings
+# Group tasks by similar assay families and share one adaptor per group.
+sharing_type = "hard"
+num_adapters = 4
+task_groups = [[0, 1], [2, 3], [4, 5], [6, 7, 8]]
 
 freeze_encoder = true
 use_lora = true
 
 head_intermediate_dim = 256
 head_dropout = 0.1
+adaptor_bottleneck_dim = 128
+adaptor_dropout = 0.1
+adaptor_gate = true
+adaptor_gate_fn = "tanh"
 
 # LoRA
 lora_target = "all"  # attention | ffn | all

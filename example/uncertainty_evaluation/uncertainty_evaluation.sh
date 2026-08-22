@@ -1,0 +1,12 @@
+chemflow uncertainty bootstrap \
+    --input /Users/yonglanliu/Desktop/ChemFlow/graphormer_multitask_training/laplace_nll/test_predictions.csv \
+    --task cyp3a4:target_0:pIC50_cyp3a4 \
+    --task cyp2d6:target_1:pIC50_cyp2d6 \
+    --task cyp2c9:target_2:pIC50_cyp2c9 \
+    --task cyp1a2:target_3:pIC50_cyp1a2 \
+    --metrics r2 mae rmse pearson spearman kendall \
+    --n-bootstrap 2000 \
+    --confidence-level 0.95 \
+    --seed 42 \
+    --plot-distributions \
+    --output-dir ./bootstrap_results
