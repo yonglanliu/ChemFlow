@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
@@ -176,6 +177,23 @@ def _split_batch(
         "test": {"smiles": test_smiles, "targets": test_targets},
     }
 
+def _normalize_split_name(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    normalized = str(value).strip().lower()
+    aliases = {
+        "train": "train",
+        "training": "train",
+        "val": "val",
+        "valid": "val",
+        "validation": "val",
+        "test": "test",
+        "testing": "test",
+    }
+    return aliases.get(normalized, None)
+
+
 def _count_task_samples(
     data_list: list[Data],
     task_names: list[str],
@@ -186,7 +204,7 @@ def _count_task_samples(
         if not hasattr(data, "y") or data.y is None:
             continue
 
-        y = data.y.reshape(-1)
+        y = torch.as_tensor(data.y, dtype=torch.float32).reshape(-1)
 
         if y.numel() != len(task_names):
             raise ValueError(
@@ -222,24 +240,14 @@ def _save_shard(
 
     shard_path = cache_dir / f"{split_name}_{shard_idx:05d}.pt"
 
-    torch.save(
-        data_list,
-        shard_path,
-    )
+    torch.save(data_list, shard_path)
 
     task_counts = {}
 
     if task_names is not None:
-        task_counts = _count_task_samples(
-            data_list,
-            task_names,
-        )
+        task_counts = _count_task_samples(data_list, task_names)
 
-    return (
-        str(shard_path),
-        len(data_list),
-        task_counts,
-    )
+    return (str(shard_path), len(data_list), task_counts)
 
 
 def featurize_and_cache_dataset(
@@ -248,44 +256,24 @@ def featurize_and_cache_dataset(
     cache_dir: str | Path,
 ) -> dict[str, Any]:
 
-    dataset_path = (
-        Path(dataset_config.dataset_path)
-        .expanduser()
-        .resolve()
-    )
+    dataset_path = (Path(dataset_config.dataset_path).expanduser().resolve())
 
-    cache_dir = (
-        Path(cache_dir)
-        .expanduser()
-        .resolve()
-    )
+    cache_dir = (Path(cache_dir).expanduser().resolve())
 
-    manifest_path = (
-        cache_dir / "graphormer_manifest.pt"
-    )
+    manifest_path = (cache_dir / "graphormer_manifest.pt")
 
     train_cache_dir = cache_dir / "train"
     val_cache_dir = cache_dir / "val"
     test_cache_dir = cache_dir / "test"
 
     if manifest_path.exists():
-        print(
-            f"Loading Graphormer cache manifest "
-            f"from {manifest_path}"
-        )
+        print(f"Loading Graphormer cache manifest from {manifest_path}")
 
-        return safe_torch_load(
-            manifest_path,
-            map_location="cpu",
-        )
+        return safe_torch_load(manifest_path, map_location="cpu")
 
     smiles_column = dataset_config.smiles_column
 
-    target_column = getattr(
-        dataset_config,
-        "target_column",
-        None,
-    )
+    target_column = getattr(dataset_config, "target_column", None)
 
     # ---------------------------------------------------------
     # Resolve task names
@@ -352,6 +340,123 @@ def featurize_and_cache_dataset(
             "must be less than 1."
         )
 
+    seed = int(
+        getattr(
+            dataset_config,
+            "seed",
+            42,
+        )
+    )
+
+    batch_size = int(
+        getattr(
+            dataset_config,
+            "preprocess_batch_size",
+            100_000,
+        )
+    )
+
+    split_column = getattr(dataset_config, "split_column", None)
+    split_column = getattr(dataset_config, "split_col", split_column)
+
+    if split_column is not None:
+        split_column = str(split_column)
+
+        if dataset_path.suffix.lower() in {".csv"}:
+            df = pd.read_csv(dataset_path)
+        elif dataset_path.suffix.lower() in {".parquet", ".pq"}:
+            try:
+                import pyarrow.parquet as pq
+                df = pq.read_table(dataset_path).to_pandas()
+            except Exception as exc:  # pragma: no cover
+                raise RuntimeError(f"Failed to read parquet dataset for split column '{split_column}'.") from exc
+        else:
+            raise ValueError(
+                f"split_column is only supported for CSV or Parquet datasets, got {dataset_path.suffix}"
+            )
+
+        if split_column not in df.columns:
+            raise ValueError(
+                f"split_column '{split_column}' was not found in the dataset. "
+                f"Available columns: {list(df.columns)[:20]}"
+            )
+
+        required_columns = [smiles_column]
+        if target_column is not None:
+            if isinstance(target_column, str):
+                required_columns.append(target_column)
+            else:
+                required_columns.extend(list(target_column))
+        required_columns.append(split_column)
+
+        df = df[required_columns].dropna(subset=[smiles_column])
+
+        split_groups: dict[str, list[str]] = {"train": [], "val": [], "test": []}
+        split_targets: dict[str, list[Any]] = {"train": [], "val": [], "test": []}
+
+        if target_column is None:
+            for _, row in df.iterrows():
+                split_value = _normalize_split_name(row[split_column])
+                if split_value is None:
+                    continue
+                split_groups[split_value].append(str(row[smiles_column]).strip())
+        else:
+            if isinstance(target_column, str):
+                target_columns = [target_column]
+            else:
+                target_columns = list(target_column)
+
+            for _, row in df.iterrows():
+                split_value = _normalize_split_name(row[split_column])
+                if split_value is None:
+                    continue
+
+                split_groups[split_value].append(str(row[smiles_column]).strip())
+                split_targets[split_value].append([
+                    row[col] if col in row and pd.notna(row[col]) else np.nan
+                    for col in target_columns
+                ])
+
+        cache_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        for split_name in ("train", "val", "test"):
+            current_dir = cache_dir / split_name
+            current_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest: dict[str, Any] = {
+            "train": [],
+            "val": [],
+            "test": [],
+            "dataset_path": str(dataset_path),
+            "smiles_column": smiles_column,
+            "target_column": target_column,
+            "task_names": task_names,
+            "split_column": split_column,
+            "split_mode": "existing",
+            "preprocess_batch_size": batch_size,
+            "total_count": int(sum(len(v) for v in split_groups.values())),
+            "valid_count": int(sum(len(v) for v in split_groups.values())),
+        }
+
+        for split_name in ("train", "val", "test"):
+            split_smiles = split_groups.get(split_name, [])
+            split_target_values = split_targets.get(split_name, []) if target_column is not None else None
+            if not split_smiles:
+                continue
+
+            shard_path = cache_dir / split_name / f"{split_name}_00000.pt"
+            data_list = featurize_smiles_list(split_smiles, featurizer, split_target_values)
+            torch.save(data_list, shard_path)
+            manifest[split_name] = [str(shard_path)]
+
+        manifest_path = cache_dir / "graphormer_manifest.pt"
+        torch.save(manifest, manifest_path)
+        print(f"Loaded existing split from column '{split_column}' and saved Graphormer cache manifest to {manifest_path}")
+        return manifest
+
     cache_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -372,22 +477,6 @@ def featurize_and_cache_dataset(
             parents=True,
             exist_ok=True,
         )
-
-    seed = int(
-        getattr(
-            dataset_config,
-            "seed",
-            42,
-        )
-    )
-
-    batch_size = int(
-        getattr(
-            dataset_config,
-            "preprocess_batch_size",
-            100_000,
-        )
-    )
 
     multi_hop_max_dist = getattr(
         dataset_config,
@@ -515,7 +604,8 @@ def featurize_and_cache_dataset(
         )
 
         for split_name in ("train", "val", "test"):
-            split_raw_counts[split_name] += len(split_data[split_name]["smiles"])
+            split_smiles = split_data[split_name].get("smiles") or []
+            split_raw_counts[split_name] += len(split_smiles)
 
         # -----------------------------------------------------
         # Train

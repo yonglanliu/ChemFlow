@@ -23,6 +23,7 @@ from src.deep_learning.graphormer.config import (
     GraphormerFinetuneClassificationConfig,
     GraphormerFinetuneRegressionConfig,
     GraphormerFinetuneMultitaskConfig,
+    calculate_task_weights,
 )
 from src.deep_learning.graphormer.evaluation.classification import ClassificationEvaluator
 from src.deep_learning.graphormer.evaluation.regression import RegressionEvaluator
@@ -59,6 +60,7 @@ from src.deep_learning.utils import (
 )
 from functools import partial
 import numpy as np
+import pandas as pd
 
 
 def update_dataclass_from_config(target: Any, source: Any, *, strict: bool = False) -> Any:
@@ -345,6 +347,32 @@ class GraphormerDDPTrainer:
         # To support multi-task learning, we can add a new task type "multitask" here.
         elif self.task == "multitask":
             self.model_config = update_dataclass_from_config(GraphormerFinetuneMultitaskConfig(), raw_model_config)
+
+            if self.model_config.task_weights is None:
+                dataset_df = pd.read_csv(self.dataset_config.dataset_path)
+                task_names = list(getattr(self.dataset_config, "task_names", []) or [])
+                if not task_names:
+                    task_names = list(getattr(self.dataset_config, "target_column", []) or [])
+                if not task_names:
+                    raise ValueError("No task names available for automatic task weight calculation.")
+
+                split_column = getattr(self.dataset_config, "split_column", None)
+                if split_column and split_column in dataset_df.columns:
+                    split_values = dataset_df[split_column].astype(str).str.strip().str.lower()
+                    train_df = dataset_df[split_values.isin({"train", "training"})].copy()
+                    if train_df.empty:
+                        train_df = dataset_df.copy()
+                else:
+                    train_df = dataset_df.copy()
+
+                weight_dict = calculate_task_weights(
+                    train_df=train_df,
+                    endpoints=task_names,
+                    method=getattr(self.model_config, "task_weight_method", "sqrt_inverse"),
+                    custom_task_weights=getattr(self.model_config, "task_weights", None),
+                )
+                self.model_config.task_weights = [weight_dict.get(name, 1.0) for name in task_names]
+
             self.model = GraphormerMultiTaskModel(cfg=self.model_config)
             self.evaluator = MultiTaskEvaluator()  # or a custom evaluator for multi-task
         else:

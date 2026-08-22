@@ -42,22 +42,10 @@ class GraphormerMultiTaskModel(nn.Module):
             apply_graphormer_init=cfg.apply_graphormer_init,
             activation_fn=cfg.activation_fn,
             embed_scale=getattr(cfg, "embed_scale", None),
-            freeze_layer_indices=getattr(
-                cfg,
-                "freeze_layer_indices",
-                None,
-            ),
+            freeze_layer_indices=getattr(cfg, "freeze_layer_indices", None),
             traceable=getattr(cfg, "traceable", False),
-            last_state_only=getattr(
-                cfg,
-                "last_state_only",
-                False,
-            ),
-            use_quant_noise=getattr(
-                cfg,
-                "use_quant_noise",
-                False,
-            ),
+            last_state_only=getattr(cfg, "last_state_only", False),
+            use_quant_noise=getattr(cfg, "use_quant_noise", False),
             q_noise=getattr(cfg, "q_noise", 0.0),
             qn_block_size=getattr(cfg, "qn_block_size", 8),
         )
@@ -73,10 +61,7 @@ class GraphormerMultiTaskModel(nn.Module):
             pretrained_path = Path(pretrained_path).expanduser().resolve()
 
             if not pretrained_path.exists():
-                raise FileNotFoundError(
-                    f"Pretrained checkpoint does not exist: "
-                    f"{pretrained_path}"
-                )
+                raise FileNotFoundError(f"Pretrained checkpoint does not exist: {pretrained_path}")
 
             self.load_pretrained_parameters(pretrained_path)
             
@@ -103,19 +88,21 @@ class GraphormerMultiTaskModel(nn.Module):
 
         adaptor_kwargs = {
             "gate": self.adaptor_gate,
-            "gate_fn": self.adaptor_gate_fn,
-        }
+            "gate_fn": self.adaptor_gate_fn
+            }
 
         sharing_type = getattr(cfg, "sharing_type", "hard").lower()
 
         if sharing_type not in {"hard", "soft"}:
-            raise ValueError(
-                f"Unsupported sharing_type: {sharing_type}. "
+            raise ValueError(f"Unsupported sharing_type: {sharing_type}. "
                 "Expected 'hard' or 'soft'."
             )
 
         # GraphormerGraphEncoder produces features with encoder_embed_dim.
         feature_dim = cfg.encoder_embed_dim
+
+        num_adapters = getattr(cfg, "num_adapters", None)
+        task_groups = getattr(cfg, "task_groups", None)
 
         if sharing_type == "hard":
             self.multi_task_model = HardSharingMTL(
@@ -126,6 +113,8 @@ class GraphormerMultiTaskModel(nn.Module):
                 adaptor_dropout=cfg.adaptor_dropout,
                 adaptor_activation=F.relu,
                 adaptor_kwargs=adaptor_kwargs,
+                num_adapters=num_adapters,
+                task_groups=task_groups,
             )
         else:
             self.multi_task_model = SoftSharingMTL(
@@ -136,10 +125,28 @@ class GraphormerMultiTaskModel(nn.Module):
                 adaptor_dropout=cfg.adaptor_dropout,
                 adaptor_activation=F.relu,
                 adaptor_kwargs=adaptor_kwargs,
+                num_adapters=num_adapters,
+                task_groups=task_groups,
             )
 
-        self.task_weights = torch.tensor(getattr(cfg, "task_weights", None)) if getattr(cfg, "task_weights", None) is not None else None
-        
+        task_weights = getattr(cfg, "task_weights", None)
+        if task_weights is None:
+            task_weight_method = getattr(cfg, "task_weight_method", "sqr_inverse")
+            custom_task_weights = getattr(cfg, "custom_task_weights", None)
+            task_weight_args = getattr(cfg, "task_weight_args", None)
+
+            if task_weight_args is not None and isinstance(task_weight_args, dict):
+                task_weights = task_weight_args.get("weights")
+                if task_weight_method == "customed" and task_weights is None:
+                    task_weights = custom_task_weights
+            elif custom_task_weights is not None and task_weight_method in {"customed", "customized"}:
+                task_weights = custom_task_weights
+
+            if task_weights is None:
+                task_weights = [1.0] * cfg.num_tasks
+
+        self.task_weights = torch.tensor(task_weights, dtype=torch.float32)
+
         loss_type = getattr(cfg, "loss_type", "huber").lower()
         print(f"Using loss_type: {loss_type} for multi-task learning.")
 
@@ -159,16 +166,9 @@ class GraphormerMultiTaskModel(nn.Module):
                 "Expected 'mse', 'mae', 'huber', 'laplace_nll', or 'gaussian_nll'."
             )
 
-        
-
         self.print_model_summary()
 
-    def forward(
-        self,
-        batched_data,
-        perturb: torch.Tensor | None = None,
-        **kwargs,
-    ) -> dict[str, torch.Tensor]:
+    def forward(self, batched_data, perturb: torch.Tensor | None = None, **kwargs) -> dict[str, torch.Tensor]:
         """
         Predict all tasks for one batch.
 
@@ -186,11 +186,7 @@ class GraphormerMultiTaskModel(nn.Module):
         return:
             Dictionary of task predictions, keyed by task name.
         """
-        outputs = self.multi_task_model.forward_all(
-            batched_data,
-            perturb=perturb,
-            **kwargs,
-        )
+        outputs = self.multi_task_model.forward_all(batched_data, perturb=perturb, **kwargs)
         if isinstance(batched_data, dict):
             y = batched_data.get("y")
         else:
@@ -206,15 +202,15 @@ class GraphormerMultiTaskModel(nn.Module):
         else: 
             task_losses = None
             loss = None
-        predictions = torch.cat(
-            [outputs[f"task_{i}"] for i in range(len(outputs))],
-            dim=1,
-        )
+        
+        predictions = torch.cat([outputs[f"task_{i}"] for i in range(len(outputs))], dim=1)
+
         out_dict = {"predictions": predictions}
         if loss is not None:
             out_dict["loss"] = loss
         if task_losses is not None:
             out_dict["task_losses"] = task_losses
+
         return out_dict
 
     def forward_task(

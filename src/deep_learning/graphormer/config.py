@@ -2,9 +2,62 @@ from typing import Dict, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 from omegaconf import II
 
 CURRENT_PATH = Path(__file__).resolve()
+
+def calculate_task_weights(
+    train_df: pd.DataFrame,
+    endpoints: list[str] | None = None,
+    method: str = "sqr_inverse",
+    custom_task_weights: list[float] | None = None,
+) -> dict[str, float]:
+    """Calculate task weights from label availability in a training dataframe.
+
+    Supported methods:
+      - "inverse": w_i = 1 / availability_i
+      - "sqrt_inverse" / "sqr_inverse": w_i = 1 / sqrt(availability_i)
+      - "customed" / "customized": use a user-provided custom_task_weights list
+    """
+    endpoint_list = list(endpoints or [])
+
+    missing = [name for name in endpoint_list if name not in train_df.columns]
+    if missing:
+        raise ValueError(
+            "Missing task columns for weight calculation: "
+            f"{missing}"
+        )
+
+    availability = train_df[endpoint_list].notna().mean()
+    method_name = str(method).strip().lower()
+    method_name = "sqrt_inverse" if method_name == "sqr_inverse" else method_name
+    method_name = "customed" if method_name in {"customed", "customized"} else method_name
+
+    if method_name == "inverse":
+        weights = 1.0 / availability
+    elif method_name == "sqrt_inverse":
+        weights = 1.0 / np.sqrt(availability)
+    elif method_name == "customed":
+        if custom_task_weights is None:
+            raise ValueError(
+                "custom_task_weights must be provided when method is 'customed'."
+            )
+        if len(custom_task_weights) != len(endpoint_list):
+            raise ValueError(
+                "custom_task_weights length does not match the number of endpoints: "
+                f"expected {len(endpoint_list)}, got {len(custom_task_weights)}."
+            )
+        weights = pd.Series(custom_task_weights, index=endpoint_list)
+    else:
+        raise ValueError(
+            "method must be one of: 'inverse', 'sqrt_inverse', 'customed', or 'customized'."
+        )
+
+    weights = weights / weights.mean()
+    print(f'Weights calculated using method "{method_name}": {weights.to_dict()}')
+    return {key: float(value) for key, value in weights.to_dict().items()}
 
 @dataclass
 class GraphormerPretrainedConfig:
@@ -291,5 +344,21 @@ class GraphormerFinetuneMultitaskConfig(GraphormerPretrainedConfig, LoraConfig):
     )
     task_weights: Optional[list[float]] = field(
         default=None,
-        metadata={"help": "Weights for each task in multi-task learning."},
+        metadata={"help": "Explicit weights for each task in multi-task learning."},
+    )
+    task_weight_method: str = field(
+        default="sqrt_inverse",
+        metadata={"help": "Task-weight generation method: 'inverse', 'sqrt_inverse', or 'customed'."},
+    )
+    custom_task_weights: Optional[list[float]] = field(
+        default=None,
+        metadata={"help": "Custom task weights used when task_weight_method is 'customed'."},
+    )
+    num_adapters: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of shared adaptors. If omitted, it defaults to one adaptor per task."},
+    )
+    task_groups: Optional[list[list[int]]] = field(
+        default=None,
+        metadata={"help": "Explicit task group assignments, where each inner list contains task indices sharing one adaptor."},
     )

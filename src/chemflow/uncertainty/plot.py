@@ -282,6 +282,7 @@ def plot_multitask_metrics(
         "Metric value",
         fontsize=20,
     )
+    ax.set_ylim(0.0, 1.0)
 
     ci_percentage = int(
         round(
@@ -292,7 +293,9 @@ def plot_multitask_metrics(
 
     ax.set_title(
         "Multi-task model performance "
-        f"with {ci_percentage}% bootstrap confidence intervals"
+        f"with {ci_percentage}% bootstrap confidence intervals",
+        fontsize=20,
+        pad=18,
     )
 
     # --------------------------------------------------------
@@ -393,9 +396,12 @@ def plot_multitask_metrics(
         frameon=True,
         fontsize=16,
         title_fontsize=16,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
     )
 
-    fig.tight_layout()
+    fig.subplots_adjust(right=0.80)
 
     fig.savefig(
         output_path,
