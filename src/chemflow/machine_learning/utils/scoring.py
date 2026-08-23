@@ -1,9 +1,11 @@
 # Copyright (c) 2026 Yonglan Liu
 # Licensed under the MIT License.
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, cast
 import yaml
 from pathlib import Path
+import numpy as np
+from scipy.stats import kendalltau, pearsonr, spearmanr
 from sklearn.metrics import (
     root_mean_squared_error,
     r2_score,
@@ -75,6 +77,24 @@ def get_scoring(config: Dict[str, Any], n_classes: Optional[int] = None):
             }
 
     else:
+        def pearson_scorer(y_true, y_pred):
+            if len(y_true) < 2 or np.std(y_true) == 0 or np.std(y_pred) == 0:
+                return np.nan
+            result = cast(Any, pearsonr(y_true, y_pred))
+            return float(result[0])
+
+        def spearman_scorer(y_true, y_pred):
+            if len(y_true) < 2 or np.std(y_true) == 0 or np.std(y_pred) == 0:
+                return np.nan
+            result = cast(Any, spearmanr(y_true, y_pred))
+            return float(result[0])
+
+        def kendall_scorer(y_true, y_pred):
+            if len(y_true) < 2 or np.std(y_true) == 0 or np.std(y_pred) == 0:
+                return np.nan
+            result = cast(Any, kendalltau(y_true, y_pred))
+            return float(result[0])
+
         scorers = {
             "r2": "r2",
             "root_mean_squared_error": make_scorer(
@@ -84,6 +104,18 @@ def get_scoring(config: Dict[str, Any], n_classes: Optional[int] = None):
             "mean_absolute_error": make_scorer(
                 mean_absolute_error,
                 greater_is_better=False,
+            ),
+            "pearson": make_scorer(
+                pearson_scorer,
+                greater_is_better=True,
+            ),
+            "spearman": make_scorer(
+                spearman_scorer,
+                greater_is_better=True,
+            ),
+            "kendall": make_scorer(
+                kendall_scorer,
+                greater_is_better=True,
             ),
         }
 

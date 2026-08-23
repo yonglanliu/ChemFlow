@@ -59,12 +59,23 @@ class DataSplitter:
         if "split_method" not in self.split_config:
             raise ValueError("split_config must contain 'split_method'.")
 
-        if "test_size" not in self.split_config:
-            raise ValueError("split_config must contain 'test_size'.")
+        train_fraction = self.split_config.get("train_fraction", self.split_config.get("train_size"))
+        test_size = self.split_config.get("test_size", self.split_config.get("test_fraction"))
+        validation_size = self.split_config.get(
+            "validation_size",
+            self.split_config.get("valid_fraction", self.split_config.get("validation_fraction")),
+        )
 
-        self.test_size = float(self.split_config["test_size"])
+        if test_size is None:
+            if train_fraction is None:
+                raise ValueError("split_config must contain 'test_size' or 'train_fraction'.")
 
-        validation_size = self.split_config.get("validation_size", None)
+            train_fraction = float(train_fraction)
+            validation_size = 0.0 if validation_size is None else float(validation_size)
+            test_size = 1.0 - train_fraction - validation_size
+
+        self.test_size = float(test_size)
+
         self.has_validation = validation_size is not None and str(validation_size).lower() not in {
             "",
             "none",

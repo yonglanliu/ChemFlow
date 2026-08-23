@@ -282,7 +282,7 @@ def plot_multitask_metrics(
         "Metric value",
         fontsize=20,
     )
-    ax.set_ylim(0.0, 1.0)
+    ax.set_ylim(-1.0, 1.0)
 
     ci_percentage = int(
         round(

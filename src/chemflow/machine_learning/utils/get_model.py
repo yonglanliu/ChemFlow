@@ -7,6 +7,7 @@ from sklearn.ensemble import (
     GradientBoostingClassifier, GradientBoostingRegressor,
 )
 from xgboost import XGBClassifier, XGBRegressor
+from lightgbm import LGBMRegressor, LGBMClassifier
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.neural_network import MLPClassifier, MLPRegressor
@@ -28,6 +29,8 @@ ESTIMATOR_REGISTRY = {
     "GradientBoostingRegressor": GradientBoostingRegressor,
     "XGBClassifier": XGBClassifier,
     "XGBRegressor": XGBRegressor,
+    "LGBMClassifier": LGBMClassifier,
+    "LGBMRegressor": LGBMRegressor,
     "SVC": SVC,
     "SVR": SVR,
     "KNeighborsClassifier": KNeighborsClassifier,
@@ -195,9 +198,18 @@ def get_model(
     elif model_name == "XGBoost":
         cls = XGBClassifier if task_type == "classification" else XGBRegressor
         params = add_seed(params)
-        params.setdefault("n_jobs", -1)
+        params.setdefault("n_jobs", 1)
         if task_type == "classification":
             params.setdefault("eval_metric", "logloss")
+        return cls(**params)
+    
+    elif model_name == "LightGBM":
+        cls = LGBMClassifier if task_type == "classification" else LGBMRegressor
+
+        params = add_seed(params)
+        params.setdefault("n_jobs", 1)
+        params.setdefault("verbosity", -1)
+
         return cls(**params)
 
     elif model_name == "SVM_RBF":

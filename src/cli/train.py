@@ -2,16 +2,35 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.deep_learning.gpt.model import GPT
-from src.deep_learning.gpt.trainer import GPTDDPTrainer
-from src.deep_learning.gpt.train_utils import set_seed
 
+def train_ml(args):
+    from src.chemflow.machine_learning.train.train_runner import (
+        load_training_config,
+        train,
+    )
 
-def train_gpt(args):
     config_path = Path(args.config).expanduser().resolve()
 
     if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+        raise FileNotFoundError(
+            f"Config file not found: {config_path}"
+        )
+
+    training_config = load_training_config(config_path)
+    train(training_config)
+
+
+def train_gpt(args):
+    from src.deep_learning.gpt.model import GPT
+    from src.deep_learning.gpt.trainer import GPTDDPTrainer
+    from src.deep_learning.gpt.train_utils import set_seed
+
+    config_path = Path(args.config).expanduser().resolve()
+
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {config_path}"
+        )
 
     set_seed(args.seed)
 
@@ -19,21 +38,27 @@ def train_gpt(args):
         model=GPT,
         config_path=config_path,
     )
+
     trainer.train()
 
 
 def train_graphormer(args):
     from src.deep_learning.graphormer.trainer import GraphormerDDPTrainer
+    from src.deep_learning.gpt.train_utils import set_seed
 
     config_path = Path(args.config).expanduser().resolve()
 
     if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+        raise FileNotFoundError(
+            f"Config file not found: {config_path}"
+        )
 
     set_seed(args.seed)
 
-    trainer = GraphormerDDPTrainer(config_path=config_path,)
-    
+    trainer = GraphormerDDPTrainer(
+        config_path=config_path,
+    )
+
     trainer.train()
 
 
@@ -48,20 +73,71 @@ def add_train_parser(subparsers):
         required=True,
     )
 
+    # ========================================================
+    # GPT
+    # ========================================================
+
     gpt_parser = model_subparsers.add_parser(
         "gpt",
         help="Train or fine-tune GPT SMILES model",
     )
-    gpt_parser.add_argument("config", type=str)
-    gpt_parser.add_argument("--seed", type=int, default=42)
-    gpt_parser.set_defaults(func=train_gpt)
 
+    gpt_parser.add_argument(
+        "config",
+        type=str,
+    )
 
+    gpt_parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
+
+    gpt_parser.set_defaults(
+        func=train_gpt
+    )
+
+    # ========================================================
+    # Graphormer
+    # ========================================================
 
     graphormer_parser = model_subparsers.add_parser(
         "graphormer",
         help="Train Graphormer model",
     )
-    graphormer_parser.add_argument("config", type=str)
-    graphormer_parser.add_argument("--seed", type=int, default=42)
-    graphormer_parser.set_defaults(func=train_graphormer)
+
+    graphormer_parser.add_argument(
+        "config",
+        type=str,
+    )
+
+    graphormer_parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
+
+    graphormer_parser.set_defaults(
+        func=train_graphormer
+    )
+
+    # ========================================================
+    # Classical ML
+    # ========================================================
+
+    ml_parser = model_subparsers.add_parser(
+        "ml",
+        help=(
+            "Train machine learning models from "
+            "a YAML/JSON/TOML config"
+        ),
+    )
+
+    ml_parser.add_argument(
+        "config",
+        type=str,
+    )
+
+    ml_parser.set_defaults(
+        func=train_ml
+    )

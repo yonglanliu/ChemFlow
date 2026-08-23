@@ -1,4 +1,5 @@
 import pandas as pd
+from scipy.stats import kendalltau, pearsonr, spearmanr
 
 from sklearn.metrics import (
     accuracy_score,
@@ -31,11 +32,29 @@ def evaluate_model(model, X_test, y_test, task_type):
     }
 
     if task_type == "regression":
+        pearson = float("nan")
+        spearman = float("nan")
+        kendall = float("nan")
+
+        if len(pd.Series(y_test).dropna()) >= 2:
+            try:
+                if pd.Series(y_test).nunique(dropna=True) > 1 and pd.Series(y_pred).nunique(dropna=True) > 1:
+                    pearson = float(pearsonr(y_test, y_pred).statistic)
+                    spearman = float(spearmanr(y_test, y_pred).statistic)
+                    kendall = float(kendalltau(y_test, y_pred).statistic)
+            except Exception:
+                pearson = float("nan")
+                spearman = float("nan")
+                kendall = float("nan")
+
         results.update(
             {
                 "test_rmse": float(root_mean_squared_error(y_test, y_pred)),
                 "test_mae": float(mean_absolute_error(y_test, y_pred)),
                 "test_r2": float(r2_score(y_test, y_pred)),
+                "test_pearson": pearson,
+                "test_spearman": spearman,
+                "test_kendall": kendall,
             }
         )
         return results

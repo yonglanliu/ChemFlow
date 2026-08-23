@@ -31,6 +31,15 @@ def load_training_data(training_data_file):
     if ext == ".csv":
         return {"data": pd.read_csv(training_data_file)}
 
+    if ext == ".npz":
+        with np.load(training_data_file, allow_pickle=False) as npz_file:
+            return {
+                "data": {
+                    key: npz_file[key]
+                    for key in npz_file.files
+                }
+            }
+
     raise ValueError(f"Unsupported training data format: {ext}")
 
 
@@ -38,21 +47,79 @@ def load_training_data(training_data_file):
 def build_split_config(data_split_cfg: Dict[str, Any]) -> Dict[str, Any]:
     result_conf: Dict[str, Any] = {}
 
-    split_method = str(data_split_cfg.get("split_method")).lower()
+    split_method_value = data_split_cfg.get("split_method")
+    split_column_value = data_split_cfg.get("split_column", data_split_cfg.get("split_col"))
 
-    if split_method not in ["random", "scaffold", "butina", "cluster"]:
+    split_method = str(split_method_value).lower() if split_method_value is not None else ""
+
+    if not split_method:
+        if split_column_value is None:
+            raise ValueError("split_config must contain either 'split_method' or 'split_column'.")
+
+        result_conf["split_column"] = str(split_column_value)
+        result_conf["save_split_data"] = bool(
+            data_split_cfg.get("save_split_data", data_split_cfg.get("save_dataset", True))
+        )
+        result_conf["save_dir"] = str(Path(data_split_cfg.get("save_dir", "split_data")).resolve())
+
+        split_name = data_split_cfg.get(
+            "split_name",
+            data_split_cfg.get("prefix_name", f"{result_conf['split_column']}_split"),
+        )
+
+        result_conf["split_name"] = split_name
+        result_conf["prefix_name"] = split_name
+        return result_conf
+
+    if split_method == "splitted":
+        if split_column_value is None:
+            raise ValueError("split_method='splitted' requires 'split_column'.")
+
+        result_conf["split_method"] = split_method
+        result_conf["split_column"] = str(split_column_value)
+        result_conf["save_split_data"] = bool(
+            data_split_cfg.get("save_split_data", data_split_cfg.get("save_dataset", True))
+        )
+        result_conf["save_dir"] = str(Path(data_split_cfg.get("save_dir", "split_data")).resolve())
+
+        split_name = data_split_cfg.get(
+            "split_name",
+            data_split_cfg.get("prefix_name", f"{result_conf['split_column']}_split"),
+        )
+
+        result_conf["split_name"] = split_name
+        result_conf["prefix_name"] = split_name
+        return result_conf
+
+    if split_method not in ["random", "scaffold", "butina", "cluster", "splitted"]:
         raise ValueError(f"Invalid split_method: {split_method}")
 
     result_conf["split_method"] = split_method
 
-    if "test_size" not in data_split_cfg:
-        raise ValueError("Missing 'test_size' in data_split config.")
+    if split_method == "splitted":
+        train_fraction = None
+    else:
+        train_fraction = data_split_cfg.get("train_fraction", data_split_cfg.get("train_size"))
+        
+    test_size = data_split_cfg.get("test_size", data_split_cfg.get("test_fraction"))
+    validation_size = data_split_cfg.get(
+        "validation_size",
+        data_split_cfg.get("valid_fraction", data_split_cfg.get("validation_fraction")),
+    )
 
-    result_conf["test_size"] = float(data_split_cfg["test_size"])
-    result_conf["validation_size"] = data_split_cfg.get("validation_size")
+    if test_size is None:
+        if train_fraction is None:
+            raise ValueError(
+                "Missing split proportions. Provide 'test_size'/'test_fraction' "
+                "or 'train_fraction' with optional validation fraction."
+            )
 
-    if result_conf["validation_size"] is not None:
-        result_conf["validation_size"] = float(result_conf["validation_size"])
+        train_fraction = float(train_fraction)
+        validation_size = 0.0 if validation_size is None else float(validation_size)
+        test_size = 1.0 - train_fraction - validation_size
+
+    result_conf["test_size"] = float(test_size)
+    result_conf["validation_size"] = None if validation_size is None else float(validation_size)
 
     split_seed = int(data_split_cfg.get("random_seed", 42))
     result_conf["random_seed"] = split_seed
@@ -79,7 +146,9 @@ def build_split_config(data_split_cfg: Dict[str, Any]) -> Dict[str, Any]:
 
             result_conf["n_clusters"] = int(data_split_cfg["n_clusters"])
 
-    save_split_data = bool(data_split_cfg.get("save_split_data", True))
+    save_split_data = bool(
+        data_split_cfg.get("save_split_data", data_split_cfg.get("save_dataset", True))
+    )
     result_conf["save_split_data"] = save_split_data
 
     save_dir = data_split_cfg.get("save_dir", "split_data")
@@ -150,6 +219,8 @@ def write_model_info(
         "smiles_col": feature_config.get("smiles_col"),
         "target_col": feature_config.get("target_col"),
         "split_method": feature_config.get("split_method"),
+        "split_mode": feature_config.get("split_mode"),
+        "split_source": feature_config.get("split_source"),
         "split_name": feature_config.get("split_name"),
         "feature_array_shapes": feature_config.get("feature_array_shapes"),
         "best_params": metrics.get("best_params"),

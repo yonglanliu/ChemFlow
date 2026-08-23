@@ -13,6 +13,7 @@ MODEL_OPTIONS = [
     "Ridge Regression",
     "Lasso Regression",
     "PLS",
+    "LightGBM"
 ]
 
 

@@ -21,13 +21,27 @@ def get_default_param_grid(model_name: str, task_type: str):
 
     elif model_name == "XGBoost":
         return {
-            "n_estimators": [100, 300, 500],
-            "max_depth": [3, 5, 7],
-            "learning_rate": [0.01, 0.05, 0.1],
-            "subsample": [0.8, 1.0],
-            "colsample_bytree": [0.8, 1.0],
+            "n_estimators": [200, 500, 800, 1200],
+            "max_depth": [3, 5, 7, 9],
+            "learning_rate": [0.01, 0.03, 0.05, 0.1],
+            "subsample": [0.6, 0.8, 1.0],
+            "colsample_bytree": [0.5, 0.7, 0.9, 1.0],
+            "min_child_weight": [1, 3, 5, 10],
+            "reg_alpha": [0, 0.01, 0.1, 1.0],
+            "reg_lambda": [0.1, 1.0, 5.0, 10.0],
         }
-
+    elif model_name == "LightGBM":
+        return {
+            "n_estimators": [200, 500, 800, 1200],
+            "learning_rate": [0.01, 0.03, 0.05, 0.1],
+            "num_leaves": [15, 31, 63, 127],
+            "max_depth": [-1, 5, 8, 12],
+            "min_child_samples": [10, 20, 40, 80],
+            "subsample": [0.6, 0.8, 1.0],
+            "colsample_bytree": [0.5, 0.7, 0.9, 1.0],
+            "reg_alpha": [0, 0.01, 0.1, 1.0],
+            "reg_lambda": [0.1, 1.0, 5.0, 10.0],
+        }
     elif model_name == "SVM_RBF":
         return {
             "C": [0.1, 1, 10, 100],
