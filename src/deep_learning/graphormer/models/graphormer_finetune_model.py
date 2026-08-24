@@ -108,22 +108,52 @@ class GraphormerFineTuneRegressionModel(nn.Module):
         if use_lora:
             self.apply_lora(cfg)
 
-        self.print_model_summary()
+        # ============================================================
+        # Regression loss
+        # ============================================================
 
-        loss_type = getattr(cfg, "loss_type", "huber").lower()
-        print(f"Using loss_type: {loss_type} for multi-task learning.")
+        self.loss_type = str(getattr(cfg, "loss_type", "huber")).lower()
+        print(f"Using regression loss_type: {self.loss_type}.")
 
-        if loss_type == "mse": # MSE loss is also known as L2 loss
+        if self.loss_type == "mse":
             self.loss_fn = nn.MSELoss(reduction="mean")
-        elif loss_type == "mae":  # MAE (mean absolute error) is also known as L1 loss
+
+        elif self.loss_type == "mae":
             self.loss_fn = nn.L1Loss(reduction="mean")
-        elif loss_type == "huber": # Huber loss is less sensitive to outliers than MSE and L1
+
+        elif self.loss_type == "huber":
             self.loss_fn = nn.HuberLoss(reduction="mean")
+
+        elif self.loss_type == "laplace_nll":
+            # Homoscedastic Laplace likelihood.  The location parameter is
+            # predicted by regression_head and the global log-scale is a
+            # trainable parameter attached to regression_head so the existing
+            # optimizer parameter grouping treats it as a head parameter.
+            initial_log_scale = float(getattr(cfg, "initial_log_scale", 0.0))
+            self.regression_head.log_scale = nn.Parameter(
+                torch.tensor(initial_log_scale, dtype=torch.float32)
+            )
+            self.loss_fn = None
+
+        elif self.loss_type == "gaussian_nll":
+            # Homoscedastic Gaussian likelihood.  The mean is predicted by
+            # regression_head and the global log-variance is learned jointly.
+            initial_log_var = float(getattr(cfg, "initial_log_var", 0.0))
+            self.regression_head.log_var = nn.Parameter(
+                torch.tensor(initial_log_var, dtype=torch.float32)
+            )
+            self.loss_fn = None
+
         else:
             raise ValueError(
-                f"Unsupported loss_type: {loss_type}. "
-                "Expected 'mse', 'mae', or 'huber'."
+                f"Unsupported regression loss_type: {self.loss_type}. "
+                "Expected 'mse', 'mae', 'huber', 'laplace_nll', "
+                "or 'gaussian_nll'."
             )
+
+        # Print after all trainable loss parameters have been created so the
+        # model summary includes them.
+        self.print_model_summary()
 
     def forward(
         self,
@@ -140,13 +170,9 @@ class GraphormerFineTuneRegressionModel(nn.Module):
                 Optional perturbation tensor.
 
         Returns:
-            Classification logits.
-
-            Multi-class classification:
-                shape (batch_size, num_classes)
-
-            Binary classification with one logit:
-                shape (batch_size,) or (batch_size, 1)
+            A dictionary containing single-target regression predictions,
+            optional loss, graph representation, and NLL scale information
+            when a likelihood-based loss is used.
         """
 
         _, graph_rep = self.encoder(
@@ -194,14 +220,83 @@ class GraphormerFineTuneRegressionModel(nn.Module):
         if graph_rep is not None:
             out_dict["graph_rep"] = graph_rep
 
+        # Expose the learned global aleatoric scale for NLL models.  This is a
+        # single global uncertainty parameter, not per-molecule uncertainty.
+        if self.loss_type == "laplace_nll":
+            log_scale = self.regression_head.log_scale
+            out_dict["log_scale"] = log_scale
+            out_dict["scale"] = torch.exp(log_scale)
+
+        elif self.loss_type == "gaussian_nll":
+            log_var = self.regression_head.log_var
+            out_dict["log_variance"] = log_var
+            out_dict["variance"] = torch.exp(log_var)
+
         if loss is not None:
             out_dict["loss"] = loss
 
         return out_dict
-    
-    def compute_loss(self, predictions, targets):
-        loss = self.loss_fn(predictions, targets)
-        return loss
+
+    def compute_loss(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the configured single-target regression loss."""
+
+        if predictions.shape != targets.shape:
+            raise ValueError(
+                f"Predictions shape {tuple(predictions.shape)} does not "
+                f"match target shape {tuple(targets.shape)}."
+            )
+
+        valid_mask = torch.isfinite(targets)
+        if not valid_mask.any():
+            raise ValueError("No finite regression targets were found in the batch.")
+
+        predictions = predictions[valid_mask]
+        targets = targets[valid_mask]
+
+        if self.loss_type in {"mse", "mae", "huber"}:
+            if self.loss_fn is None:
+                raise RuntimeError(
+                    f"loss_fn is not initialized for loss_type={self.loss_type}."
+                )
+            return self.loss_fn(predictions, targets)
+
+        if self.loss_type == "laplace_nll":
+            # NLL = log(2b) + |y - mu| / b, where b > 0.
+            # Clamp log-scale only for numerical stability; gradients still
+            # flow through values inside the interval.
+            log_scale = self.regression_head.log_scale.to(
+                device=predictions.device,
+                dtype=predictions.dtype,
+            )
+            log_scale = torch.clamp(log_scale, min=-10.0, max=10.0)
+            scale = torch.exp(log_scale)
+            return (
+                torch.log(predictions.new_tensor(2.0))
+                + log_scale
+                + torch.abs(targets - predictions) / scale
+            ).mean()
+
+        if self.loss_type == "gaussian_nll":
+            # NLL without the constant 0.5*log(2*pi):
+            # 0.5 * [log(var) + (y - mu)^2 / var].
+            log_var = self.regression_head.log_var.to(
+                device=predictions.device,
+                dtype=predictions.dtype,
+            )
+            log_var = torch.clamp(log_var, min=-20.0, max=20.0)
+            inverse_var = torch.exp(-log_var)
+            return 0.5 * (
+                log_var
+                + (targets - predictions).pow(2) * inverse_var
+            ).mean()
+
+        raise RuntimeError(
+            f"Unexpected regression loss_type: {self.loss_type}."
+        )
 
     def freeze_encoder(self) -> None:
         """Freeze all original Graphormer backbone parameters."""

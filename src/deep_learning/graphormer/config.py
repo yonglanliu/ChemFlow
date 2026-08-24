@@ -262,6 +262,16 @@ class GraphormerFinetuneRegressionConfig(GraphormerPretrainedConfig, LoraConfig)
         default=True,
         metadata={"help": "Whether to use LoRA for fine-tuning."},
     )
+    loss_type: str = field(
+        default="huber",
+        metadata={
+            "help": (
+                "Loss function for regression: "
+                "'mse', 'mae', 'huber', "
+                "'laplace_nll', or 'gaussian_nll'."
+            )
+        },
+    )
 
 @dataclass
 class GraphormerFinetuneClassificationConfig(GraphormerPretrainedConfig, LoraConfig):
