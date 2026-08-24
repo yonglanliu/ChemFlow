@@ -1,0 +1,392 @@
+# ============================================================
+# Base
+# ============================================================
+
+[BaseConfig]
+
+workdir = "./example/DeepLearningGridSearch/LogD_gridsearch"
+
+task = "regression"
+
+seed = 42
+
+
+# ============================================================
+# Dataset
+# ============================================================
+
+[DatasetConfig]
+
+dataset_path = "./example/DeepLearningGridSearch/single_task_LogD.csv"
+
+smiles_column = "SMILES"
+
+target_column = "LogD"
+
+task_names = ["LogD"]
+
+# Dataset already contains predefined train / val / test labels.
+split_column = "split"
+
+
+# ------------------------------------------------------------
+# Dataset split
+# ------------------------------------------------------------
+
+# The dataset contains a predefined split column:
+#
+#     train
+#     val
+#     test
+#
+# During GridSearchCV:
+#
+#     train + val
+#         ↓
+#    ConcatDataset
+#         ↓
+#      5-fold CV
+#
+# The predefined test set remains completely untouched during
+# hyperparameter selection.
+#
+
+# val_fraction and test_fraction are retained as fallback settings if predefined split labels are not available.
+
+val_fraction = 0.1
+test_fraction = 0.1
+
+
+# ------------------------------------------------------------
+# Preprocessing
+# ------------------------------------------------------------
+
+preprocess_batch_size = 100000
+
+max_nodes = 128                  # do not change for pretrained model
+multi_hop_max_dist = 5           # do not change for pretrained model
+spatial_pos_max = 1024           # do not change for pretrained model
+
+
+reorder_atoms = false
+remove_hs = true
+
+seed = 42
+
+
+# ============================================================
+# Featurizer
+# ============================================================
+
+[FeaturizerConfig]
+
+multi_hop_max_dist = 5         # do not change for pretrained model
+remove_hs = true               # do not change for pretrained model
+
+reorder_atoms = false
+
+
+# ============================================================
+# Training
+# ============================================================
+
+[GraphormerTrainingConfig]
+
+seed = 42
+
+
+# ------------------------------------------------------------
+# Training mode
+# ------------------------------------------------------------
+
+# Grid search performs K-fold CV internally.
+grid_search = true
+
+# Standalone cross-validation should therefore remain disabled.
+cross_validation = false
+
+
+# ------------------------------------------------------------
+# Cross-validation settings used by GridSearchCV
+# ------------------------------------------------------------
+
+cv_splits = 5
+
+cv_seed = 42
+
+
+# ------------------------------------------------------------
+# Grid-search model-selection metric
+# ------------------------------------------------------------
+
+# Every parameter configuration is evaluated using:
+#
+#     mean validation RMSE across the 5 folds
+#
+# The configuration with the LOWEST mean validation RMSE
+# will be selected.
+
+grid_search_monitor_metric = "val_rmse"
+
+grid_search_monitor_mode = "min"
+
+
+# ------------------------------------------------------------
+# Batch / Epoch Settings
+# ------------------------------------------------------------
+
+batch_size = 16
+eval_batch_size = 16
+
+# Maximum number of epochs for EACH fold of EACH configuration.
+#
+# Early stopping may terminate an individual fold before epoch 100.
+num_epochs = 100
+
+num_workers = 0
+
+
+# ------------------------------------------------------------
+# Learning Settings
+# ------------------------------------------------------------
+
+# Learning rates are intentionally NOT included in GridSearchCV.
+#
+# Cosine scheduling will progressively reduce these learning
+# rates during each training run.
+
+learning_rate = 1e-4
+
+encoder_learning_rate = 1e-5
+
+lora_learning_rate = 1e-4
+
+head_learning_rate = 1e-4
+
+weight_decay = 0.01
+
+scheduler = "cosine"
+
+gradient_clip_value = 1.0
+
+
+# ------------------------------------------------------------
+# Plotting Settings
+# ------------------------------------------------------------
+
+plot_training_history = true
+
+plot_dpi = 300
+
+
+# ------------------------------------------------------------
+# Resume Settings
+# ------------------------------------------------------------
+
+# IMPORTANT:
+#
+# Resume must remain disabled during GridSearchCV.
+#
+# Every:
+#
+#     parameter configuration
+#           ×
+#     CV fold
+#
+# must start from a fresh pretrained Graphormer model.
+
+resume = false
+resume_checkpoint = "/Users/yonglanliu/Desktop/ChemFlow/expansionrx_mtl_training/Onetask_to_OneAdaptor/LogD/checkpoints/last_model.pt"
+
+
+# ------------------------------------------------------------
+# Early Stopping Settings
+# ------------------------------------------------------------
+
+# Early stopping is performed independently for every fold.
+
+early_stopping = true
+
+early_stopping_patience = 20
+
+monitor_metric = "val_rmse"
+
+monitor_mode = "min"
+
+
+# ------------------------------------------------------------
+# Hold-out Test Evaluation
+# ------------------------------------------------------------
+
+# IMPORTANT:
+#
+# The protected test set is NOT used during GridSearchCV.
+#
+# GridSearchCV:
+#
+#     train + val
+#         ↓
+#       K-fold
+#         ↓
+#   select hyperparameters
+#
+# After hyperparameters are selected, the final model should
+# be trained separately and evaluated once on the test set.
+
+evaluate_test = true
+
+plot_evaluation_metrics = true
+
+
+# ============================================================
+# Grid Search Parameter Space
+# ============================================================
+
+[GraphormerTrainingConfig.grid_search_param_grid]
+
+
+# ------------------------------------------------------------
+# LoRA rank
+# ------------------------------------------------------------
+
+# Attention LoRA rank.
+#
+# Search:
+#     r = 4
+#     r = 8
+
+lora_r = [4, 8]
+
+
+# ------------------------------------------------------------
+# Regression head dropout
+# ------------------------------------------------------------
+
+head_dropout = [0.1, 0.2]
+
+
+# ------------------------------------------------------------
+# LoRA dropout
+# ------------------------------------------------------------
+
+lora_dropout = [0.05, 0.1]
+
+
+# ------------------------------------------------------------
+# Search size
+# ------------------------------------------------------------
+
+# Number of configurations:
+#
+#     2 lora_r
+#       ×
+#     2 head_dropout
+#       ×
+#     2 lora_dropout
+#
+#     = 8 configurations
+#
+# Each configuration uses 5-fold CV:
+#
+#     8 × 5
+#     = 40 independent Graphormer training runs
+#
+# Each run can train for up to 100 epochs but may terminate
+# earlier because of early stopping.
+
+
+# ============================================================
+# Graphormer model and fine-tuning
+# ============================================================
+
+[GraphormerConfig]
+
+pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
+
+
+# ------------------------------------------------------------
+# Single-task regression
+# ------------------------------------------------------------
+
+num_tasks = 1
+
+loss_type = "laplace_NLL"
+
+
+# ------------------------------------------------------------
+# Encoder / fine-tuning
+# ------------------------------------------------------------
+
+# Keep pretrained Graphormer encoder parameters frozen.
+freeze_encoder = true
+
+# Fine-tune Graphormer using LoRA.
+use_lora = true
+
+
+# ------------------------------------------------------------
+# Regression head
+# ------------------------------------------------------------
+
+head_intermediate_dim = 256
+
+# Default value.
+#
+# GridSearchCV will override this value for each configuration
+# using:
+#
+#     head_dropout = [0.1, 0.2]
+
+head_dropout = 0.1
+
+
+# ------------------------------------------------------------
+# Attention LoRA
+# ------------------------------------------------------------
+
+lora_target = "all"   # attention | ffn | all
+
+# Default value.
+#
+# GridSearchCV overrides this with:
+#
+#     lora_r = [4, 8]
+
+lora_r = 8
+
+lora_alpha = 16.0
+
+# Default value.
+#
+# GridSearchCV overrides this with:
+#
+#     lora_dropout = [0.05, 0.1]
+
+lora_dropout = 0.1
+
+apply_lora_to_k_proj = false
+
+
+# ------------------------------------------------------------
+# FFN LoRA
+# ------------------------------------------------------------
+
+# FFN LoRA rank is currently FIXED.
+#
+# Therefore the grid search can generate configurations such as:
+#
+#     attention LoRA rank = 4
+#     FFN LoRA rank       = 8
+#
+# and:
+#
+#     attention LoRA rank = 8
+#     FFN LoRA rank       = 8
+#
+# This is intentional unless you later decide to link the two ranks.
+
+lora_ffn_r = 8
+
+lora_ffn_alpha = 16.0
+
+lora_use_fc2 = false
