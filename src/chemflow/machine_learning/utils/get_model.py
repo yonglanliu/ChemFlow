@@ -198,7 +198,8 @@ def get_model(
     elif model_name == "XGBoost":
         cls = XGBClassifier if task_type == "classification" else XGBRegressor
         params = add_seed(params)
-        params.setdefault("n_jobs", 1)
+        #params.setdefault("n_jobs", 1)
+        params["n_jobs"] = 1  # Ensure n_jobs is set to 1 for XGBoost
         if task_type == "classification":
             params.setdefault("eval_metric", "logloss")
         return cls(**params)
