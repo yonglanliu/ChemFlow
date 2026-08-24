@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from src.deep_learning.utils import (
-    is_dist_available_and_initialized, 
+    is_distributed, 
     get_world_size,
     set_seed,
     namespace_to_dict,

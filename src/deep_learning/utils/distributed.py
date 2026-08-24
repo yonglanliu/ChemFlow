@@ -7,18 +7,18 @@ import os
 # Distributed helpers
 # ============================================================
 
-def is_dist_available_and_initialized() -> bool:
+def is_distributed() -> bool:
     return dist.is_available() and dist.is_initialized()
 
 
 def get_rank() -> int:
-    if is_dist_available_and_initialized():
+    if is_distributed():
         return dist.get_rank()
     return 0
 
 
 def get_world_size() -> int:
-    if is_dist_available_and_initialized():
+    if is_distributed():
         return dist.get_world_size()
     return 1
 
@@ -78,7 +78,8 @@ def setup_distributed():
 
 
 def cleanup_distributed() -> None:
-    if is_dist_available_and_initialized():
+    if is_distributed():
+        dist.barrier()
         dist.destroy_process_group()
 
 
@@ -87,7 +88,7 @@ def unwrap_model(model):
 
 
 def barrier() -> None:
-    if is_dist_available_and_initialized():
+    if is_distributed():
         dist.barrier()
 
 
@@ -95,7 +96,7 @@ def barrier() -> None:
 # Utils
 # ============================================================
 def reduce_mean(value: float, device: torch.device) -> float:
-    if not is_dist_available_and_initialized():
+    if not is_distributed():
         return value
 
     tensor = torch.tensor(value, dtype=torch.float32, device=device)

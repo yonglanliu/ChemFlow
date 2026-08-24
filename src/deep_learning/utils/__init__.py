@@ -10,7 +10,7 @@ from src.deep_learning.utils.scheduler import (
     build_scheduler,
 )
 from src.deep_learning.utils.distributed import (
-    is_dist_available_and_initialized,
+    is_distributed,
     get_rank,
     get_world_size,
     is_main_process,
