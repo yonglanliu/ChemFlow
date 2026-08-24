@@ -55,13 +55,14 @@ def setup_distributed():
 
         local_rank = int(os.environ["LOCAL_RANK"])  # Get local rank from environment variable set by torchrun
         torch.cuda.set_device(local_rank)  # Set the current CUDA device to the local rank for this process
+        device = torch.device("cuda", local_rank)
 
         dist.init_process_group(
             backend="nccl",
             init_method="env://",
+            device_id = device
         )
-
-        device = torch.device("cuda", local_rank)
+        
         distributed = True
 
     else:
@@ -89,7 +90,7 @@ def unwrap_model(model):
 
 def barrier() -> None:
     if is_distributed():
-        dist.barrier()
+        dist.barrier(device_ids=[torch.cuda.current_device()] if torch.cuda.is_available() else None)
 
 
 # ============================================================
