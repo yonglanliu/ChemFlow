@@ -32,7 +32,7 @@ from src.deep_learning.gpt.train_utils import (
     set_seed,
 )
 from src.deep_learning.utils import (
-    is_dist_available_and_initialized,
+    is_distributed,
     get_rank,
     get_world_size,
     is_main_process,
@@ -728,7 +728,7 @@ class GPTDDPTrainer:
                 if early_stopping and patience_counter >= early_stop_patience:
                     stop_tensor.fill_(1)
 
-            if is_dist_available_and_initialized():
+            if is_distributed():
                 dist.broadcast(stop_tensor, src=0)
 
             if stop_tensor.item() == 1:
