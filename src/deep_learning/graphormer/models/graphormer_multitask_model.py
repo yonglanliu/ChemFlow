@@ -11,6 +11,271 @@ from src.deep_learning.sharing.adaptor import HardSharingMTL, SoftSharingMTL
 import torch.nn.functional as F
 from src.deep_learning.graphormer.modules.loss import MultiTaskGaussianNLLLoss, MultiTaskLaplaceNLLLoss
 
+
+class ExtraFeatureEncoder(nn.Module):
+    """
+    Encode molecular descriptors / fingerprints before late fusion
+    with the Graphormer representation.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dim: int | None = None,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+        use_layer_norm: bool = True,
+    ) -> None:
+        super().__init__()
+
+        if input_dim <= 0:
+            raise ValueError(
+                f"input_dim must be > 0, got {input_dim}."
+            )
+
+        if output_dim <= 0:
+            raise ValueError(
+                f"output_dim must be > 0, got {output_dim}."
+            )
+
+        if hidden_dim is None:
+            hidden_dim = max(
+                output_dim,
+                min(512, input_dim),
+            )
+
+        activation = activation.lower().strip()
+
+        if activation == "relu":
+            act = nn.ReLU()
+        elif activation == "gelu":
+            act = nn.GELU()
+        elif activation == "silu":
+            act = nn.SiLU()
+        else:
+            raise ValueError(
+                f"Unsupported activation: {activation}. "
+                "Expected 'relu', 'gelu', or 'silu'."
+            )
+
+        layers = [
+            nn.Linear(input_dim, hidden_dim),
+            act,
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+        ]
+
+        if use_layer_norm:
+            layers.append(
+                nn.LayerNorm(output_dim)
+            )
+
+        self.net = nn.Sequential(*layers)
+
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(
+                    module.weight
+                )
+
+                if module.bias is not None:
+                    nn.init.zeros_(
+                        module.bias
+                    )
+
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(
+                    module.weight
+                )
+                nn.init.zeros_(
+                    module.bias
+                )
+
+    def forward(
+        self,
+        features: torch.Tensor,
+    ) -> torch.Tensor:
+
+        if features is None:
+            raise ValueError(
+                "features cannot be None."
+            )
+
+        if features.ndim == 1:
+            features = features.unsqueeze(0)
+
+        if features.ndim != 2:
+            raise ValueError(
+                "features must have shape "
+                "(batch_size, feature_dim), "
+                f"got {tuple(features.shape)}."
+            )
+
+        if features.size(-1) != self.input_dim:
+            raise ValueError(
+                f"Expected {self.input_dim} features, "
+                f"got {features.size(-1)}."
+            )
+
+        return self.net(
+            features.float()
+        )
+
+
+def _get_batch_value(
+    batched_data: Any,
+    key: str,
+):
+    if isinstance(batched_data, dict):
+        return batched_data.get(key)
+
+    return getattr(
+        batched_data,
+        key,
+        None,
+    )
+
+
+class FusedGraphormerEncoder(nn.Module):
+    """
+    Wrapper used by HardSharingMTL / SoftSharingMTL.
+
+    It runs Graphormer first, then optionally appends encoded
+    descriptor and fingerprint representations, and returns the
+    fused representation.
+
+    HardSharingMTL / SoftSharingMTL can therefore continue to treat
+    this as their shared encoder.
+    """
+
+    def __init__(
+        self,
+        graph_encoder: nn.Module,
+        descriptor_encoder: nn.Module | None,
+        fingerprint_encoder: nn.Module | None,
+        use_descriptors: bool,
+        use_fingerprint: bool,
+        fusion_dim: int,
+    ) -> None:
+        super().__init__()
+
+        self.graph_encoder = graph_encoder
+        self.descriptor_encoder = descriptor_encoder
+        self.fingerprint_encoder = fingerprint_encoder
+
+        self.use_descriptors = bool(
+            use_descriptors
+        )
+        self.use_fingerprint = bool(
+            use_fingerprint
+        )
+
+        self.fusion_dim = int(
+            fusion_dim
+        )
+
+    def forward(
+        self,
+        batched_data,
+        perturb: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        encoder_output = self.graph_encoder(
+            batched_data=batched_data,
+            perturb=perturb,
+            **kwargs,
+        )
+
+        if (
+            isinstance(encoder_output, tuple)
+            and len(encoder_output) >= 2
+        ):
+            graph_rep = encoder_output[1]
+        else:
+            raise TypeError(
+                "Graphormer encoder must return "
+                "(encoder_output, graph_rep)."
+            )
+
+        representations = [
+            graph_rep
+        ]
+
+        if self.use_descriptors:
+            descriptor_features = _get_batch_value(
+                batched_data,
+                "descriptor_features",
+            )
+
+            if descriptor_features is None:
+                raise KeyError(
+                    "Descriptor branch is enabled, but "
+                    "'descriptor_features' is missing "
+                    "from the batch."
+                )
+
+            descriptor_features = descriptor_features.to(
+                device=graph_rep.device,
+                dtype=graph_rep.dtype,
+            )
+
+            descriptor_rep = self.descriptor_encoder(
+                descriptor_features
+            )
+
+            representations.append(
+                descriptor_rep
+            )
+
+        if self.use_fingerprint:
+            fingerprint_features = _get_batch_value(
+                batched_data,
+                "fingerprint_features",
+            )
+
+            if fingerprint_features is None:
+                raise KeyError(
+                    "Fingerprint branch is enabled, but "
+                    "'fingerprint_features' is missing "
+                    "from the batch."
+                )
+
+            fingerprint_features = fingerprint_features.to(
+                device=graph_rep.device,
+                dtype=graph_rep.dtype,
+            )
+
+            fingerprint_rep = self.fingerprint_encoder(
+                fingerprint_features
+            )
+
+            representations.append(
+                fingerprint_rep
+            )
+
+        fused_rep = torch.cat(
+            representations,
+            dim=-1,
+        )
+
+        if fused_rep.size(-1) != self.fusion_dim:
+            raise ValueError(
+                f"Expected fused representation dim "
+                f"{self.fusion_dim}, got "
+                f"{fused_rep.size(-1)}."
+            )
+
+        # Return the same two-value style expected from Graphormer.
+        return encoder_output[0], fused_rep
+
+
 class GraphormerMultiTaskModel(nn.Module):
     def __init__(self, cfg: Any) -> None:
         super().__init__()
@@ -83,6 +348,214 @@ class GraphormerMultiTaskModel(nn.Module):
         if use_lora:
             self.apply_lora(cfg)  # change the encoder in place
 
+        # ============================================================
+        # Descriptor / fingerprint late-fusion branches
+        # ============================================================
+
+        self.use_extra_features = bool(
+            getattr(
+                cfg,
+                "use_extra_features",
+                False,
+            )
+        )
+
+        self.use_descriptors = bool(
+            getattr(
+                cfg,
+                "use_descriptors",
+                False,
+            )
+        )
+
+        self.use_fingerprint = bool(
+            getattr(
+                cfg,
+                "use_fingerprint",
+                False,
+            )
+        )
+
+        if not self.use_extra_features:
+            self.use_descriptors = False
+            self.use_fingerprint = False
+
+        self.descriptor_encoder = None
+        self.fingerprint_encoder = None
+
+        self.descriptor_dim = 0
+        self.fingerprint_dim = 0
+
+        self.descriptor_embedding_dim = 0
+        self.fingerprint_embedding_dim = 0
+
+        fusion_dim = int(
+            cfg.encoder_embed_dim
+        )
+
+        print(
+            f"Graphormer representation dim: "
+            f"{cfg.encoder_embed_dim}"
+        )
+
+        # ------------------------------------------------------------
+        # Descriptor branch
+        # ------------------------------------------------------------
+        if self.use_descriptors:
+            self.descriptor_dim = int(
+                getattr(
+                    cfg,
+                    "descriptor_dim",
+                )
+            )
+
+            descriptor_hidden_dim = int(
+                getattr(
+                    cfg,
+                    "descriptor_hidden_dim",
+                    64,
+                )
+            )
+
+            self.descriptor_embedding_dim = int(
+                getattr(
+                    cfg,
+                    "descriptor_embedding_dim",
+                    32,
+                )
+            )
+
+            descriptor_dropout = float(
+                getattr(
+                    cfg,
+                    "descriptor_dropout",
+                    0.1,
+                )
+            )
+
+            descriptor_activation = str(
+                getattr(
+                    cfg,
+                    "descriptor_activation",
+                    "gelu",
+                )
+            )
+
+            self.descriptor_encoder = (
+                ExtraFeatureEncoder(
+                    input_dim=self.descriptor_dim,
+                    hidden_dim=descriptor_hidden_dim,
+                    output_dim=self.descriptor_embedding_dim,
+                    dropout=descriptor_dropout,
+                    activation=descriptor_activation,
+                    use_layer_norm=True,
+                )
+            )
+
+            fusion_dim += (
+                self.descriptor_embedding_dim
+            )
+
+            print(
+                "Descriptor branch enabled: "
+                f"{self.descriptor_dim} -> "
+                f"{descriptor_hidden_dim} -> "
+                f"{self.descriptor_embedding_dim}"
+            )
+        else:
+            print(
+                "Descriptor branch disabled."
+            )
+
+        # ------------------------------------------------------------
+        # Fingerprint branch
+        # ------------------------------------------------------------
+        if self.use_fingerprint:
+            self.fingerprint_dim = int(
+                getattr(
+                    cfg,
+                    "fingerprint_dim",
+                )
+            )
+
+            fingerprint_hidden_dim = int(
+                getattr(
+                    cfg,
+                    "fingerprint_hidden_dim",
+                    512,
+                )
+            )
+
+            self.fingerprint_embedding_dim = int(
+                getattr(
+                    cfg,
+                    "fingerprint_embedding_dim",
+                    128,
+                )
+            )
+
+            fingerprint_dropout = float(
+                getattr(
+                    cfg,
+                    "fingerprint_dropout",
+                    0.1,
+                )
+            )
+
+            fingerprint_activation = str(
+                getattr(
+                    cfg,
+                    "fingerprint_activation",
+                    "gelu",
+                )
+            )
+
+            self.fingerprint_encoder = (
+                ExtraFeatureEncoder(
+                    input_dim=self.fingerprint_dim,
+                    hidden_dim=fingerprint_hidden_dim,
+                    output_dim=self.fingerprint_embedding_dim,
+                    dropout=fingerprint_dropout,
+                    activation=fingerprint_activation,
+                    use_layer_norm=True,
+                )
+            )
+
+            fusion_dim += (
+                self.fingerprint_embedding_dim
+            )
+
+            print(
+                "Fingerprint branch enabled: "
+                f"{self.fingerprint_dim} -> "
+                f"{fingerprint_hidden_dim} -> "
+                f"{self.fingerprint_embedding_dim}"
+            )
+        else:
+            print(
+                "Fingerprint branch disabled."
+            )
+
+        self.fusion_dim = int(
+            fusion_dim
+        )
+
+        print(
+            f"Final fused representation dim: "
+            f"{self.fusion_dim}"
+        )
+
+        # Wrap Graphormer so HardSharingMTL / SoftSharingMTL
+        # receive fused representations transparently.
+        self.fused_encoder = FusedGraphormerEncoder(
+            graph_encoder=self.encoder,
+            descriptor_encoder=self.descriptor_encoder,
+            fingerprint_encoder=self.fingerprint_encoder,
+            use_descriptors=self.use_descriptors,
+            use_fingerprint=self.use_fingerprint,
+            fusion_dim=self.fusion_dim,
+        )
+
         self.adaptor_gate = getattr(cfg, "adaptor_gate", True)
         self.adaptor_gate_fn = getattr(cfg, "adaptor_gate_fn", "tanh")
 
@@ -98,8 +571,8 @@ class GraphormerMultiTaskModel(nn.Module):
                 "Expected 'hard' or 'soft'."
             )
 
-        # GraphormerGraphEncoder produces features with encoder_embed_dim.
-        feature_dim = cfg.encoder_embed_dim
+        # Multi-task adapters/heads operate on the fused representation.
+        feature_dim = self.fusion_dim
 
         num_adapters = getattr(cfg, "num_adapters", None)
         task_groups = getattr(cfg, "task_groups", None)
@@ -107,7 +580,7 @@ class GraphormerMultiTaskModel(nn.Module):
         if sharing_type == "hard":
             self.multi_task_model = HardSharingMTL(
                 num_targets=cfg.num_tasks,
-                shared_encoder=self.encoder,
+                shared_encoder=self.fused_encoder,
                 dim=feature_dim,
                 adaptor_bottleneck_dim=cfg.adaptor_bottleneck_dim,
                 adaptor_dropout=cfg.adaptor_dropout,
@@ -119,7 +592,7 @@ class GraphormerMultiTaskModel(nn.Module):
         else:
             self.multi_task_model = SoftSharingMTL(
                 num_targets=cfg.num_tasks,
-                shared_encoder=self.encoder,
+                shared_encoder=self.fused_encoder,
                 dim=feature_dim,
                 adaptor_bottleneck_dim=cfg.adaptor_bottleneck_dim,
                 adaptor_dropout=cfg.adaptor_dropout,
@@ -145,7 +618,13 @@ class GraphormerMultiTaskModel(nn.Module):
             if task_weights is None:
                 task_weights = [1.0] * cfg.num_tasks
 
-        self.task_weights = torch.tensor(task_weights, dtype=torch.float32)
+        self.register_buffer(
+            "task_weights",
+            torch.tensor(
+                task_weights,
+                dtype=torch.float32,
+            ),
+        )
 
         loss_type = getattr(cfg, "loss_type", "huber").lower()
         print(f"Using loss_type: {loss_type} for multi-task learning.")
@@ -203,7 +682,13 @@ class GraphormerMultiTaskModel(nn.Module):
             task_losses = None
             loss = None
         
-        predictions = torch.cat([outputs[f"task_{i}"] for i in range(len(outputs))], dim=1)
+        predictions = torch.cat(
+            [
+                outputs[f"task_{i}"]
+                for i in range(self.cfg.num_tasks)
+            ],
+            dim=1,
+        )
 
         out_dict = {"predictions": predictions}
         if loss is not None:
@@ -371,7 +856,9 @@ class GraphormerMultiTaskModel(nn.Module):
                     "loss_fn must return a scalar tensor. "
                     "Use a reduction such as reduction='mean'."
                 )
-            task_losses.append(torch.tensor(task_loss.item()))
+            task_losses.append(
+                task_loss.detach()
+            )
             # ----------------------------------------------------
             # Optional task weighting
             # ----------------------------------------------------
@@ -698,6 +1185,22 @@ class GraphormerMultiTaskModel(nn.Module):
         )
 
         print("GraphormerMultiTaskModel initialized.")
+        print(
+            f"Extra features enabled: "
+            f"{self.use_extra_features}"
+        )
+        print(
+            f"Descriptor branch enabled: "
+            f"{self.use_descriptors}"
+        )
+        print(
+            f"Fingerprint branch enabled: "
+            f"{self.use_fingerprint}"
+        )
+        print(
+            f"Final fused representation dim: "
+            f"{self.fusion_dim}"
+        )
         print(f"Total parameters: {total_parameters:,}")
         print(
             f"Trainable parameters: "

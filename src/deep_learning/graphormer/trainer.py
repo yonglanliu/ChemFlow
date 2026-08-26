@@ -90,8 +90,17 @@ def update_dataclass_from_config(target: Any, source: Any, *, strict: bool = Fal
         else:
             unknown.append(name)
 
+            # When strict=False, preserve additional TOML fields as
+            # dynamic attributes.  This is useful while new optional
+            # modules (for example descriptor/fingerprint fusion) are
+            # being added before every config dataclass is updated.
+            if not strict:
+                setattr(target, name, value)
+
     if strict and unknown:
-        raise ValueError(f"Unknown fields for {type(target).__name__}: {unknown}")
+        raise ValueError(
+            f"Unknown fields for {type(target).__name__}: {unknown}"
+        )
 
     return target
 
@@ -142,6 +151,107 @@ def move_batch_to_device(batch: Any, device: torch.device) -> Any:
     return batch
 
 
+
+def graphormer_collate_with_extra_features(
+    items,
+    *,
+    max_nodes: int,
+    multi_hop_max_dist: int,
+    spatial_pos_max: int,
+):
+    """
+    Run the standard Graphormer collator and additionally batch
+    descriptor/fingerprint tensors stored on each PyG Data object.
+
+    The standard Graphormer collator may discard molecules that exceed
+    `max_nodes`, so the same filtering is applied before stacking the
+    auxiliary tensors.
+    """
+    eligible_items = [
+        item
+        for item in items
+        if getattr(item, "x", None) is not None
+        and int(item.x.size(0)) <= int(max_nodes)
+    ]
+
+    batch = graphormer_collate_fn(
+        items,
+        max_nodes=int(max_nodes),
+        multi_hop_max_dist=int(multi_hop_max_dist),
+        spatial_pos_max=int(spatial_pos_max),
+    )
+
+    if not isinstance(batch, dict):
+        raise TypeError(
+            "graphormer_collate_fn must return a dictionary when "
+            "extra molecular features are enabled."
+        )
+
+    # Infer the actual batch size produced by the standard collator.
+    batch_size = None
+    for key in ("x", "y", "attn_bias", "spatial_pos"):
+        value = batch.get(key)
+        if torch.is_tensor(value) and value.ndim > 0:
+            batch_size = int(value.size(0))
+            break
+
+    if batch_size is None:
+        raise RuntimeError(
+            "Could not infer Graphormer batch size from collator output."
+        )
+
+    if len(eligible_items) != batch_size:
+        raise RuntimeError(
+            "Auxiliary-feature filtering does not match the standard "
+            "Graphormer collator. "
+            f"eligible_items={len(eligible_items)}, "
+            f"collated_batch_size={batch_size}."
+        )
+
+    def _stack_optional_feature(attribute_name: str):
+        present = [
+            hasattr(item, attribute_name)
+            and getattr(item, attribute_name) is not None
+            for item in eligible_items
+        ]
+
+        if not any(present):
+            return None
+
+        if not all(present):
+            raise RuntimeError(
+                f"Only some samples contain '{attribute_name}'. "
+                "Auxiliary features must be present for every sample "
+                "in a batch."
+            )
+
+        return torch.stack(
+            [
+                torch.as_tensor(
+                    getattr(item, attribute_name),
+                    dtype=torch.float32,
+                ).reshape(-1)
+                for item in eligible_items
+            ],
+            dim=0,
+        )
+
+    descriptor_features = _stack_optional_feature(
+        "descriptor_features"
+    )
+    fingerprint_features = _stack_optional_feature(
+        "fingerprint_features"
+    )
+
+    if descriptor_features is not None:
+        batch["descriptor_features"] = descriptor_features
+
+    if fingerprint_features is not None:
+        batch["fingerprint_features"] = fingerprint_features
+
+    return batch
+
+
 def move_optimizer_state_to_device(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -161,11 +271,13 @@ def build_optimizer_parameter_groups(
     encoder_parameters = []
     lora_parameters = []
     head_parameters = []
+    extra_feature_parameters = []
     adaptor_parameters = []
 
     encoder_names = []
     lora_names = []
     head_names = []
+    extra_feature_names = []
     adaptor_names = []
     loss_names = []
     for name, parameter in model.named_parameters():
@@ -187,9 +299,18 @@ def build_optimizer_parameter_groups(
             head_parameters.append(parameter)
             head_names.append(name)
 
+        elif (
+            name.startswith("descriptor_encoder.")
+            or name.startswith("fingerprint_encoder.")
+            or name.startswith("extra_feature_encoder.")
+        ):
+            extra_feature_parameters.append(parameter)
+            extra_feature_names.append(name)
+
         elif name.startswith("encoder."):
             encoder_parameters.append(parameter)
             encoder_names.append(name)
+
         elif "adaptors" in lower_name:
             adaptor_parameters.append(parameter)
             adaptor_names.append(name)
@@ -233,9 +354,41 @@ def build_optimizer_parameter_groups(
             }
         )
 
+    if extra_feature_parameters:
+        parameter_groups.append(
+            {
+                "params": extra_feature_parameters,
+                "lr": float(
+                    config_get(
+                        training_config,
+                        "extra_feature_learning_rate",
+                        base_lr,
+                    )
+                ),
+                "name": "extra_features",
+            }
+        )
+
     print(f"Encoder: {len(encoder_names)} tensors")
     print(f"LoRA: {len(lora_names)} tensors")
     print(f"Head: {len(head_names)} tensors")
+    print(
+        f"Extra-feature encoders: "
+        f"{len(extra_feature_names)} tensors"
+    )
+
+    if extra_feature_names:
+        print("Extra-feature trainable parameters:")
+        for name in extra_feature_names:
+            print(f"  {name}")
+
+    print("Optimizer parameter groups:")
+    for group in parameter_groups:
+        print(
+            f"  {group.get('name', 'unnamed')}: "
+            f"lr={float(group['lr']):.4e}, "
+            f"tensors={len(group['params'])}"
+        )
 
     return parameter_groups
 
@@ -1033,6 +1186,19 @@ class GraphormerDDPTrainer:
         Every fold starts from a fresh pretrained model and uses the existing
         early-stopping implementation in ``run_training``.
         """
+        if bool(
+            config_get(
+                self.dataset_config,
+                "use_extra_features",
+                False,
+            )
+        ):
+            raise RuntimeError(
+                "Grid-search CV with cached extra features requires "
+                "fold-specific preprocessing. The current cache "
+                "preprocessor is fitted on the original training split."
+            )
+
         if bool(config_get(self.training_config, "resume", False)):
             raise ValueError(
                 "resume=True is not supported during grid-search CV. "
@@ -1202,6 +1368,30 @@ class GraphormerDDPTrainer:
         A final model should first be retrained on the complete CV pool
         (or the fold models should be ensembled).
         """
+        # -------------------------------------------------------------
+        # Extra-feature preprocessing and CV
+        # -------------------------------------------------------------
+        #
+        # The current cache pipeline fits descriptor scaling / optional
+        # fingerprint filtering on the original training split. That is
+        # correct for regular train/val/test training, but not strictly
+        # fold-specific for K-fold CV. Refuse to proceed rather than
+        # silently introduce preprocessing leakage.
+        if bool(
+            config_get(
+                self.dataset_config,
+                "use_extra_features",
+                False,
+            )
+        ):
+            raise RuntimeError(
+                "Cross-validation with cached extra features requires "
+                "fold-specific preprocessing. The current cache "
+                "preprocessor is fitted on the original training split. "
+                "Disable extra features for CV or add fold-specific "
+                "feature preprocessing before enabling this mode."
+            )
+
         # -------------------------------------------------------------
         # CV does not support regular-training resume semantics.
         # -------------------------------------------------------------
@@ -1951,8 +2141,174 @@ class GraphormerDDPTrainer:
             manifest = featurize_and_cache_dataset(dataset_config=dataset_config, featurizer=featurizer, cache_dir=cache_dir)
 
         dataset_config.split_task_counts = manifest.get("split_task_counts")
-        dataset_config.task_names = manifest.get("task_names", getattr(dataset_config, "task_names", None))
+        dataset_config.task_names = manifest.get(
+            "task_names",
+            getattr(dataset_config, "task_names", None),
+        )
+
+        # Keep a copy available to the trainer/checkpoints.
+        self.dataset_manifest = manifest
+
+        dimensions_changed = (
+            self.sync_extra_feature_config_from_manifest(manifest)
+        )
+
+        self._rebuild_model_after_feature_sync(
+            dimensions_changed
+        )
+
         return manifest
+
+    def sync_extra_feature_config_from_manifest(
+        self,
+        manifest: Mapping[str, Any],
+    ) -> bool:
+        """
+        Synchronize descriptor/fingerprint dimensions from the cache
+        manifest into the model config.
+
+        Returns True if a dimension changed.
+        """
+        extra_info = manifest.get("extra_features") or {}
+
+        if not extra_info.get("enabled", False):
+            if bool(
+                config_get(
+                    self.dataset_config,
+                    "use_extra_features",
+                    False,
+                )
+            ):
+                raise RuntimeError(
+                    "DatasetConfig.use_extra_features=True, but the "
+                    "loaded cache manifest does not contain processed "
+                    "extra features. Delete the old cache and rebuild it."
+                )
+            return False
+
+        feature_types = list(
+            extra_info.get("feature_types", [])
+        )
+        descriptor_dim = int(
+            extra_info.get("descriptor_dim", 0)
+        )
+        fingerprint_dim = int(
+            extra_info.get("fingerprint_dim", 0)
+        )
+        total_dim = int(
+            extra_info.get(
+                "total_dim",
+                descriptor_dim + fingerprint_dim,
+            )
+        )
+
+        old_descriptor_dim = int(
+            config_get(
+                self.model_config,
+                "descriptor_dim",
+                0,
+            )
+        )
+        old_fingerprint_dim = int(
+            config_get(
+                self.model_config,
+                "fingerprint_dim",
+                0,
+            )
+        )
+
+        use_descriptors = descriptor_dim > 0
+        use_fingerprint = fingerprint_dim > 0
+
+        self.model_config.use_extra_features = True
+        self.model_config.use_descriptors = use_descriptors
+        self.model_config.use_fingerprint = use_fingerprint
+        self.model_config.descriptor_dim = descriptor_dim
+        self.model_config.fingerprint_dim = fingerprint_dim
+
+        # Mirror resolved values into DatasetConfig for config.json.
+        self.dataset_config.extra_feature_types = feature_types
+        self.dataset_config.descriptor_dim = descriptor_dim
+        self.dataset_config.fingerprint_dim = fingerprint_dim
+        self.dataset_config.extra_feature_total_dim = total_dim
+
+        changed = (
+            old_descriptor_dim != descriptor_dim
+            or old_fingerprint_dim != fingerprint_dim
+        )
+
+        if is_main_process():
+            print("\n" + "=" * 70)
+            print("Extra molecular features")
+            print("=" * 70)
+            print(f"Enabled: True")
+            print(f"Feature types: {feature_types}")
+            print(
+                f"Descriptor branch: "
+                f"{'enabled' if use_descriptors else 'disabled'}"
+            )
+            print(f"Descriptor input dim: {descriptor_dim}")
+            print(
+                f"Fingerprint branch: "
+                f"{'enabled' if use_fingerprint else 'disabled'}"
+            )
+            print(f"Fingerprint input dim: {fingerprint_dim}")
+            print(f"Total processed feature dim: {total_dim}")
+            print(
+                "Fingerprint variance threshold: "
+                f"{extra_info.get('fingerprint_variance_threshold')}"
+            )
+            print(
+                "Preprocessor: "
+                f"{extra_info.get('preprocessor_path')}"
+            )
+
+            if changed:
+                print(
+                    "Model feature dimensions updated from cache "
+                    "manifest:"
+                )
+                print(
+                    f"  descriptor_dim: "
+                    f"{old_descriptor_dim} -> {descriptor_dim}"
+                )
+                print(
+                    f"  fingerprint_dim: "
+                    f"{old_fingerprint_dim} -> {fingerprint_dim}"
+                )
+
+            print("=" * 70 + "\n")
+
+        return changed
+
+
+    def _rebuild_model_after_feature_sync(
+        self,
+        dimensions_changed: bool,
+    ) -> None:
+        """
+        Rebuild regression/classification model if preprocessing changed
+        an auxiliary input dimension (for example VarianceThreshold).
+        """
+        if not dimensions_changed:
+            return
+
+        if self.task not in {"regression", "classification"}:
+            raise RuntimeError(
+                "Automatic extra-feature model rebuilding currently "
+                "supports regression and classification only."
+            )
+
+        if is_main_process():
+            print(
+                "Rebuilding model with manifest-resolved extra-feature "
+                "dimensions..."
+            )
+
+        self.model = self.build_fresh_model(
+            model_config=self.model_config
+        )
+
 
     def load_dataset(
         self,
@@ -1973,6 +2329,38 @@ class GraphormerDDPTrainer:
 
         train_dataset = GraphormerMoleculeDataset(train_manifest)
         val_dataset = GraphormerMoleculeDataset(val_manifest)
+
+        if is_main_process() and len(train_dataset) > 0:
+            sample = train_dataset[0]
+
+            descriptor_features = getattr(
+                sample,
+                "descriptor_features",
+                None,
+            )
+            fingerprint_features = getattr(
+                sample,
+                "fingerprint_features",
+                None,
+            )
+
+            print("Cached Graphormer sample feature shapes:")
+            print(
+                "  descriptor_features: "
+                + (
+                    str(tuple(descriptor_features.shape))
+                    if descriptor_features is not None
+                    else "None"
+                )
+            )
+            print(
+                "  fingerprint_features: "
+                + (
+                    str(tuple(fingerprint_features.shape))
+                    if fingerprint_features is not None
+                    else "None"
+                )
+            )
 
         if bool(config_get(self.training_config, "evaluate_test", True)) and config_get(dataset_config, "test_fraction", 0.0) > 0.0:
             test_dataset = GraphormerMoleculeDataset(manifest["test"])
@@ -2013,7 +2401,7 @@ class GraphormerDDPTrainer:
             shuffle = True
 
         collate_fn = partial(
-            graphormer_collate_fn,
+            graphormer_collate_with_extra_features,
             max_nodes=int(config_get(dataset_config, "max_nodes", 128,)),
             multi_hop_max_dist=int(config_get(dataset_config, "multi_hop_max_dist", 5,)),
             spatial_pos_max=int(config_get(dataset_config, "spatial_pos_max", 1024,)),
@@ -2064,6 +2452,38 @@ class GraphormerDDPTrainer:
         manifest = self.load_manifest(dataset_config, featurizer, cache_dir)
 
         train_dataset = GraphormerMoleculeDataset(manifest["train"])
+
+        if is_main_process() and len(train_dataset) > 0:
+            sample = train_dataset[0]
+            descriptor_features = getattr(
+                sample,
+                "descriptor_features",
+                None,
+            )
+            fingerprint_features = getattr(
+                sample,
+                "fingerprint_features",
+                None,
+            )
+
+            print("CV dataset cached feature shapes:")
+            print(
+                "  descriptor_features: "
+                + (
+                    str(tuple(descriptor_features.shape))
+                    if descriptor_features is not None
+                    else "None"
+                )
+            )
+            print(
+                "  fingerprint_features: "
+                + (
+                    str(tuple(fingerprint_features.shape))
+                    if fingerprint_features is not None
+                    else "None"
+                )
+            )
+
         val_manifest = manifest.get("val")
 
         # Build a concatenated dataset for cross-validation if a validation set is available.
@@ -2175,7 +2595,7 @@ class GraphormerDDPTrainer:
         # ============================================================
 
         collate_fn = partial(
-            graphormer_collate_fn,
+            graphormer_collate_with_extra_features,
             max_nodes=int(
                 config_get(
                     dataset_config,

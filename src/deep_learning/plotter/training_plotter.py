@@ -28,7 +28,7 @@ class ClassificationPlotter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        dpi = int(self.config.get("plot_dpi", 300))
+        dpi = int(getattr(self.config, "plot_dpi", 300))
 
         prefix = prefix.rstrip("_")
 

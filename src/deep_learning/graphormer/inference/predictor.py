@@ -34,6 +34,10 @@ from src.deep_learning.graphormer.modules.dataset import (
     GraphormerMoleculeDataset,
     featurize_and_cache_dataset,
 )
+from src.deep_learning.graphormer.modules.data_pipeline import (
+    _normalize_feature_types,
+    _featurize_single_smiles,
+)
 from src.deep_learning.graphormer.modules.graphormer_featurizer import (
     GraphormerFeaturizer,
 )
@@ -110,6 +114,9 @@ def update_dataclass_from_config(
         else:
             unknown_fields.append(name)
 
+            if not strict:
+                setattr(target, name, value)
+
     if strict and unknown_fields:
         raise ValueError(
             f"Unknown fields for {type(target).__name__}: "
@@ -137,6 +144,79 @@ def move_batch_to_device(batch: Any, device: torch.device) -> Any:
             move_batch_to_device(value, device)
             for value in batch
         ]
+
+    return batch
+
+
+
+def graphormer_collate_with_extra_features(
+    samples,
+    *,
+    max_nodes: int,
+    multi_hop_max_dist: int,
+    spatial_pos_max: int,
+):
+    """
+    Use the standard Graphormer collator while preserving auxiliary
+    descriptor/fingerprint tensors required by late-fusion models.
+    """
+    eligible_samples = [
+        sample
+        for sample in samples
+        if getattr(sample, "x", None) is not None
+        and int(sample.x.size(0)) <= int(max_nodes)
+    ]
+
+    batch = graphormer_collate_fn(
+        samples,
+        max_nodes=int(max_nodes),
+        multi_hop_max_dist=int(multi_hop_max_dist),
+        spatial_pos_max=int(spatial_pos_max),
+    )
+
+    if not isinstance(batch, dict):
+        raise TypeError(
+            "graphormer_collate_fn must return a dictionary."
+        )
+
+    def _stack_optional(attribute_name: str):
+        present = [
+            hasattr(sample, attribute_name)
+            and getattr(sample, attribute_name) is not None
+            for sample in eligible_samples
+        ]
+
+        if not any(present):
+            return None
+
+        if not all(present):
+            raise RuntimeError(
+                f"Only some samples contain '{attribute_name}'."
+            )
+
+        return torch.stack(
+            [
+                torch.as_tensor(
+                    getattr(sample, attribute_name),
+                    dtype=torch.float32,
+                ).reshape(-1)
+                for sample in eligible_samples
+            ],
+            dim=0,
+        )
+
+    descriptor_features = _stack_optional(
+        "descriptor_features"
+    )
+    fingerprint_features = _stack_optional(
+        "fingerprint_features"
+    )
+
+    if descriptor_features is not None:
+        batch["descriptor_features"] = descriptor_features
+
+    if fingerprint_features is not None:
+        batch["fingerprint_features"] = fingerprint_features
 
     return batch
 
@@ -227,6 +307,8 @@ class GraphormerPredictor:
 
         self.task = str(self.base_config.task).lower()
 
+        self._recover_extra_feature_config_from_state_dict()
+
         self.model = self._build_model()
         print(f'use model: {type(self.model).__name__}')
 
@@ -235,7 +317,34 @@ class GraphormerPredictor:
         self.model.to(self.device)
         self.model.eval()
 
-        self.featurizer = GraphormerFeaturizer(**namespace_to_dict(self.featurizer_config))
+        self.featurizer = GraphormerFeaturizer(
+            **namespace_to_dict(self.featurizer_config)
+        )
+
+        self.use_extra_features = bool(
+            config_get(
+                self.model_config,
+                "use_extra_features",
+                False,
+            )
+        )
+
+        self.extra_feature_types = config_get(
+            self.dataset_config,
+            "extra_feature_types",
+            None,
+        )
+
+        if self.extra_feature_types is not None:
+            self.extra_feature_types = _normalize_feature_types(
+                self.extra_feature_types
+            )
+
+        self.extra_feature_preprocessor = None
+        self.extra_feature_preprocessor_path = None
+
+        if self.use_extra_features:
+            self._load_extra_feature_preprocessor()
 
         self.regression_calibration: dict[str, float] | None = None
         self.classification_type = (self._resolve_classification_type() if self.task == "classification" else None)
@@ -252,6 +361,267 @@ class GraphormerPredictor:
 
         if self.classification_type is not None:
             print(f"Classification type: {self.classification_type}")
+
+    def _recover_extra_feature_config_from_state_dict(
+        self,
+    ) -> None:
+        """
+        Recover descriptor/fingerprint architecture from checkpoint tensors.
+
+        This keeps older checkpoints usable when their saved GraphormerConfig
+        does not contain the newer late-fusion fields.
+        """
+        state_dict = self.checkpoint["model_state_dict"]
+
+        descriptor_input_key = (
+            "descriptor_encoder.net.0.weight"
+        )
+        descriptor_output_key = (
+            "descriptor_encoder.net.3.weight"
+        )
+
+        if descriptor_input_key in state_dict:
+            input_weight = state_dict[
+                descriptor_input_key
+            ]
+            output_weight = state_dict[
+                descriptor_output_key
+            ]
+
+            descriptor_hidden_dim = int(
+                input_weight.shape[0]
+            )
+            descriptor_dim = int(
+                input_weight.shape[1]
+            )
+            descriptor_embedding_dim = int(
+                output_weight.shape[0]
+            )
+
+            self.model_config_source.use_extra_features = True
+            self.model_config_source.use_descriptors = True
+            self.model_config_source.descriptor_dim = descriptor_dim
+            self.model_config_source.descriptor_hidden_dim = (
+                descriptor_hidden_dim
+            )
+            self.model_config_source.descriptor_embedding_dim = (
+                descriptor_embedding_dim
+            )
+
+            if not hasattr(
+                self.model_config_source,
+                "descriptor_dropout",
+            ):
+                self.model_config_source.descriptor_dropout = 0.1
+
+            if not hasattr(
+                self.model_config_source,
+                "descriptor_activation",
+            ):
+                self.model_config_source.descriptor_activation = "gelu"
+
+            print(
+                "Recovered descriptor branch from checkpoint:"
+            )
+            print(
+                f"  descriptor_dim={descriptor_dim}"
+            )
+            print(
+                f"  hidden_dim={descriptor_hidden_dim}"
+            )
+            print(
+                f"  embedding_dim={descriptor_embedding_dim}"
+            )
+        else:
+            self.model_config_source.use_descriptors = False
+
+        fingerprint_input_key = (
+            "fingerprint_encoder.net.0.weight"
+        )
+        fingerprint_output_key = (
+            "fingerprint_encoder.net.3.weight"
+        )
+
+        if fingerprint_input_key in state_dict:
+            input_weight = state_dict[
+                fingerprint_input_key
+            ]
+            output_weight = state_dict[
+                fingerprint_output_key
+            ]
+
+            fingerprint_hidden_dim = int(
+                input_weight.shape[0]
+            )
+            fingerprint_dim = int(
+                input_weight.shape[1]
+            )
+            fingerprint_embedding_dim = int(
+                output_weight.shape[0]
+            )
+
+            self.model_config_source.use_extra_features = True
+            self.model_config_source.use_fingerprint = True
+            self.model_config_source.fingerprint_dim = fingerprint_dim
+            self.model_config_source.fingerprint_hidden_dim = (
+                fingerprint_hidden_dim
+            )
+            self.model_config_source.fingerprint_embedding_dim = (
+                fingerprint_embedding_dim
+            )
+
+            if not hasattr(
+                self.model_config_source,
+                "fingerprint_dropout",
+            ):
+                self.model_config_source.fingerprint_dropout = 0.1
+
+            if not hasattr(
+                self.model_config_source,
+                "fingerprint_activation",
+            ):
+                self.model_config_source.fingerprint_activation = "gelu"
+
+            print(
+                "Recovered fingerprint branch from checkpoint:"
+            )
+            print(
+                f"  fingerprint_dim={fingerprint_dim}"
+            )
+            print(
+                f"  hidden_dim={fingerprint_hidden_dim}"
+            )
+            print(
+                f"  embedding_dim={fingerprint_embedding_dim}"
+            )
+        else:
+            self.model_config_source.use_fingerprint = False
+
+        if not (
+            getattr(
+                self.model_config_source,
+                "use_descriptors",
+                False,
+            )
+            or getattr(
+                self.model_config_source,
+                "use_fingerprint",
+                False,
+            )
+        ):
+            self.model_config_source.use_extra_features = False
+
+
+    def _resolve_extra_feature_preprocessor_path(
+        self,
+    ) -> Path | None:
+        candidates = []
+
+        for key in (
+            "extra_feature_preprocessor_path",
+            "preprocessor_path",
+        ):
+            value = config_get(
+                self.dataset_config,
+                key,
+                None,
+            )
+            if value:
+                candidates.append(
+                    Path(str(value)).expanduser()
+                )
+
+        checkpoint_path_value = self.checkpoint.get(
+            "extra_feature_preprocessor_path"
+        )
+
+        if checkpoint_path_value:
+            candidates.append(
+                Path(
+                    str(checkpoint_path_value)
+                ).expanduser()
+            )
+
+        workdir = config_get(
+            self.base_config,
+            "workdir",
+            None,
+        )
+
+        if workdir:
+            workdir = Path(
+                str(workdir)
+            ).expanduser()
+
+            candidates.extend(
+                [
+                    workdir
+                    / "cache"
+                    / "extra_feature_preprocessor.pt",
+                    workdir
+                    / "extra_feature_preprocessor.pt",
+                ]
+            )
+
+        for candidate in candidates:
+            candidate = candidate.resolve()
+
+            if candidate.is_file():
+                return candidate
+
+        return None
+
+
+    def _load_extra_feature_preprocessor(
+        self,
+    ) -> None:
+        if self.extra_feature_types is None:
+            raise ValueError(
+                "The checkpoint uses extra molecular features, "
+                "but DatasetConfig.extra_feature_types is missing."
+            )
+
+        path = self._resolve_extra_feature_preprocessor_path()
+
+        if path is None:
+            raise FileNotFoundError(
+                "The checkpoint uses extra molecular features, but "
+                "the fitted training preprocessor could not be found. "
+                "Expected extra_feature_preprocessor.pt under the "
+                "training workdir cache or a saved preprocessor path "
+                "inside the checkpoint config."
+            )
+
+        try:
+            preprocessor = torch.load(
+                path,
+                map_location="cpu",
+                weights_only=False,
+            )
+        except TypeError:
+            preprocessor = torch.load(
+                path,
+                map_location="cpu",
+            )
+
+        self.extra_feature_preprocessor = preprocessor
+        self.extra_feature_preprocessor_path = path
+
+        print(
+            f"Loaded extra-feature preprocessor: {path}"
+        )
+        print(
+            f"Extra feature types: {self.extra_feature_types}"
+        )
+        print(
+            "Descriptor branch: "
+            f"{bool(config_get(self.model_config, 'use_descriptors', False))}"
+        )
+        print(
+            "Fingerprint branch: "
+            f"{bool(config_get(self.model_config, 'use_fingerprint', False))}"
+        )
+
 
     def _build_model(self) -> nn.Module:
         if self.task == "regression":
@@ -297,11 +667,29 @@ class GraphormerPredictor:
 
     def build_loader(self, dataset: GraphormerMoleculeDataset, batch_size: int = 64, num_workers: int = 0) -> DataLoader:
 
-        collate_fn = lambda samples: graphormer_collate_fn(
+        collate_fn = lambda samples: graphormer_collate_with_extra_features(
             samples,
-            max_nodes=int(config_get(self.dataset_config, "max_nodes", 128)),
-            multi_hop_max_dist=int(config_get(self.dataset_config, "multi_hop_max_dist", 5)),
-            spatial_pos_max=int(config_get(self.dataset_config, "spatial_pos_max", 1024)),
+            max_nodes=int(
+                config_get(
+                    self.dataset_config,
+                    "max_nodes",
+                    128,
+                )
+            ),
+            multi_hop_max_dist=int(
+                config_get(
+                    self.dataset_config,
+                    "multi_hop_max_dist",
+                    5,
+                )
+            ),
+            spatial_pos_max=int(
+                config_get(
+                    self.dataset_config,
+                    "spatial_pos_max",
+                    1024,
+                )
+            ),
         )
 
         return DataLoader(
@@ -683,7 +1071,35 @@ class GraphormerPredictor:
         """
         Predict one or more raw SMILES strings.
         """
-        dataset = GraphormerInferenceDataset(smiles_list=smiles_list, featurizer=self.featurizer)
+        dataset = GraphormerInferenceDataset(
+            smiles_list=smiles_list,
+            featurizer=self.featurizer,
+            extra_feature_types=self.extra_feature_types,
+            extra_feature_preprocessor=(
+                self.extra_feature_preprocessor
+            ),
+            descriptor_dim=int(
+                config_get(
+                    self.model_config,
+                    "descriptor_dim",
+                    0,
+                )
+            ),
+            use_descriptors=bool(
+                config_get(
+                    self.model_config,
+                    "use_descriptors",
+                    False,
+                )
+            ),
+            use_fingerprint=bool(
+                config_get(
+                    self.model_config,
+                    "use_fingerprint",
+                    False,
+                )
+            ),
+        )
         print("Input smiles:", len(smiles_list))
         print("Dataset size:", len(dataset))
         loader = self.build_loader(dataset=dataset, batch_size=batch_size, num_workers=num_workers)
@@ -693,58 +1109,248 @@ class GraphormerPredictor:
 
 class GraphormerInferenceDataset(Dataset):
     """
-    In-memory Graphormer dataset for raw SMILES inference.
+    In-memory Graphormer inference dataset.
+
+    Extra molecular features are generated from SMILES and transformed
+    using the exact preprocessor fitted on the training set.
     """
 
-    def __init__(self, smiles_list: list[str], featurizer: Any) -> None:
+    def __init__(
+        self,
+        smiles_list: list[str],
+        featurizer: Any,
+        extra_feature_types=None,
+        extra_feature_preprocessor=None,
+        descriptor_dim: int = 0,
+        use_descriptors: bool = False,
+        use_fingerprint: bool = False,
+    ) -> None:
         if not smiles_list:
-            raise ValueError("smiles_list cannot be empty.")
+            raise ValueError(
+                "smiles_list cannot be empty."
+            )
 
         self.smiles_list = [
             str(smiles).strip()
             for smiles in smiles_list
         ]
 
-        self.features = []
+        self.extra_feature_types = (
+            _normalize_feature_types(
+                extra_feature_types
+            )
+            if extra_feature_types is not None
+            else None
+        )
 
-        for index, smiles in enumerate(self.smiles_list):
+        self.extra_feature_preprocessor = (
+            extra_feature_preprocessor
+        )
+
+        self.descriptor_dim = int(
+            descriptor_dim
+        )
+
+        self.use_descriptors = bool(
+            use_descriptors
+        )
+
+        self.use_fingerprint = bool(
+            use_fingerprint
+        )
+
+        use_extra_features = (
+            self.use_descriptors
+            or self.use_fingerprint
+        )
+
+        if (
+            use_extra_features
+            and self.extra_feature_types is None
+        ):
+            raise ValueError(
+                "Extra-feature model is enabled, but "
+                "extra_feature_types is missing."
+            )
+
+        if (
+            use_extra_features
+            and self.extra_feature_preprocessor is None
+        ):
+            raise ValueError(
+                "Extra-feature model is enabled, but the "
+                "training-fitted preprocessor is missing."
+            )
+
+        graph_features = []
+        raw_extra_features = []
+
+        for index, smiles in enumerate(
+            self.smiles_list
+        ):
             if not smiles:
-                raise ValueError(f"SMILES at index {index} is empty.")
+                raise ValueError(
+                    f"SMILES at index {index} is empty."
+                )
 
             try:
-                feature = self._featurize(featurizer=featurizer, smiles=smiles)
+                feature = self._featurize(
+                    featurizer=featurizer,
+                    smiles=smiles,
+                )
             except Exception as error:
-                raise ValueError(f"Failed to featurize SMILES at index {index}: {smiles!r}") from error
+                raise ValueError(
+                    f"Failed to featurize SMILES at index "
+                    f"{index}: {smiles!r}"
+                ) from error
 
-            self.features.append(feature)
+            graph_features.append(
+                feature
+            )
+
+            if use_extra_features:
+                raw_extra = _featurize_single_smiles(
+                    smiles,
+                    self.extra_feature_types,
+                )
+
+                if raw_extra is None:
+                    raise ValueError(
+                        "Failed to generate extra molecular "
+                        f"features at index {index}: {smiles!r}"
+                    )
+
+                raw_extra_features.append(
+                    np.asarray(
+                        raw_extra,
+                        dtype=np.float32,
+                    )
+                )
+
+        if use_extra_features:
+            raw_matrix = np.vstack(
+                raw_extra_features
+            ).astype(
+                np.float32,
+                copy=False,
+            )
+
+            processed = (
+                self.extra_feature_preprocessor
+                .transform(raw_matrix)
+            )
+
+            processed = np.asarray(
+                processed,
+                dtype=np.float32,
+            )
+
+            if self.descriptor_dim < 0:
+                raise ValueError(
+                    "descriptor_dim must be >= 0."
+                )
+
+            if self.descriptor_dim > processed.shape[1]:
+                raise ValueError(
+                    f"descriptor_dim={self.descriptor_dim} exceeds "
+                    f"processed feature dimension "
+                    f"{processed.shape[1]}."
+                )
+
+            descriptor_matrix = None
+            fingerprint_matrix = None
+
+            if self.use_descriptors:
+                descriptor_matrix = processed[
+                    :,
+                    : self.descriptor_dim,
+                ]
+
+                if (
+                    descriptor_matrix.shape[1]
+                    != self.descriptor_dim
+                ):
+                    raise ValueError(
+                        "Descriptor feature dimension mismatch."
+                    )
+
+                print(
+                    "Inference descriptor feature shape: "
+                    f"{descriptor_matrix.shape}"
+                )
+
+            if self.use_fingerprint:
+                fingerprint_matrix = processed[
+                    :,
+                    self.descriptor_dim :,
+                ]
+
+                print(
+                    "Inference fingerprint feature shape: "
+                    f"{fingerprint_matrix.shape}"
+                )
+
+            for index, feature in enumerate(
+                graph_features
+            ):
+                if self.use_descriptors:
+                    feature.descriptor_features = (
+                        torch.as_tensor(
+                            descriptor_matrix[index],
+                            dtype=torch.float32,
+                        )
+                    )
+
+                if self.use_fingerprint:
+                    feature.fingerprint_features = (
+                        torch.as_tensor(
+                            fingerprint_matrix[index],
+                            dtype=torch.float32,
+                        )
+                    )
+
+        self.features = graph_features
 
     @staticmethod
-    def _featurize(featurizer: Any, smiles: str) -> Any:
-        """
-        Call the available Graphormer featurization interface.
+    def _featurize(
+        featurizer: Any,
+        smiles: str,
+    ) -> Any:
+        if hasattr(
+            featurizer,
+            "featurize_smiles",
+        ):
+            return featurizer.featurize_smiles(
+                smiles
+            )
 
-        Keep only the branch matching your GraphormerFeaturizer API
-        once its exact method is fixed.
-        """
-        if hasattr(featurizer, "featurize_smiles"):
-            return featurizer.featurize_smiles(smiles)
-
-        if hasattr(featurizer, "featurize"):
-            return featurizer.featurize(smiles)
+        if hasattr(
+            featurizer,
+            "featurize",
+        ):
+            return featurizer.featurize(
+                smiles
+            )
 
         if callable(featurizer):
-            return featurizer(smiles)
+            return featurizer(
+                smiles
+            )
 
         raise TypeError(
-            "GraphormerFeaturizer must provide featurize_smiles(), "
-            "featurize(), or __call__()."
+            "GraphormerFeaturizer must provide "
+            "featurize_smiles(), featurize(), "
+            "or __call__()."
         )
 
     def __len__(self) -> int:
-        return len(self.features)
+        return len(
+            self.features
+        )
 
     def __getitem__(
         self,
         index: int,
     ) -> Any:
         return self.features[index]
+

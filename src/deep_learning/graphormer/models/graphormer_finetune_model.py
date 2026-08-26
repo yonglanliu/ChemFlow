@@ -9,6 +9,106 @@ import torch.nn as nn
 from ..modules import GraphormerGraphEncoder, RegressionHead, ClassificationHead
 from src.deep_learning.fine_tune.lora import LoRALinear
 
+class ExtraFeatureEncoder(nn.Module):
+    """
+    Encode molecular descriptors / fingerprints before late fusion with
+    the Graphormer graph representation.
+
+    Expected input:
+        extra_features: (batch_size, input_dim)
+
+    Output:
+        encoded_features: (batch_size, output_dim)
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dim: int | None = None,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+        use_layer_norm: bool = True,
+    ) -> None:
+        super().__init__()
+
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be > 0, got {input_dim}.")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be > 0, got {output_dim}.")
+
+        if hidden_dim is None:
+            hidden_dim = max(output_dim, min(512, input_dim))
+
+        activation = activation.lower()
+        if activation == "relu":
+            act = nn.ReLU()
+        elif activation == "gelu":
+            act = nn.GELU()
+        elif activation == "silu":
+            act = nn.SiLU()
+        else:
+            raise ValueError(
+                f"Unsupported extra-feature activation: {activation}. "
+                "Expected 'relu', 'gelu', or 'silu'."
+            )
+
+        layers: list[nn.Module] = [
+            nn.Linear(input_dim, hidden_dim),
+            act,
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+        ]
+
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(output_dim))
+
+        self.net = nn.Sequential(*layers)
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def forward(self, extra_features: torch.Tensor) -> torch.Tensor:
+        if extra_features is None:
+            raise ValueError("extra_features cannot be None.")
+
+        if extra_features.ndim == 1:
+            extra_features = extra_features.unsqueeze(0)
+
+        if extra_features.ndim != 2:
+            raise ValueError(
+                "extra_features must have shape (batch_size, feature_dim), "
+                f"got {tuple(extra_features.shape)}."
+            )
+
+        if extra_features.size(-1) != self.input_dim:
+            raise ValueError(
+                f"Expected {self.input_dim} extra features, "
+                f"got {extra_features.size(-1)}."
+            )
+
+        return self.net(extra_features.float())
+
+
+def _get_batch_value(batched_data: Any, key: str):
+    """Read a value from either a dict-like batch or an object batch."""
+    if isinstance(batched_data, dict):
+        return batched_data.get(key)
+    return getattr(batched_data, key, None)
+
+
 class GraphormerFineTuneRegressionModel(nn.Module):
     """
     Graphormer model for downstream regression fine-tuning.
@@ -60,13 +160,169 @@ class GraphormerFineTuneRegressionModel(nn.Module):
         )
 
         # ============================================================
-        # Regression head
+        # Descriptor / fingerprint late-fusion branches
         # ============================================================
 
-        # The input dimension must match graph_rep:
-        # graph_rep shape = (batch_size, encoder_embed_dim)
+        self.use_extra_features = bool(
+            getattr(cfg, "use_extra_features", False)
+        )
+
+        self.use_descriptors = bool(
+            getattr(cfg, "use_descriptors", False)
+        )
+
+        self.use_fingerprint = bool(
+            getattr(cfg, "use_fingerprint", False)
+        )
+
+        if not self.use_extra_features:
+            self.use_descriptors = False
+            self.use_fingerprint = False
+
+        fusion_dim = int(cfg.encoder_embed_dim)
+
+        print(
+            f"Graphormer representation dim: "
+            f"{cfg.encoder_embed_dim}"
+        )
+
+        # ------------------------------------------------------------
+        # Descriptor branch
+        # ------------------------------------------------------------
+        self.descriptor_encoder = None
+        self.descriptor_dim = 0
+        self.descriptor_embedding_dim = 0
+
+        if self.use_descriptors:
+            self.descriptor_dim = int(
+                getattr(cfg, "descriptor_dim")
+            )
+
+            descriptor_hidden_dim = int(
+                getattr(
+                    cfg,
+                    "descriptor_hidden_dim",
+                    64,
+                )
+            )
+
+            self.descriptor_embedding_dim = int(
+                getattr(
+                    cfg,
+                    "descriptor_embedding_dim",
+                    32,
+                )
+            )
+
+            descriptor_dropout = float(
+                getattr(
+                    cfg,
+                    "descriptor_dropout",
+                    0.1,
+                )
+            )
+
+            descriptor_activation = str(
+                getattr(
+                    cfg,
+                    "descriptor_activation",
+                    "gelu",
+                )
+            )
+
+            self.descriptor_encoder = ExtraFeatureEncoder(
+                input_dim=self.descriptor_dim,
+                hidden_dim=descriptor_hidden_dim,
+                output_dim=self.descriptor_embedding_dim,
+                dropout=descriptor_dropout,
+                activation=descriptor_activation,
+                use_layer_norm=True,
+            )
+
+            fusion_dim += self.descriptor_embedding_dim
+
+            print(
+                "Descriptor branch enabled: "
+                f"{self.descriptor_dim} -> "
+                f"{descriptor_hidden_dim} -> "
+                f"{self.descriptor_embedding_dim}"
+            )
+        else:
+            print("Descriptor branch disabled.")
+
+        # ------------------------------------------------------------
+        # Fingerprint branch
+        # ------------------------------------------------------------
+        self.fingerprint_encoder = None
+        self.fingerprint_dim = 0
+        self.fingerprint_embedding_dim = 0
+
+        if self.use_fingerprint:
+            self.fingerprint_dim = int(
+                getattr(cfg, "fingerprint_dim")
+            )
+
+            fingerprint_hidden_dim = int(
+                getattr(
+                    cfg,
+                    "fingerprint_hidden_dim",
+                    512,
+                )
+            )
+
+            self.fingerprint_embedding_dim = int(
+                getattr(
+                    cfg,
+                    "fingerprint_embedding_dim",
+                    128,
+                )
+            )
+
+            fingerprint_dropout = float(
+                getattr(
+                    cfg,
+                    "fingerprint_dropout",
+                    0.1,
+                )
+            )
+
+            fingerprint_activation = str(
+                getattr(
+                    cfg,
+                    "fingerprint_activation",
+                    "gelu",
+                )
+            )
+
+            self.fingerprint_encoder = ExtraFeatureEncoder(
+                input_dim=self.fingerprint_dim,
+                hidden_dim=fingerprint_hidden_dim,
+                output_dim=self.fingerprint_embedding_dim,
+                dropout=fingerprint_dropout,
+                activation=fingerprint_activation,
+                use_layer_norm=True,
+            )
+
+            fusion_dim += self.fingerprint_embedding_dim
+
+            print(
+                "Fingerprint branch enabled: "
+                f"{self.fingerprint_dim} -> "
+                f"{fingerprint_hidden_dim} -> "
+                f"{self.fingerprint_embedding_dim}"
+            )
+        else:
+            print("Fingerprint branch disabled.")
+
+        self.fusion_dim = fusion_dim
+
+        print(
+            f"Final fused representation dim: "
+            f"{self.fusion_dim}"
+        )
+
         self.regression_head = RegressionHead(
-            hidden_dim=cfg.encoder_embed_dim,
+            hidden_dim=self.fusion_dim,
             intermediate_dim=cfg.head_intermediate_dim,
             dropout=cfg.head_dropout,
         )
@@ -182,7 +438,98 @@ class GraphormerFineTuneRegressionModel(nn.Module):
         )
 
         # graph_rep: (batch_size, encoder_embed_dim)
-        predictions = self.regression_head(graph_rep)
+        representations = [graph_rep]
+
+        descriptor_rep = None
+        fingerprint_rep = None
+
+        # ------------------------------------------------------------
+        # Descriptor branch
+        # ------------------------------------------------------------
+        if self.use_descriptors:
+            descriptor_features = _get_batch_value(
+                batched_data,
+                "descriptor_features",
+            )
+
+            if descriptor_features is None:
+                raise KeyError(
+                    "Descriptor branch is enabled, but "
+                    "'descriptor_features' is missing from the batch."
+                )
+
+            descriptor_features = descriptor_features.to(
+                device=graph_rep.device,
+                dtype=graph_rep.dtype,
+            )
+
+            descriptor_rep = self.descriptor_encoder(
+                descriptor_features
+            )
+
+            if graph_rep.size(0) != descriptor_rep.size(0):
+                raise ValueError(
+                    "Batch-size mismatch between Graphormer representation "
+                    f"({graph_rep.size(0)}) and descriptor representation "
+                    f"({descriptor_rep.size(0)})."
+                )
+
+            representations.append(
+                descriptor_rep
+            )
+
+        # ------------------------------------------------------------
+        # Fingerprint branch
+        # ------------------------------------------------------------
+        if self.use_fingerprint:
+            fingerprint_features = _get_batch_value(
+                batched_data,
+                "fingerprint_features",
+            )
+
+            if fingerprint_features is None:
+                raise KeyError(
+                    "Fingerprint branch is enabled, but "
+                    "'fingerprint_features' is missing from the batch."
+                )
+
+            fingerprint_features = fingerprint_features.to(
+                device=graph_rep.device,
+                dtype=graph_rep.dtype,
+            )
+
+            fingerprint_rep = self.fingerprint_encoder(
+                fingerprint_features
+            )
+
+            if graph_rep.size(0) != fingerprint_rep.size(0):
+                raise ValueError(
+                    "Batch-size mismatch between Graphormer representation "
+                    f"({graph_rep.size(0)}) and fingerprint representation "
+                    f"({fingerprint_rep.size(0)})."
+                )
+
+            representations.append(
+                fingerprint_rep
+            )
+
+        # ------------------------------------------------------------
+        # Late fusion
+        # ------------------------------------------------------------
+        fused_rep = torch.cat(
+            representations,
+            dim=-1,
+        )
+
+        if fused_rep.size(-1) != self.fusion_dim:
+            raise ValueError(
+                f"Expected fused representation dim {self.fusion_dim}, "
+                f"got {fused_rep.size(-1)}."
+            )
+
+        predictions = self.regression_head(
+            fused_rep
+        )
 
         # For single-target regression, optionally remove the final
         # dimension: (B, 1) -> (B,)
@@ -219,6 +566,14 @@ class GraphormerFineTuneRegressionModel(nn.Module):
 
         if graph_rep is not None:
             out_dict["graph_rep"] = graph_rep
+
+        out_dict["fused_rep"] = fused_rep
+
+        if descriptor_rep is not None:
+            out_dict["descriptor_rep"] = descriptor_rep
+
+        if fingerprint_rep is not None:
+            out_dict["fingerprint_rep"] = fingerprint_rep
 
         # Expose the learned global aleatoric scale for NLL models.  This is a
         # single global uncertainty parameter, not per-molecule uncertainty.
@@ -807,23 +1162,184 @@ class GraphormerFineTuneClassificationModel(nn.Module):
         )
 
         # ============================================================
-        # Classification head
+        # Descriptor / fingerprint late-fusion branches
         # ============================================================
 
-        # The input dimension must match graph_rep:
-        # graph_rep shape = (batch_size, encoder_embed_dim)
+        self.use_extra_features = bool(
+            getattr(cfg, "use_extra_features", False)
+        )
+
+        self.use_descriptors = bool(
+            getattr(cfg, "use_descriptors", False)
+        )
+
+        self.use_fingerprint = bool(
+            getattr(cfg, "use_fingerprint", False)
+        )
+
+        if not self.use_extra_features:
+            self.use_descriptors = False
+            self.use_fingerprint = False
+
+        fusion_dim = int(cfg.encoder_embed_dim)
+
+        print(
+            f"Graphormer representation dim: "
+            f"{cfg.encoder_embed_dim}"
+        )
+
+        # ------------------------------------------------------------
+        # Descriptor branch
+        # ------------------------------------------------------------
+        self.descriptor_encoder = None
+        self.descriptor_dim = 0
+        self.descriptor_embedding_dim = 0
+
+        if self.use_descriptors:
+            self.descriptor_dim = int(
+                getattr(cfg, "descriptor_dim")
+            )
+
+            descriptor_hidden_dim = int(
+                getattr(
+                    cfg,
+                    "descriptor_hidden_dim",
+                    64,
+                )
+            )
+
+            self.descriptor_embedding_dim = int(
+                getattr(
+                    cfg,
+                    "descriptor_embedding_dim",
+                    32,
+                )
+            )
+
+            descriptor_dropout = float(
+                getattr(
+                    cfg,
+                    "descriptor_dropout",
+                    0.1,
+                )
+            )
+
+            descriptor_activation = str(
+                getattr(
+                    cfg,
+                    "descriptor_activation",
+                    "gelu",
+                )
+            )
+
+            self.descriptor_encoder = ExtraFeatureEncoder(
+                input_dim=self.descriptor_dim,
+                hidden_dim=descriptor_hidden_dim,
+                output_dim=self.descriptor_embedding_dim,
+                dropout=descriptor_dropout,
+                activation=descriptor_activation,
+                use_layer_norm=True,
+            )
+
+            fusion_dim += self.descriptor_embedding_dim
+
+            print(
+                "Descriptor branch enabled: "
+                f"{self.descriptor_dim} -> "
+                f"{descriptor_hidden_dim} -> "
+                f"{self.descriptor_embedding_dim}"
+            )
+        else:
+            print("Descriptor branch disabled.")
+
+        # ------------------------------------------------------------
+        # Fingerprint branch
+        # ------------------------------------------------------------
+        self.fingerprint_encoder = None
+        self.fingerprint_dim = 0
+        self.fingerprint_embedding_dim = 0
+
+        if self.use_fingerprint:
+            self.fingerprint_dim = int(
+                getattr(cfg, "fingerprint_dim")
+            )
+
+            fingerprint_hidden_dim = int(
+                getattr(
+                    cfg,
+                    "fingerprint_hidden_dim",
+                    512,
+                )
+            )
+
+            self.fingerprint_embedding_dim = int(
+                getattr(
+                    cfg,
+                    "fingerprint_embedding_dim",
+                    128,
+                )
+            )
+
+            fingerprint_dropout = float(
+                getattr(
+                    cfg,
+                    "fingerprint_dropout",
+                    0.1,
+                )
+            )
+
+            fingerprint_activation = str(
+                getattr(
+                    cfg,
+                    "fingerprint_activation",
+                    "gelu",
+                )
+            )
+
+            self.fingerprint_encoder = ExtraFeatureEncoder(
+                input_dim=self.fingerprint_dim,
+                hidden_dim=fingerprint_hidden_dim,
+                output_dim=self.fingerprint_embedding_dim,
+                dropout=fingerprint_dropout,
+                activation=fingerprint_activation,
+                use_layer_norm=True,
+            )
+
+            fusion_dim += self.fingerprint_embedding_dim
+
+            print(
+                "Fingerprint branch enabled: "
+                f"{self.fingerprint_dim} -> "
+                f"{fingerprint_hidden_dim} -> "
+                f"{self.fingerprint_embedding_dim}"
+            )
+        else:
+            print("Fingerprint branch disabled.")
+
+        self.fusion_dim = fusion_dim
+
+        print(
+            f"Final fused representation dim: "
+            f"{self.fusion_dim}"
+        )
+
         self.classification_head = ClassificationHead(
-            hidden_dim=cfg.encoder_embed_dim,
+            hidden_dim=self.fusion_dim,
             intermediate_dim=cfg.head_intermediate_dim,
             num_classes=cfg.num_classes,
             dropout=cfg.head_dropout,
         )
+
         if cfg.num_classes < 1:
             raise ValueError(
                 f"num_classes must be >= 1 for classification, "
                 f"got {cfg.num_classes}."
             )
-        print(f'Number of classes: {cfg.num_classes}')
+
+        print(
+            f"Number of classes: "
+            f"{cfg.num_classes}"
+        )
 
         self._initialize_classification_head_weights()
 
@@ -951,7 +1467,99 @@ class GraphormerFineTuneClassificationModel(nn.Module):
             **kwargs,
         )
 
-        logits = self.classification_head(graph_rep)
+        representations = [graph_rep]
+
+        descriptor_rep = None
+        fingerprint_rep = None
+
+        # ------------------------------------------------------------
+        # Descriptor branch
+        # ------------------------------------------------------------
+        if self.use_descriptors:
+            descriptor_features = _get_batch_value(
+                batched_data,
+                "descriptor_features",
+            )
+
+            if descriptor_features is None:
+                raise KeyError(
+                    "Descriptor branch is enabled, but "
+                    "'descriptor_features' is missing from the batch."
+                )
+
+            descriptor_features = descriptor_features.to(
+                device=graph_rep.device,
+                dtype=graph_rep.dtype,
+            )
+
+            descriptor_rep = self.descriptor_encoder(
+                descriptor_features
+            )
+
+            if graph_rep.size(0) != descriptor_rep.size(0):
+                raise ValueError(
+                    "Batch-size mismatch between Graphormer representation "
+                    f"({graph_rep.size(0)}) and descriptor representation "
+                    f"({descriptor_rep.size(0)})."
+                )
+
+            representations.append(
+                descriptor_rep
+            )
+
+        # ------------------------------------------------------------
+        # Fingerprint branch
+        # ------------------------------------------------------------
+        if self.use_fingerprint:
+            fingerprint_features = _get_batch_value(
+                batched_data,
+                "fingerprint_features",
+            )
+
+            if fingerprint_features is None:
+                raise KeyError(
+                    "Fingerprint branch is enabled, but "
+                    "'fingerprint_features' is missing from the batch."
+                )
+
+            fingerprint_features = fingerprint_features.to(
+                device=graph_rep.device,
+                dtype=graph_rep.dtype,
+            )
+
+            fingerprint_rep = self.fingerprint_encoder(
+                fingerprint_features
+            )
+
+            if graph_rep.size(0) != fingerprint_rep.size(0):
+                raise ValueError(
+                    "Batch-size mismatch between Graphormer representation "
+                    f"({graph_rep.size(0)}) and fingerprint representation "
+                    f"({fingerprint_rep.size(0)})."
+                )
+
+            representations.append(
+                fingerprint_rep
+            )
+
+        # ------------------------------------------------------------
+        # Late fusion
+        # ------------------------------------------------------------
+        fused_rep = torch.cat(
+            representations,
+            dim=-1,
+        )
+
+        if fused_rep.size(-1) != self.fusion_dim:
+            raise ValueError(
+                f"Expected fused representation dim {self.fusion_dim}, "
+                f"got {fused_rep.size(-1)}."
+            )
+
+        logits = self.classification_head(
+            fused_rep
+        )
+        logits = self.classification_head(fused_rep)
 
         if isinstance(batched_data, dict):
             targets = batched_data.get("y")
@@ -968,7 +1576,14 @@ class GraphormerFineTuneClassificationModel(nn.Module):
         output: dict[str, torch.Tensor] = {
             "logits": logits,
             "graph_rep": graph_rep,
+            "fused_rep": fused_rep,
         }
+
+        if descriptor_rep is not None:
+            output["descriptor_rep"] = descriptor_rep
+
+        if fingerprint_rep is not None:
+            output["fingerprint_rep"] = fingerprint_rep
 
         if loss is not None:
             output["loss"] = loss
@@ -1321,7 +1936,7 @@ class GraphormerFineTuneClassificationModel(nn.Module):
             else 0.0
         )
 
-        print("GraphormerFineTuneRegressionModel initialized.")
+        print("GraphormerFineTuneClassificationModel initialized.")
         print(f"Total parameters: {total_parameters:,}")
         print(
             f"Trainable parameters: "

@@ -12,6 +12,16 @@ from torch_geometric.data import Data
 from src.deep_learning.gpt.dataset import _iter_smiles_batches
 from src.deep_learning.graphormer import GraphormerFeaturizer
 
+# Shared molecular-feature preprocessing used by regular ML and Graphormer.
+# If your module has a different filename, only change this import path.
+from src.deep_learning.graphormer.modules.data_pipeline import (
+    _normalize_feature_types,
+    _featurize_single_smiles,
+    make_feature_preprocessor,
+    get_processed_feature_dimensions,
+    split_processed_features,
+)
+
 
 def safe_torch_load(path: str | Path, map_location: str = "cpu") -> Any:
     try:
@@ -39,23 +49,19 @@ def featurize_smiles_list(
     smiles_list: list[str],
     featurizer: GraphormerFeaturizer,
     target_list: list[Any] | None = None,
+    extra_feature_types: list[str] | str | None = None,
 ) -> list[Data]:
     """
-    Featurize a list of SMILES strings.
+    Featurize a list of SMILES strings for Graphormer.
 
-    For multi-task regression, target_list should have shape:
+    If `extra_feature_types` is provided, raw molecular features are also
+    generated and attached to each PyG Data object as:
 
-        [num_samples, num_tasks]
+        data.raw_extra_features
 
-    Example:
-        target_list = [
-            [1.2, 0.5, 3.1],
-            [1.8, 0.7, 2.5],
-        ]
-
-    Each resulting Data object will contain:
-
-        data.y.shape == (num_tasks,)
+    These features are intentionally stored RAW here.  The train-set
+    preprocessor is fitted only after all train shards have been created,
+    then train/val/test shards are transformed consistently.
     """
 
     if target_list is not None:
@@ -65,6 +71,13 @@ def featurize_smiles_list(
                 f"{len(smiles_list)} vs {len(target_list)}."
             )
 
+    use_extra_features = extra_feature_types is not None
+
+    if use_extra_features:
+        extra_feature_types = _normalize_feature_types(
+            extra_feature_types
+        )
+
     data_list: list[Data] = []
 
     for index, smiles in enumerate(smiles_list):
@@ -73,23 +86,42 @@ def featurize_smiles_list(
             featurizer,
         )
 
-        # Skip invalid SMILES.
+        # Skip invalid Graphormer molecules.
         if data is None:
             continue
 
+        # -----------------------------------------------------
+        # Targets
+        # -----------------------------------------------------
         if target_list is not None:
             target = target_list[index]
+            data.y = torch.as_tensor(
+                target,
+                dtype=torch.float32,
+            )
 
-            data.y = torch.as_tensor(target, dtype=torch.float32)
-            # print(
-            #     f"target={target}, "
-            #     f"data.y.shape={data.y.shape}"
-            # )
+        # -----------------------------------------------------
+        # Raw descriptors / fingerprints
+        # -----------------------------------------------------
+        if use_extra_features:
+            raw_extra = _featurize_single_smiles(
+                smiles,
+                extra_feature_types,
+            )
+
+            # Keep Graphormer features and extra features aligned.
+            # If the auxiliary featurizer fails, skip this molecule.
+            if raw_extra is None:
+                continue
+
+            data.raw_extra_features = torch.as_tensor(
+                raw_extra,
+                dtype=torch.float32,
+            )
 
         data_list.append(data)
 
     return data_list
-
 
 def _filter_smiles_and_targets(
     raw_smiles_batch: list[Any],
@@ -228,11 +260,13 @@ def _save_shard(
     cache_dir,
     shard_idx,
     task_names=None,
+    extra_feature_types=None,
 ):
     data_list = featurize_smiles_list(
         smiles,
         featurizer,
         targets,
+        extra_feature_types=extra_feature_types,
     )
 
     if not data_list:
@@ -248,6 +282,322 @@ def _save_shard(
         task_counts = _count_task_samples(data_list, task_names)
 
     return (str(shard_path), len(data_list), task_counts)
+
+
+def _fit_and_apply_extra_feature_preprocessor(
+    manifest,
+    *,
+    feature_types,
+    cache_dir,
+    fingerprint_variance_threshold=None,
+):
+    feature_types = _normalize_feature_types(
+        feature_types
+    )
+
+    print(
+        "\nStarting extra-feature preprocessing..."
+    )
+    print(
+        f"Feature types: {feature_types}"
+    )
+
+    train_raw_features = []
+
+    # ============================================================
+    # Collect training features
+    # ============================================================
+
+    print(
+        "Collecting raw extra features from training shards..."
+    )
+
+    for shard_index, shard_path in enumerate(
+        manifest.get("train", []),
+        start=1,
+    ):
+        print(
+            f"  Loading train shard "
+            f"{shard_index}: {shard_path}"
+        )
+
+        shard = safe_torch_load(
+            shard_path,
+            map_location="cpu",
+        )
+
+        for data in shard:
+            raw = getattr(
+                data,
+                "raw_extra_features",
+                None,
+            )
+
+            if raw is None:
+                raise RuntimeError(
+                    "Extra features were requested, but a "
+                    "training sample does not contain "
+                    "raw_extra_features."
+                )
+
+            train_raw_features.append(
+                raw.detach().cpu().numpy()
+            )
+
+    print(
+        f"Collected {len(train_raw_features):,} "
+        f"training feature vectors."
+    )
+
+    # ============================================================
+    # Stack training features
+    # ============================================================
+
+    print(
+        "Stacking training feature matrix..."
+    )
+
+    X_train_raw = np.vstack(
+        train_raw_features
+    ).astype(
+        np.float32,
+        copy=False,
+    )
+
+    print(
+        f"Raw training feature matrix: "
+        f"{X_train_raw.shape}"
+    )
+
+    # ============================================================
+    # Build and fit preprocessor
+    # ============================================================
+
+    print(
+        "Building extra-feature preprocessor..."
+    )
+
+    preprocessor = make_feature_preprocessor(
+        feature_types=feature_types,
+        fingerprint_variance_threshold=(
+            fingerprint_variance_threshold
+        ),
+    )
+
+    print(
+        "Fitting extra-feature preprocessor "
+        "on TRAINING data only..."
+    )
+
+    preprocessor.fit(
+        X_train_raw
+    )
+
+    print(
+        "Extra-feature preprocessor fitted."
+    )
+
+    dims = get_processed_feature_dimensions(
+        preprocessor=preprocessor,
+        X_reference=X_train_raw,
+        feature_types=feature_types,
+    )
+
+    descriptor_dim = int(
+        dims["descriptor_dim"]
+    )
+
+    fingerprint_dim = int(
+        dims["fingerprint_dim"]
+    )
+
+    print(
+        f"Processed descriptor dim: "
+        f"{descriptor_dim}"
+    )
+
+    print(
+        f"Processed fingerprint dim: "
+        f"{fingerprint_dim}"
+    )
+
+    print(
+        f"Total processed dim: "
+        f"{dims['total_dim']}"
+    )
+
+    # We no longer need this large matrix after fitting.
+    del X_train_raw
+    del train_raw_features
+
+    # ============================================================
+    # Transform train / val / test
+    # ============================================================
+
+    for split_name in (
+        "train",
+        "val",
+        "test",
+    ):
+        shard_paths = manifest.get(
+            split_name,
+            [],
+        )
+
+        print(
+            f"\nTransforming {split_name} "
+            f"extra features..."
+        )
+
+        for shard_index, shard_path in enumerate(
+            shard_paths,
+            start=1,
+        ):
+            print(
+                f"  [{shard_index}/{len(shard_paths)}] "
+                f"Loading {shard_path}"
+            )
+
+            shard = safe_torch_load(
+                shard_path,
+                map_location="cpu",
+            )
+
+            raw_matrix = np.vstack(
+                [
+                    data.raw_extra_features
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    for data in shard
+                ]
+            ).astype(
+                np.float32,
+                copy=False,
+            )
+
+            print(
+                f"    Raw shape: "
+                f"{raw_matrix.shape}"
+            )
+
+            print(
+                "    Transforming..."
+            )
+
+            processed = (
+                preprocessor.transform(
+                    raw_matrix
+                )
+            )
+
+            processed = np.asarray(
+                processed,
+                dtype=np.float32,
+            )
+
+            print(
+                f"    Processed shape: "
+                f"{processed.shape}"
+            )
+
+            blocks = split_processed_features(
+                processed,
+                descriptor_dim=descriptor_dim,
+            )
+
+            descriptor_features = blocks[
+                "descriptors"
+            ]
+
+            fingerprint_features = blocks[
+                "fingerprints"
+            ]
+
+            print(
+                "    Attaching processed features "
+                "to Graphormer Data objects..."
+            )
+
+            for idx, data in enumerate(shard):
+
+                if descriptor_features is not None:
+                    data.descriptor_features = (
+                        torch.as_tensor(
+                            descriptor_features[idx],
+                            dtype=torch.float32,
+                        )
+                    )
+
+                if fingerprint_features is not None:
+                    data.fingerprint_features = (
+                        torch.as_tensor(
+                            fingerprint_features[idx],
+                            dtype=torch.float32,
+                        )
+                    )
+
+                if hasattr(
+                    data,
+                    "raw_extra_features",
+                ):
+                    del data.raw_extra_features
+
+            print(
+                "    Saving processed shard..."
+            )
+
+            torch.save(
+                shard,
+                shard_path,
+            )
+
+            print(
+                "    Done."
+            )
+
+    # ============================================================
+    # Save preprocessor
+    # ============================================================
+
+    preprocessor_path = (
+        cache_dir
+        / "extra_feature_preprocessor.pt"
+    )
+
+    print(
+        f"\nSaving fitted preprocessor to "
+        f"{preprocessor_path}"
+    )
+
+    torch.save(
+        preprocessor,
+        preprocessor_path,
+    )
+
+    manifest["extra_features"] = {
+        "enabled": True,
+        "feature_types": list(
+            feature_types
+        ),
+        "descriptor_dim": descriptor_dim,
+        "fingerprint_dim": fingerprint_dim,
+        "total_dim": int(
+            dims["total_dim"]
+        ),
+        "fingerprint_variance_threshold": (
+            fingerprint_variance_threshold
+        ),
+        "preprocessor_path": str(
+            preprocessor_path
+        ),
+    }
+
+    print(
+        "\nExtra-feature preprocessing complete."
+    )
+
+    return manifest
 
 
 def featurize_and_cache_dataset(
@@ -356,6 +706,37 @@ def featurize_and_cache_dataset(
         )
     )
 
+    # ---------------------------------------------------------
+    # Optional descriptors / fingerprints for late fusion
+    # ---------------------------------------------------------
+    extra_feature_types = getattr(
+        dataset_config,
+        "extra_feature_types",
+        None,
+    )
+
+    use_extra_features = bool(
+        getattr(
+            dataset_config,
+            "use_extra_features",
+            extra_feature_types is not None,
+        )
+    )
+
+    if not use_extra_features:
+        extra_feature_types = None
+
+    fingerprint_variance_threshold = getattr(
+        dataset_config,
+        "fingerprint_variance_threshold",
+        None,
+    )
+
+    if fingerprint_variance_threshold is not None:
+        fingerprint_variance_threshold = float(
+            fingerprint_variance_threshold
+        )
+
     split_column = getattr(dataset_config, "split_column", None)
     split_column = getattr(dataset_config, "split_col", split_column)
 
@@ -448,9 +829,24 @@ def featurize_and_cache_dataset(
                 continue
 
             shard_path = cache_dir / split_name / f"{split_name}_00000.pt"
-            data_list = featurize_smiles_list(split_smiles, featurizer, split_target_values)
+            data_list = featurize_smiles_list(
+                split_smiles,
+                featurizer,
+                split_target_values,
+                extra_feature_types=extra_feature_types,
+            )
             torch.save(data_list, shard_path)
             manifest[split_name] = [str(shard_path)]
+
+        if use_extra_features:
+            manifest = _fit_and_apply_extra_feature_preprocessor(
+                manifest,
+                feature_types=extra_feature_types,
+                cache_dir=cache_dir,
+                fingerprint_variance_threshold=(
+                    fingerprint_variance_threshold
+                ),
+            )
 
         manifest_path = cache_dir / "graphormer_manifest.pt"
         torch.save(manifest, manifest_path)
@@ -623,6 +1019,7 @@ def featurize_and_cache_dataset(
             train_cache_dir,
             train_idx,
             task_names=task_names,
+            extra_feature_types=extra_feature_types,
         )
 
         if train_path is not None:
@@ -661,6 +1058,7 @@ def featurize_and_cache_dataset(
             val_cache_dir,
             val_idx,
             task_names=task_names,
+            extra_feature_types=extra_feature_types,
         )
 
         if val_path is not None:
@@ -700,6 +1098,7 @@ def featurize_and_cache_dataset(
                 test_cache_dir,
                 test_idx,
                 task_names=task_names,
+                extra_feature_types=extra_feature_types,
             )
 
             if test_path is not None:
@@ -779,6 +1178,16 @@ def featurize_and_cache_dataset(
         "seed": seed,
         "preprocess_batch_size": batch_size,
     }
+
+    if use_extra_features:
+        manifest = _fit_and_apply_extra_feature_preprocessor(
+            manifest,
+            feature_types=extra_feature_types,
+            cache_dir=cache_dir,
+            fingerprint_variance_threshold=(
+                fingerprint_variance_threshold
+            ),
+        )
 
     torch.save(
         manifest,
