@@ -35,15 +35,15 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --nproc_per_node="${NUM_GPUS}" \
         -m src.cli.main \
         train gpt \
-        --config "${CONFIG}"
+        "${CONFIG}"
 
 elif [ "$NUM_GPUS" -eq 1 ]; then
     echo "Running single GPU"
 
-    chemflow train gpt --config "${CONFIG}"
+    chemflow train gpt "${CONFIG}"
 
 else
     echo "Running on CPU"
 
-    chemflow train gpt --config "${CONFIG}"
+    chemflow train gpt "${CONFIG}"
 fi

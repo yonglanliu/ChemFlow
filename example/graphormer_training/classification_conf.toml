@@ -4,7 +4,7 @@
 
 [BaseConfig]
 
-workdir = "./example/graphormer_training"
+workdir = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_training_classification"
 
 task = "classification"
 
@@ -17,10 +17,10 @@ seed = 42
 
 [DatasetConfig]
 
-dataset_path = "./dataset/combined/pi3k_alpha_combined_labeled.csv"
+dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/combined/pi3k_alpha_combined_labeled.csv"
 
 smiles_column = "SMILES"
-target_column = "class_id"  # Replace with the actual target column
+target_column = "class_id"
 
 val_fraction = 0.1
 test_fraction = 0.1
@@ -36,6 +36,28 @@ remove_hs = true
 
 seed = 42
 
+
+# ------------------------------------------------------------
+# Extra molecular features
+# ------------------------------------------------------------
+
+use_extra_features = true
+
+# First experiment: descriptors only
+extra_feature_types = [
+    "descriptors",
+]
+
+# Leave undefined when fingerprints are not used.
+#
+# If later using fingerprints:
+#
+# extra_feature_types = [
+#     "descriptors",
+#     "ecfp4",
+# ]
+#
+# fingerprint_variance_threshold = 0.0
 
 
 # ============================================================
@@ -57,71 +79,239 @@ reorder_atoms = false
 
 seed = 42
 
+
+# ------------------------------------------------------------
+# Cross-validation
+# ------------------------------------------------------------
+
+cross_validation = false
+
+# If CV is enabled later:
+# cv_splits = 5
+# cv_seed = 42
+
+
+# ------------------------------------------------------------
+# Batch / Epoch Settings
+# ------------------------------------------------------------
+
 batch_size = 16
 eval_batch_size = 16
+
 num_epochs = 50
+
 num_workers = 0
 
-# --- Learning Settings ---
+
+# ------------------------------------------------------------
+# Learning Settings
+# ------------------------------------------------------------
+
 learning_rate = 1e-4
+
 encoder_learning_rate = 1e-5
 lora_learning_rate = 1e-4
 head_learning_rate = 1e-4
+
+# Descriptor / fingerprint encoder learning rate
+extra_feature_learning_rate = 1e-4
+
 weight_decay = 0.01
+
 scheduler = "cosine"
+
 gradient_clip_value = 1.0
 
-# --- Plotting Setting ---
+
+# ------------------------------------------------------------
+# Plotting Settings
+# ------------------------------------------------------------
+
 plot_training_history = true
 plot_dpi = 300
 
-# --- Resume Settings ---
-resume = true
-resume_checkpoint = "./example/graphormer_training/checkpoints/last_model.pt"
 
-# --- Early stopping settings ---
+# ------------------------------------------------------------
+# Resume Settings
+# ------------------------------------------------------------
+
+resume = false
+
+resume_checkpoint = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_training_classification/checkpoints/last_model.pt"
+
+
+# ------------------------------------------------------------
+# Early Stopping Settings
+# ------------------------------------------------------------
+
 early_stopping = true
-early_stopping_patience = 10
-monitor_metric = "val_roc_auc"   # Options: 'val_accuracy', 'val_balanced_accuracy', 'val_f1', 'val_loss', 'val_mcc', 'val_pr_auc', 'val_precision', 'val_recall', 'val_roc_auc'
-monitor_mode = "max"  # Options: "max", "min"
 
-# --- Evaluate Hold-out Test Set ---
+early_stopping_patience = 10
+
+monitor_metric = "val_roc_auc"
+
+monitor_mode = "max"
+
+
+# ------------------------------------------------------------
+# Hold-out Test Evaluation
+# ------------------------------------------------------------
+
 evaluate_test = true
+
 plot_evaluation_metrics = true
 
 
 # ============================================================
-# Graphormer model and fine-tuning
+# Graphormer Model and Fine-Tuning
 # ============================================================
 
 [GraphormerConfig]
 
-# --- Binary classification ---
-num_classes = 1      
-loss_type = "bce"  # Options: "bce", "cross_entropy"
+
+# ------------------------------------------------------------
+# Classification settings
+# ------------------------------------------------------------
+
+# Binary classification
+num_classes = 1
+
+loss_type = "bce"
+
+# Replace with value calculated from TRAINING split only
 positive_weight = 0.572
 
-# --- Multiple catetory classification ---
+
+# ------------------------------------------------------------
+# Multi-class example
+# ------------------------------------------------------------
+
 # num_classes = 4
 # loss_type = "cross_entropy"
-# class_weights = [1.0, 2.0, 3.0, 4.0]
+#
+# class_weights = [
+#     1.0,
+#     2.0,
+#     3.0,
+#     4.0
+# ]
+
+
+# ------------------------------------------------------------
+# Pretrained Graphormer
+# ------------------------------------------------------------
 
 pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
 
+
+# ============================================================
+# Extra Feature Fusion
+# ============================================================
+
+use_extra_features = true
+
+
+# ------------------------------------------------------------
+# Descriptor branch
+# ------------------------------------------------------------
+
+use_descriptors = true
+
+# Current descriptor set:
+#
+# MolWt
+# MolLogP
+# TPSA
+# NumHAcceptors
+# NumHDonors
+# NumRotatableBonds
+# RingCount
+# HeavyAtomCount
+# FractionCSP3
+#
+# Total = 9
+
+descriptor_dim = 9
+
+descriptor_hidden_dim = 64
+
+descriptor_embedding_dim = 32
+
+descriptor_dropout = 0.1
+
+descriptor_activation = "gelu"
+
+
+# ------------------------------------------------------------
+# Fingerprint branch
+# ------------------------------------------------------------
+
+use_fingerprint = false
+
+# Enable later if needed:
+#
+# fingerprint_type = "ecfp4"
+# fingerprint_dim = 2048
+# fingerprint_hidden_dim = 512
+# fingerprint_embedding_dim = 128
+# fingerprint_dropout = 0.1
+# fingerprint_activation = "gelu"
+
+
+# ------------------------------------------------------------
+# Fusion architecture
+# ------------------------------------------------------------
+
+# Descriptor-only:
+#
+# Graphormer        768
+# Descriptor         32
+# ---------------------
+# fused             800
+#
+# ClassificationHead input = 800
+
+
+# ============================================================
+# Classification Head
+# ============================================================
+
 head_intermediate_dim = 256
+
 head_dropout = 0.1
 
-# --- LoRA Finetune Settings ---
+
+# ============================================================
+# Encoder Fine-Tuning
+# ============================================================
+
 freeze_encoder = true
+
 use_lora = true
 
-lora_target = "attention"  # attention | ffn | all
+
+# ============================================================
+# LoRA
+# ============================================================
+
+# attention | ffn | all
+lora_target = "all"
 
 lora_r = 8
+
 lora_alpha = 16.0
+
 lora_dropout = 0.1
+
 apply_lora_to_k_proj = false
 
+
+# ------------------------------------------------------------
+# FFN LoRA
+# ------------------------------------------------------------
+
 lora_ffn_r = 8
+
 lora_ffn_alpha = 16.0
+
 lora_use_fc2 = false

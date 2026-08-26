@@ -20,15 +20,47 @@ seed = 42
 dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/ADMET/ExpansionRX/expansion_data_train.csv"
 
 smiles_column = "SMILES"
-target_column = ["LogD", "LogS", "Log(MLM_Clint)", "Log(HLM_Clint)", "Log(Caco2_Papp)", "Log(Caco2_ER)", "Log(MPPB)", "Log(MBPB)", "Log(MGMB)"]
-task_names = ["LogD", "LogS", "Log(MLM_Clint)", "Log(HLM_Clint)", "Log(Caco2_Papp)", "Log(Caco2_ER)", "Log(MPPB)", "Log(MBPB)", "Log(MGMB)"]
 
-# Optional: set this when the dataset already contains split labels like train/val/test.
-# If omitted, the loader falls back to random val/test splitting.
+target_column = [
+    "LogD",
+    "LogS",
+    "Log(MLM_Clint)",
+    "Log(HLM_Clint)",
+    "Log(Caco2_Papp)",
+    "Log(Caco2_ER)",
+    "Log(MPPB)",
+    "Log(MBPB)",
+    "Log(MGMB)"
+]
+
+task_names = [
+    "LogD",
+    "LogS",
+    "Log(MLM_Clint)",
+    "Log(HLM_Clint)",
+    "Log(Caco2_Papp)",
+    "Log(Caco2_ER)",
+    "Log(MPPB)",
+    "Log(MBPB)",
+    "Log(MGMB)"
+]
+
+
+# ------------------------------------------------------------
+# Existing split
+# ------------------------------------------------------------
+
+# Dataset already contains train / val / test labels.
 split_column = "split"
 
+# Used only as fallback when predefined split labels are unavailable.
 val_fraction = 0.1
 test_fraction = 0.1
+
+
+# ------------------------------------------------------------
+# Graphormer preprocessing
+# ------------------------------------------------------------
 
 preprocess_batch_size = 100000
 
@@ -40,6 +72,44 @@ reorder_atoms = false
 remove_hs = true
 
 seed = 42
+
+
+# ------------------------------------------------------------
+# Extra molecular features
+# ------------------------------------------------------------
+
+use_extra_features = true
+
+# Recommended first experiment:
+# Graphormer + molecular descriptors
+extra_feature_types = [
+    "descriptors",
+]
+
+# Current descriptors:
+#   MolWt
+#   MolLogP
+#   TPSA
+#   NumHAcceptors
+#   NumHDonors
+#   NumRotatableBonds
+#   RingCount
+#   HeavyAtomCount
+#   FractionCSP3
+#
+# Descriptor preprocessing:
+#   StandardScaler fitted on TRAIN only.
+#
+# For descriptors only, leave fingerprint settings undefined.
+
+# Later, for descriptors + ECFP4:
+#
+# extra_feature_types = [
+#     "descriptors",
+#     "ecfp4",
+# ]
+#
+# fingerprint_variance_threshold = 0.0
 
 
 # ============================================================
@@ -61,80 +131,236 @@ reorder_atoms = false
 
 seed = 42
 
+
+# ------------------------------------------------------------
+# Cross-validation
+# ------------------------------------------------------------
+
+cross_validation = false
+
+
+# ------------------------------------------------------------
+# Batch / Epoch Settings
+# ------------------------------------------------------------
+
 batch_size = 16
 eval_batch_size = 16
+
 num_epochs = 100
+
 num_workers = 0
 
-# --- Learning Settings ---
+
+# ------------------------------------------------------------
+# Learning Settings
+# ------------------------------------------------------------
+
 learning_rate = 1e-4
+
 encoder_learning_rate = 1e-5
 lora_learning_rate = 1e-4
 head_learning_rate = 1e-4
+
+# Descriptor / fingerprint encoder learning rate
+extra_feature_learning_rate = 1e-4
+
 weight_decay = 0.01
+
 scheduler = "cosine"
+
 gradient_clip_value = 1.0
 
-# --- Plotting Setting ---
+
+# ------------------------------------------------------------
+# Plotting Settings
+# ------------------------------------------------------------
+
 plot_training_history = true
 plot_dpi = 300
 
-# --- Resume Settings ---
+
+# ------------------------------------------------------------
+# Resume Settings
+# ------------------------------------------------------------
+
 resume = false
+
 resume_checkpoint = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_multitask_training/checkpoints/last_model.pt"
 
-# --- Early Stopping Settings ---
-early_stopping = true
-early_stopping_patience = 20
-monitor_metric = "val_rmse"  # Options: "val_loss", "val_mae", "val_rmse", "val_r2"
-monitor_mode = "min"  # Options: "min", "max"
 
-# --- Evaluate Hold-out Test Set ---
+# ------------------------------------------------------------
+# Early Stopping Settings
+# ------------------------------------------------------------
+
+early_stopping = true
+
+early_stopping_patience = 20
+
+monitor_metric = "val_rmse"
+
+monitor_mode = "min"
+
+
+# ------------------------------------------------------------
+# Hold-out Test Evaluation
+# ------------------------------------------------------------
+
 evaluate_test = true
+
 plot_evaluation_metrics = true
 
 
 # ============================================================
-# Graphormer model and fine-tuning
+# Graphormer Model and Fine-Tuning
 # ============================================================
 
 [GraphormerConfig]
 
 pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
+
 num_tasks = 9
-loss_type = "laplace_NLL"  # 'mse', 'mae', 'huber', 'laplace_nll', or 'gaussian_nll'
 
-# Automatic availability-based task weighting.
-# Supported methods: "inverse", "sqr_inverse"/"sqrt_inverse", or "customed".
-# Leave task_weights unset to let the trainer compute it automatically.
-task_weight_method = "sqr_inverse"  # "inverse", "sqrt_inverse", or "customed".
-# task_weights = [0.09, 0.10, 0.10, 0.12, 0.11, 0.11, 0.15, 0.12, 0.10]
+loss_type = "laplace_NLL"
 
 
-# Multi-adaptor / grouped task-head settings
-# Group tasks by similar assay families and share one adaptor per group.
+# ============================================================
+# Extra Feature Fusion
+# ============================================================
+
+use_extra_features = true
+
+
+# ------------------------------------------------------------
+# Descriptor branch
+# ------------------------------------------------------------
+
+use_descriptors = true
+
+descriptor_dim = 9
+
+descriptor_hidden_dim = 64
+
+descriptor_embedding_dim = 32
+
+descriptor_dropout = 0.1
+
+descriptor_activation = "gelu"
+
+
+# ------------------------------------------------------------
+# Fingerprint branch
+# ------------------------------------------------------------
+
+use_fingerprint = false
+
+# Enable later if needed:
+#
+# fingerprint_type = "ecfp4"
+# fingerprint_dim = 2048
+# fingerprint_hidden_dim = 512
+# fingerprint_embedding_dim = 128
+# fingerprint_dropout = 0.1
+# fingerprint_activation = "gelu"
+
+
+# ------------------------------------------------------------
+# Fusion dimension
+# ------------------------------------------------------------
+
+# Descriptor-only:
+#
+# Graphormer representation = 768
+# Descriptor embedding      = 32
+# --------------------------------
+# Fused representation      = 800
+#
+# The fused 800-d representation is passed into
+# HardSharingMTL / SoftSharingMTL.
+
+
+# ============================================================
+# Automatic Availability-Based Task Weighting
+# ============================================================
+
+# Supported:
+#   inverse
+#   sqr_inverse
+#   sqrt_inverse
+#   customed
+
+task_weight_method = "sqr_inverse"
+
+# Leave unset so trainer computes weights automatically.
+#
+# task_weights = [
+#     0.09,
+#     0.10,
+#     0.10,
+#     0.12,
+#     0.11,
+#     0.11,
+#     0.15,
+#     0.12,
+#     0.10
+# ]
+
+
+# ============================================================
+# Multi-adaptor / Grouped Task-head Settings
+# ============================================================
+
 sharing_type = "hard"
+
 num_adapters = 4
-task_groups = [[0, 1], [2, 3], [4, 5], [6, 7, 8]]
+
+task_groups = [
+    [0, 1],
+    [2, 3],
+    [4, 5],
+    [6, 7, 8]
+]
+
+
+# ============================================================
+# Encoder / Adaptor Settings
+# ============================================================
 
 freeze_encoder = true
+
 use_lora = true
 
 head_intermediate_dim = 256
 head_dropout = 0.1
+
 adaptor_bottleneck_dim = 128
 adaptor_dropout = 0.1
+
 adaptor_gate = true
 adaptor_gate_fn = "tanh"
 
+
+# ============================================================
 # LoRA
-lora_target = "all"  # attention | ffn | all
+# ============================================================
+
+# attention | ffn | all
+lora_target = "all"
 
 lora_r = 8
+
 lora_alpha = 16.0
+
 lora_dropout = 0.1
+
 apply_lora_to_k_proj = false
 
+
+# ------------------------------------------------------------
+# FFN LoRA
+# ------------------------------------------------------------
+
 lora_ffn_r = 8
+
 lora_ffn_alpha = 16.0
+
 lora_use_fc2 = false

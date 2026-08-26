@@ -4,7 +4,7 @@
 
 [BaseConfig]
 
-workdir = "./example/graphormer_training_regression"
+workdir = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_training_regression"
 
 task = "regression"
 
@@ -17,10 +17,10 @@ seed = 42
 
 [DatasetConfig]
 
-dataset_path = "./example/dataset/combined/pi3k_alpha_combined_labeled.csv"
+dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/ADMET/ExpansionRX/log_transformed_all.csv"
 
 smiles_column = "SMILES"
-target_column = "pIC50"  # Replace with the actual target column
+target_column = "LogD"
 
 val_fraction = 0.1
 test_fraction = 0.1
@@ -35,6 +35,46 @@ reorder_atoms = false
 remove_hs = true
 
 seed = 42
+
+
+# ------------------------------------------------------------
+# Extra molecular features
+# ------------------------------------------------------------
+
+# Enable descriptor / fingerprint late fusion.
+use_extra_features = true
+
+# Supported examples:
+#   "descriptors"
+#   "ecfp4"
+#   "ecfp6"
+#   "fcfp4"
+#   "fcfp6"
+#   "maccs"
+#
+# Mixed representations are supported.
+extra_feature_types = [
+    "descriptors",
+#    "ecfp4",
+]
+
+# Descriptor preprocessing:
+#   descriptors are standardized using StandardScaler fitted
+#   ONLY on the training set.
+#
+# Fingerprint preprocessing:
+#   fingerprints remain binary and are not standardized.
+
+# Optional fingerprint feature filtering.
+#
+# null:
+#   keep all fingerprint bits.
+#
+# 0.0:
+#   remove bits with zero variance in the training set.
+#
+# Example for stronger filtering:
+# fingerprint_variance_threshold = 0.001
 
 
 # ============================================================
@@ -61,33 +101,72 @@ eval_batch_size = 16
 num_epochs = 20
 num_workers = 0
 
-# --- Learning Settings ---
+# ------------------------------------------------------------
+# Learning settings
+# ------------------------------------------------------------
+
 learning_rate = 1e-4
+
 encoder_learning_rate = 1e-5
 lora_learning_rate = 1e-4
 head_learning_rate = 1e-4
+
+# Learning rate for descriptor / fingerprint encoders.
+extra_feature_learning_rate = 1e-4
+
 weight_decay = 0.01
+
 scheduler = "cosine"
+
 gradient_clip_value = 1.0
 
-# --- Plotting Setting ---
+
+# ------------------------------------------------------------
+# Plotting settings
+# ------------------------------------------------------------
+
 plot_training_history = true
 plot_dpi = 300
 
-# --- Resume Settings ---
+
+# ------------------------------------------------------------
+# Resume settings
+# ------------------------------------------------------------
+
 resume = false
+
 # resume_checkpoint = "/path/to/checkpoints/last_model.pt"
 
-# --- Early Stopping Settings ---
-early_stopping = true
-early_stopping_patience = 10
-monitor_metric = "val_rmse"  # Options: "val_loss", "val_mae", "val_rmse", "val_r2"
-monitor_mode = "min"  # Options: "min", "max"
 
-# --- Evaluate Hold-out Test Set ---
+# ------------------------------------------------------------
+# Early stopping settings
+# ------------------------------------------------------------
+
+early_stopping = true
+
+early_stopping_patience = 10
+
+monitor_metric = "val_rmse"
+# Options:
+#   "val_loss"
+#   "val_mae"
+#   "val_rmse"
+#   "val_r2"
+
+monitor_mode = "min"
+# min:
+#   val_loss / val_mae / val_rmse
+#
+# max:
+#   val_r2
+
+
+# ------------------------------------------------------------
+# Hold-out test evaluation
+# ------------------------------------------------------------
+
 evaluate_test = true
 plot_evaluation_metrics = true
-
 
 
 # ============================================================
@@ -98,20 +177,150 @@ plot_evaluation_metrics = true
 
 pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
 
+loss_type = "laplace_nll"
+# Options:
+#   "huber"
+#   "mse"
+#   "mae"
+#   "laplace_nll"
+#   "gaussian_nll"
+
+
+# ------------------------------------------------------------
+# Backbone fine-tuning
+# ------------------------------------------------------------
+
 freeze_encoder = true
+
 use_lora = true
 
+
+# ------------------------------------------------------------
+# Prediction head
+# ------------------------------------------------------------
+
 head_intermediate_dim = 256
+
 head_dropout = 0.1
 
+
+# ============================================================
+# Extra feature fusion
+# ============================================================
+
+# Keep this consistent with DatasetConfig.use_extra_features.
+use_extra_features = true
+
+
+# ------------------------------------------------------------
+# Descriptor branch
+# ------------------------------------------------------------
+
+use_descriptors = true
+
+# Your current descriptor featurizer produces:
+#
+# MolWt
+# MolLogP
+# TPSA
+# NumHAcceptors
+# NumHDonors
+# NumRotatableBonds
+# RingCount
+# HeavyAtomCount
+# FractionCSP3
+#
+# Therefore raw descriptor dimension = 9.
+descriptor_dim = 9
+
+descriptor_hidden_dim = 64
+
+descriptor_embedding_dim = 32
+
+descriptor_dropout = 0.1
+
+descriptor_activation = "gelu"
+
+
+# ------------------------------------------------------------
+# Fingerprint branch
+# ------------------------------------------------------------
+
+use_fingerprint = true
+
+fingerprint_type = "ecfp4"
+
+# ECFP4 is initially 2048 bits.
+#
+# IMPORTANT:
+# If fingerprint_variance_threshold is not null,
+# the final fingerprint dimension may become smaller.
+#
+# Ideally this value should be overwritten automatically from:
+#
+# manifest["extra_features"]["fingerprint_dim"]
+#
+fingerprint_dim = 2048
+
+fingerprint_hidden_dim = 512
+
+fingerprint_embedding_dim = 128
+
+fingerprint_dropout = 0.1
+
+fingerprint_activation = "gelu"
+
+
+# ------------------------------------------------------------
+# Fusion
+# ------------------------------------------------------------
+
+# Current architecture:
+#
+# Graphormer representation
+#       +
+# Descriptor embedding
+#       +
+# Fingerprint embedding
+#       ↓
+# concatenate
+#       ↓
+# regression head
+#
+# Example:
+#
+# Graphormer     768
+# Descriptor      32
+# ECFP4          128
+# ------------------
+# fused          928
+
+
+# ============================================================
 # LoRA
-lora_target = "attention"  # attention | ffn | all
+# ============================================================
+
+lora_target = "attention"
+# Options:
+#   attention
+#   ffn
+#   all
 
 lora_r = 8
+
 lora_alpha = 16.0
+
 lora_dropout = 0.1
+
 apply_lora_to_k_proj = false
 
+
+# ------------------------------------------------------------
+# FFN LoRA
+# ------------------------------------------------------------
+
 lora_ffn_r = 8
+
 lora_ffn_alpha = 16.0
+
 lora_use_fc2 = false

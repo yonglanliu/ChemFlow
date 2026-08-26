@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=smiles_train
+#SBATCH --job-name=smiles_generate
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -14,10 +14,10 @@ module load cuda
 source /path/to/your/venv/bin/activate
 
 
-checkpoint_path="/Users/yonglanliu/Desktop/ChemFlow/gpt_training/checkpoints/best_model.pt"
-tokenizer_path="/Users/yonglanliu/Desktop/ChemFlow/gpt_training/cache/tokenizer"
-adapter_checkpoint_path="/Users/yonglanliu/Desktop/ChemFlow/gpt_training/checkpoints/best_adapter.pt"
-output_path="/Users/yonglanliu/Desktop/ChemFlow/gpt_training/generated_smiles.txt"
+checkpoint_path="/path/to/best_model.pt"
+tokenizer_path="/path/to/cache/tokenizer"
+adapter_checkpoint_path="/path/to/best_adapter.pt"
+output_path="/path/to/generated_smiles.txt"
 
 num_samples=1000
 max_length=100
