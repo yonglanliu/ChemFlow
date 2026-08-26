@@ -19,10 +19,6 @@ from ..modules.graphormer_encoder import (
     init_graphormer_params,
     GraphormerGraphEncoder,
 )
-from src.deep_learning.sharing.sharing_layers import (
-    HardSharingMTL,
-    SoftSharingMTL
-)
 
 logger = logging.getLogger(__name__)
 
