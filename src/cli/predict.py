@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from src.chemflow.machine_learning.predict.predictor import (
@@ -15,7 +14,7 @@ from src.deep_learning.graphormer.inference.predictor import (
 
 
 # ============================================================
-# Input helpers
+# Supported input formats
 # ============================================================
 
 SUPPORTED_INPUT_SUFFIXES = {
@@ -28,18 +27,38 @@ SUPPORTED_INPUT_SUFFIXES = {
 }
 
 
+# ============================================================
+# Read SMILES file
+# ============================================================
+
 def read_smi_file(
     path: str | Path,
     structure_column: str,
 ) -> pd.DataFrame:
+    """
+    Read a .smi, .smiles, or .txt file.
 
-    path = Path(
-        path
-    ).expanduser().resolve()
+    Supported examples
+    ------------------
+    One column:
 
+        CCO
+        CCN
+        c1ccccc1
+
+    Two columns:
+
+        CCO ethanol
+        CCN ethylamine
+    """
+
+    path = (
+        Path(path)
+        .expanduser()
+        .resolve()
+    )
 
     records = []
-
 
     with path.open(
         "r",
@@ -63,7 +82,10 @@ def read_smi_file(
                 maxsplit=1
             )
 
-            smiles = parts[0].strip()
+            smiles = (
+                parts[0]
+                .strip()
+            )
 
             name = (
                 parts[1].strip()
@@ -81,18 +103,20 @@ def read_smi_file(
                 }
             )
 
-
     if not records:
 
         raise ValueError(
             f"No molecules found in: {path}"
         )
 
-
     return pd.DataFrame(
         records
     )
 
+
+# ============================================================
+# Generic inference input loader
+# ============================================================
 
 def load_inference_input(
     *,
@@ -100,9 +124,27 @@ def load_inference_input(
     input_path: str | Path | None,
     structure_column: str,
 ) -> pd.DataFrame:
+    """
+    Load molecular structures from either:
+
+        --smiles
+
+    or:
+
+        --input
+
+    Supported files:
+
+        .smi
+        .smiles
+        .txt
+        .csv
+        .parquet
+        .pq
+    """
 
     # --------------------------------------------------------
-    # Validate mutually exclusive inputs
+    # Validate input source
     # --------------------------------------------------------
 
     if (
@@ -116,7 +158,6 @@ def load_inference_input(
             "not both."
         )
 
-
     if (
         smiles is None
         and
@@ -128,9 +169,9 @@ def load_inference_input(
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Single SMILES
-    # --------------------------------------------------------
+    # ========================================================
 
     if smiles is not None:
 
@@ -153,14 +194,15 @@ def load_inference_input(
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # File input
-    # --------------------------------------------------------
+    # ========================================================
 
-    path = Path(
-        input_path
-    ).expanduser().resolve()
-
+    path = (
+        Path(input_path)
+        .expanduser()
+        .resolve()
+    )
 
     if not path.is_file():
 
@@ -168,28 +210,21 @@ def load_inference_input(
             f"Input file not found: {path}"
         )
 
-
     suffix = (
         path.suffix.lower()
     )
 
-
-    if suffix not in (
-        SUPPORTED_INPUT_SUFFIXES
-    ):
+    if suffix not in SUPPORTED_INPUT_SUFFIXES:
 
         raise ValueError(
-
-            f"Unsupported input format: "
-            f"{suffix}\n"
-
+            f"Unsupported input format: {suffix}\n"
             f"Supported formats: "
             f"{sorted(SUPPORTED_INPUT_SUFFIXES)}"
         )
 
 
     # --------------------------------------------------------
-    # SMILES-like text
+    # SMILES text file
     # --------------------------------------------------------
 
     if suffix in {
@@ -199,8 +234,8 @@ def load_inference_input(
     }:
 
         frame = read_smi_file(
-            path,
-            structure_column,
+            path=path,
+            structure_column=structure_column,
         )
 
 
@@ -236,56 +271,55 @@ def load_inference_input(
         )
 
 
-    # --------------------------------------------------------
-    # Check structure column
-    # --------------------------------------------------------
+    # ========================================================
+    # Validate structure column
+    # ========================================================
 
     if structure_column not in frame.columns:
 
         raise KeyError(
-
             f"Structure column "
             f"'{structure_column}' "
-            "not found.\n"
-
+            f"not found.\n"
             f"Available columns: "
             f"{frame.columns.tolist()}"
         )
 
-
     frame = frame.copy()
 
-
     frame[structure_column] = (
-        frame[
-            structure_column
-        ]
+        frame[structure_column]
         .astype("string")
         .str.strip()
     )
 
 
-    invalid = (
-        frame[
-            structure_column
-        ].isna()
-        |
-        frame[
-            structure_column
-        ].eq("")
-    )
+    # --------------------------------------------------------
+    # Check empty structures
+    # --------------------------------------------------------
 
+    invalid = (
+        frame[structure_column].isna()
+        |
+        frame[structure_column].eq("")
+    )
 
     if invalid.any():
 
-        raise ValueError(
-
-            f"Found "
-            f"{int(invalid.sum())} "
-            f"empty SMILES in column "
-            f"'{structure_column}'."
+        invalid_indices = (
+            frame.index[
+                invalid
+            ]
+            .tolist()
         )
 
+        raise ValueError(
+            f"Found {int(invalid.sum())} "
+            f"empty structures in column "
+            f"'{structure_column}'.\n"
+            f"Example row indices: "
+            f"{invalid_indices[:10]}"
+        )
 
     return frame.reset_index(
         drop=True
@@ -300,22 +334,30 @@ def save_prediction_frame(
     frame: pd.DataFrame,
     output_path: str | Path,
 ) -> Path:
+    """
+    Save prediction results.
 
-    output_path = Path(
-        output_path
-    ).expanduser().resolve()
+    Supported output formats:
 
+        .csv
+        .parquet
+        .pq
+    """
+
+    output_path = (
+        Path(output_path)
+        .expanduser()
+        .resolve()
+    )
 
     output_path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-
     suffix = (
         output_path.suffix.lower()
     )
-
 
     if suffix == ".csv":
 
@@ -337,11 +379,10 @@ def save_prediction_frame(
     else:
 
         raise ValueError(
-
-            "Output must be .csv, "
-            ".parquet, or .pq."
+            "Output must end with "
+            ".csv, .parquet, or .pq.\n"
+            f"Received: {output_path}"
         )
-
 
     return output_path
 
@@ -353,6 +394,10 @@ def save_prediction_frame(
 def predict_ml(
     args,
 ) -> None:
+    """
+    Run inference using a saved ChemFlow traditional
+    machine-learning model package.
+    """
 
     print(
         "\n" + "=" * 70
@@ -367,19 +412,15 @@ def predict_ml(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Input
-    # --------------------------------------------------------
+    # ========================================================
 
     input_frame = load_inference_input(
-
         smiles=args.smiles,
-
         input_path=args.input,
-
         structure_column=args.structure_column,
     )
-
 
     print(
         f"\nInput molecules: "
@@ -387,28 +428,26 @@ def predict_ml(
     )
 
 
-    # --------------------------------------------------------
-    # Load model
-    # --------------------------------------------------------
+    # ========================================================
+    # Load trained model
+    # ========================================================
 
     predictor = ChemFlowPredictor(
         model_path=args.model
     )
 
 
-    # --------------------------------------------------------
-    # Print model configuration
-    # --------------------------------------------------------
+    # ========================================================
+    # Display model information
+    # ========================================================
 
     print(
         "\nModel configuration:"
     )
 
-
     info = (
         predictor.get_model_info()
     )
-
 
     for key, value in info.items():
 
@@ -417,9 +456,9 @@ def predict_ml(
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Predict
-    # --------------------------------------------------------
+    # ========================================================
 
     result_frame = (
         predictor.predict_from_dataframe(
@@ -429,14 +468,13 @@ def predict_ml(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Rename prediction column
-    # --------------------------------------------------------
+    # ========================================================
 
     prediction_name = (
         args.task_name
     )
-
 
     if (
         prediction_name
@@ -446,25 +484,27 @@ def predict_ml(
     ):
 
         result_frame.rename(
-
             columns={
                 "prediction":
                     prediction_name
             },
-
             inplace=True,
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Save
-    # --------------------------------------------------------
+    # ========================================================
 
     output_path = save_prediction_frame(
-        result_frame,
-        args.output,
+        frame=result_frame,
+        output_path=args.output,
     )
 
+
+    # ========================================================
+    # Summary
+    # ========================================================
 
     print(
         "\n" + "=" * 70
@@ -476,6 +516,11 @@ def predict_ml(
 
     print(
         "=" * 70
+    )
+
+    print(
+        f"Input molecules: "
+        f"{len(input_frame):,}"
     )
 
     print(
@@ -496,6 +541,10 @@ def predict_ml(
 def predict_graphormer(
     args,
 ) -> None:
+    """
+    Run Graphormer inference on one SMILES or a molecular
+    structure file.
+    """
 
     print(
         "\n" + "=" * 70
@@ -510,19 +559,47 @@ def predict_graphormer(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
+    # Validate runtime arguments
+    # ========================================================
+
+    if not (
+        0.0
+        <= float(args.threshold)
+        <= 1.0
+    ):
+
+        raise ValueError(
+            "--threshold must be between "
+            "0 and 1."
+        )
+
+    if int(
+        args.batch_size
+    ) < 1:
+
+        raise ValueError(
+            "--batch-size must be positive."
+        )
+
+    if int(
+        args.num_workers
+    ) < 0:
+
+        raise ValueError(
+            "--num-workers cannot be negative."
+        )
+
+
+    # ========================================================
     # Input
-    # --------------------------------------------------------
+    # ========================================================
 
     input_frame = load_inference_input(
-
         smiles=args.smiles,
-
         input_path=args.input,
-
         structure_column=args.structure_column,
     )
-
 
     structures = (
         input_frame[
@@ -532,58 +609,49 @@ def predict_graphormer(
         .tolist()
     )
 
-
     print(
         f"\nInput molecules: "
         f"{len(structures):,}"
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Load Graphormer
-    # --------------------------------------------------------
+    # ========================================================
+
+    print(
+        "\nLoading Graphormer checkpoint:"
+    )
+
+    print(
+        args.model_checkpoint
+    )
 
     predictor = GraphormerPredictor(
-
-        checkpoint_path=
-            args.model_checkpoint,
-
-        device=
-            args.device,
-
-        threshold=
-            args.threshold,
-
-        validation_predictions=
-            None,
-
-        validation_targets=
-            None,
+        checkpoint_path=args.model_checkpoint,
+        device=args.device,
+        threshold=args.threshold,
+        validation_predictions=None,
+        validation_targets=None,
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Predict
-    # --------------------------------------------------------
+    # ========================================================
 
     prediction_frame = (
         predictor.predict_smiles(
-
-            smiles_list=
-                structures,
-
-            batch_size=
-                args.batch_size,
-
-            num_workers=
-                args.num_workers,
+            smiles_list=structures,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
         )
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Check prediction count
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         len(prediction_frame)
@@ -592,27 +660,28 @@ def predict_graphormer(
     ):
 
         raise RuntimeError(
-
             "Prediction count does not match "
             "input molecule count.\n"
-
-            f"Input: "
+            f"Input molecules: "
             f"{len(input_frame)}\n"
-
             f"Predictions: "
             f"{len(prediction_frame)}"
         )
 
 
-    # --------------------------------------------------------
-    # Rename prediction columns
-    # --------------------------------------------------------
+    # ========================================================
+    # Task names
+    # ========================================================
 
     task_names = [
         task.strip()
         for task in args.task_names
     ]
 
+
+    # --------------------------------------------------------
+    # Check number of output columns
+    # --------------------------------------------------------
 
     if task_names:
 
@@ -623,18 +692,21 @@ def predict_graphormer(
         ):
 
             raise ValueError(
-
                 "The number of --task-names "
                 "must match the number of "
-                "prediction columns.\n"
-
+                "Graphormer prediction columns.\n"
                 f"Task names: "
                 f"{len(task_names)}\n"
-
                 f"Prediction columns: "
-                f"{len(prediction_frame.columns)}"
+                f"{len(prediction_frame.columns)}\n"
+                f"Prediction columns returned: "
+                f"{prediction_frame.columns.tolist()}"
             )
 
+
+        # ----------------------------------------------------
+        # Rename prediction columns
+        # ----------------------------------------------------
 
         prediction_frame = (
             prediction_frame.rename(
@@ -648,12 +720,32 @@ def predict_graphormer(
         )
 
 
-    # --------------------------------------------------------
-    # Combine
-    # --------------------------------------------------------
+    # ========================================================
+    # Check duplicate output columns
+    # ========================================================
+
+    duplicate_columns = (
+        set(input_frame.columns)
+        &
+        set(prediction_frame.columns)
+    )
+
+    if duplicate_columns:
+
+        raise ValueError(
+            "Prediction output contains columns "
+            "already present in the input file:\n"
+            f"{sorted(duplicate_columns)}\n\n"
+            "Use different --task-names or remove "
+            "the existing prediction column."
+        )
+
+
+    # ========================================================
+    # Combine original input + predictions
+    # ========================================================
 
     result_frame = pd.concat(
-
         [
             input_frame.reset_index(
                 drop=True
@@ -663,20 +755,23 @@ def predict_graphormer(
                 drop=True
             ),
         ],
-
         axis=1,
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Save
-    # --------------------------------------------------------
+    # ========================================================
 
     output_path = save_prediction_frame(
-        result_frame,
-        args.output,
+        frame=result_frame,
+        output_path=args.output,
     )
 
+
+    # ========================================================
+    # Summary
+    # ========================================================
 
     print(
         "\n" + "=" * 70
@@ -691,8 +786,18 @@ def predict_graphormer(
     )
 
     print(
+        f"Input molecules: "
+        f"{len(input_frame):,}"
+    )
+
+    print(
         f"Predicted molecules: "
-        f"{len(result_frame):,}"
+        f"{len(prediction_frame):,}"
+    )
+
+    print(
+        f"Prediction columns: "
+        f"{prediction_frame.columns.tolist()}"
     )
 
     print(
@@ -702,25 +807,32 @@ def predict_graphormer(
 
 
 # ============================================================
-# ML parser
+# Traditional ML parser
 # ============================================================
 
 def add_ml_predict_parser(
     model_subparsers,
 ) -> None:
+    """
+    Register:
 
-    ml_parser = model_subparsers.add_parser(
-        "ml",
-        help=(
-            "Run traditional ML inference "
-            "using a saved .pkl model."
-        ),
+        chemflow predict ml
+    """
+
+    ml_parser = (
+        model_subparsers.add_parser(
+            "ml",
+            help=(
+                "Run traditional ML inference "
+                "using a saved ChemFlow .pkl model."
+            ),
+        )
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Input
-    # --------------------------------------------------------
+    # ========================================================
 
     input_group = (
         ml_parser.add_mutually_exclusive_group(
@@ -728,29 +840,29 @@ def add_ml_predict_parser(
         )
     )
 
-
     input_group.add_argument(
         "--smiles",
         type=str,
         default=None,
-        help="Predict one SMILES string.",
+        help=(
+            "Predict one SMILES string."
+        ),
     )
-
 
     input_group.add_argument(
         "--input",
         type=str,
         default=None,
         help=(
-            "Input .smi, .smiles, .txt, .csv, "
-            ".parquet, or .pq file."
+            "Input .smi, .smiles, .txt, "
+            ".csv, .parquet, or .pq file."
         ),
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Structure column
-    # --------------------------------------------------------
+    # ========================================================
 
     ml_parser.add_argument(
         "--structure-column",
@@ -763,9 +875,9 @@ def add_ml_predict_parser(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Model
-    # --------------------------------------------------------
+    # ========================================================
 
     ml_parser.add_argument(
         "--model",
@@ -778,24 +890,24 @@ def add_ml_predict_parser(
     )
 
 
-    # --------------------------------------------------------
-    # Prediction column
-    # --------------------------------------------------------
+    # ========================================================
+    # Prediction name
+    # ========================================================
 
     ml_parser.add_argument(
         "--task-name",
         type=str,
         default="prediction",
         help=(
-            "Name of prediction column. "
+            "Name of output prediction column. "
             "Default: prediction."
         ),
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Output
-    # --------------------------------------------------------
+    # ========================================================
 
     ml_parser.add_argument(
         "--output",
@@ -806,6 +918,10 @@ def add_ml_predict_parser(
         ),
     )
 
+
+    # ========================================================
+    # Dispatcher
+    # ========================================================
 
     ml_parser.set_defaults(
         func=predict_ml
@@ -819,6 +935,11 @@ def add_ml_predict_parser(
 def add_graphormer_predict_parser(
     model_subparsers,
 ) -> None:
+    """
+    Register:
+
+        chemflow predict graphormer
+    """
 
     graphormer_parser = (
         model_subparsers.add_parser(
@@ -831,39 +952,40 @@ def add_graphormer_predict_parser(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Input
-    # --------------------------------------------------------
+    # ========================================================
 
     input_group = (
-        graphormer_parser.add_mutually_exclusive_group(
+        graphormer_parser
+        .add_mutually_exclusive_group(
             required=True
         )
     )
-
 
     input_group.add_argument(
         "--smiles",
         type=str,
         default=None,
-        help="Predict one SMILES string.",
+        help=(
+            "Predict one SMILES string."
+        ),
     )
-
 
     input_group.add_argument(
         "--input",
         type=str,
         default=None,
         help=(
-            "Input .smi, .smiles, .txt, .csv, "
-            ".parquet, or .pq file."
+            "Input .smi, .smiles, .txt, "
+            ".csv, .parquet, or .pq file."
         ),
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Structure column
-    # --------------------------------------------------------
+    # ========================================================
 
     graphormer_parser.add_argument(
         "--structure-column",
@@ -876,9 +998,9 @@ def add_graphormer_predict_parser(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Task names
-    # --------------------------------------------------------
+    # ========================================================
 
     graphormer_parser.add_argument(
         "--task-names",
@@ -886,14 +1008,14 @@ def add_graphormer_predict_parser(
         nargs="+",
         required=True,
         help=(
-            "Names of prediction tasks."
+            "Names of Graphormer prediction tasks."
         ),
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Model checkpoint
-    # --------------------------------------------------------
+    # ========================================================
 
     graphormer_parser.add_argument(
         "--model-checkpoint",
@@ -905,9 +1027,9 @@ def add_graphormer_predict_parser(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Threshold
-    # --------------------------------------------------------
+    # ========================================================
 
     graphormer_parser.add_argument(
         "--threshold",
@@ -920,46 +1042,70 @@ def add_graphormer_predict_parser(
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Device
-    # --------------------------------------------------------
+    # ========================================================
 
     graphormer_parser.add_argument(
         "--device",
         type=str,
         default=None,
         help=(
-            "Inference device, e.g. cpu, cuda, "
-            "cuda:0, or mps."
+            "Inference device, e.g. "
+            "cpu, cuda, cuda:0, or mps."
         ),
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Batch size
-    # --------------------------------------------------------
+    # ========================================================
 
     graphormer_parser.add_argument(
         "--batch-size",
         type=int,
         default=64,
-        help="Inference batch size. Default: 64.",
+        help=(
+            "Inference batch size. "
+            "Default: 64."
+        ),
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # Workers
-    # --------------------------------------------------------
+    # ========================================================
 
     graphormer_parser.add_argument(
         "--num-workers",
         type=int,
         default=0,
         help=(
-            "DataLoader workers. Default: 0."
+            "Number of DataLoader workers. "
+            "Default: 0."
         ),
     )
 
+
+    # ========================================================
+    # OUTPUT
+    #
+    # THIS WAS MISSING FROM YOUR CURRENT FILE.
+    # ========================================================
+
+    graphormer_parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help=(
+            "Output .csv, .parquet, or .pq file."
+        ),
+    )
+
+
+    # ========================================================
+    # Dispatcher
+    # ========================================================
 
     graphormer_parser.set_defaults(
         func=predict_graphormer
@@ -974,21 +1120,24 @@ def add_predict_parser(
     subparsers,
 ) -> None:
     """
-    Register the top-level:
+    Register:
 
         chemflow predict
 
-    command with:
+    with:
 
         chemflow predict ml
         chemflow predict graphormer
     """
 
-    predict_parser = subparsers.add_parser(
-        "predict",
-        help="Run model inference.",
+    predict_parser = (
+        subparsers.add_parser(
+            "predict",
+            help=(
+                "Run model inference."
+            ),
+        )
     )
-
 
     model_subparsers = (
         predict_parser.add_subparsers(
@@ -998,13 +1147,19 @@ def add_predict_parser(
     )
 
 
+    # --------------------------------------------------------
     # Traditional ML
+    # --------------------------------------------------------
+
     add_ml_predict_parser(
         model_subparsers
     )
 
 
+    # --------------------------------------------------------
     # Graphormer
+    # --------------------------------------------------------
+
     add_graphormer_predict_parser(
         model_subparsers
     )
