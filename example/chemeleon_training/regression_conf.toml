@@ -12,7 +12,7 @@ dataset_path = "./dataset/ADMET/ExpansionRX/expansion_data_train.csv"
 # column names and is never used for training, normalization, or validation.
 # test_dataset_path = "./dataset/ADMET/ExpansionRX/external_test.csv"
 smiles_column = "SMILES"
-target_column = "LogS"
+target_column = "LogD"
 
 # Supported: random, scaffold_balanced, random_with_repeated_smiles,
 # kennard_stone, and kmeans. Alternatively, set split_column to a CSV

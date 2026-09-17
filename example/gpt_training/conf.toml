@@ -86,7 +86,7 @@ lora_use_fc2 = false
 
 [DatasetConfig]
 
-dataset_path = "dataset/combined/combined_pivot.parquet"
+dataset_path = "dataset/combined/zinc_dataset_800m.parquet"
 
 smiles_column = "SMILES"
 

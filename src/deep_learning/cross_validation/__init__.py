@@ -1,4 +1,0 @@
-from .cross_validation import (
-    CrossValidation,
-    DeepLearningGridSearchCV
-)

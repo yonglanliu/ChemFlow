@@ -48,6 +48,10 @@ dataset/
 # Training Artifacts
 # ============================================================
 ml_training/
+!example/ml_training/
+example/ml_training/*
+!example/ml_training/conf.yaml
+!example/ml_training/README.md
 
 # ============================================================
 # Models

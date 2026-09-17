@@ -314,8 +314,7 @@ resume = true
 resume_checkpoint = "./example/graphormer_training/my_run/checkpoints/last_model.pt"
 ```
 
-Then rerun the normal training command. Resume is intended for regular
-training and is not supported for cross-validation runs.
+Then rerun the normal training command.
 
 ## 10. Slurm and multi-GPU DDP
 
