@@ -15,7 +15,11 @@ dependencies = [
     "plotly",
     "requests",
     "rdkit",
+    "torch-geometric",
     "chembl-webresource-client",
+    "chemprop>=2.2.0,<2.3",
+    "lightning>=2.0",
+    "filelock>=3.0",
 ]
 
 # ===========================

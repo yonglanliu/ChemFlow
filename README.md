@@ -199,6 +199,50 @@ chemflow --help
 chemflow train graphormer expansionrx_mtl_training/multitask_conf.toml
 ```
 
+### Fine-tune the pretrained CheMeleon model
+
+Copy and edit `example/chemeleon_training/regression_conf.toml`, then run:
+
+```bash
+chemflow train chemeleon example/chemeleon_training/regression_conf.toml
+```
+
+The trainer uses the official CheMeleon ChemProp graph featurizer,
+architecture, and pretrained message-passing weights. The weights are
+downloaded from Zenodo on first use and validated by SHA-256. Each run writes
+the resolved configuration, data split manifest, best and last checkpoints,
+training history, hold-out metrics, and test predictions to its configured
+work directory.
+
+For multi-GPU CUDA training, set these fields under
+`[CheMeleonTrainingConfig]` (the configured `batch_size` applies to each GPU):
+
+```toml
+accelerator = "gpu"
+devices = 2
+strategy = "ddp"
+```
+
+`num_nodes` and `sync_batchnorm` are also supported. Apple MPS remains a
+single-device backend and cannot use DDP.
+
+To evaluate a completely independent CSV instead of splitting test rows from
+the training file, configure the external path and disable the internal test
+split:
+
+```toml
+[DatasetConfig]
+dataset_path = "./data/train.csv"
+test_dataset_path = "./data/external_test.csv"
+smiles_column = "SMILES"
+target_column = "target"
+val_fraction = 0.1
+test_fraction = 0.0
+```
+
+The external file must contain the configured SMILES and target columns. Its
+rows are used only for final evaluation of the best validation checkpoint.
+
 ### Train a standard graphormer model with a config file
 
 ```bash
@@ -321,4 +365,3 @@ This is useful for assay groups, multi-endpoint prediction, and mixed task avail
 - [ ] molecular docking integration
 - [ ] free energy calculation
 - [ ] multimodal foundation models
-
