@@ -50,7 +50,21 @@ This enables task families such as assay groups to share a common adaptor while 
 
 ### Split-aware dataset loading
 
-The dataset loader supports pre-split datasets that already contain a split label such as `train`, `val`, and `test`.
+The Graphormer dataset loader supports molecule-aware global splits, predefined
+split labels, and completely independent test files. Invalid molecules and the
+resolved assignments are written to `rejected_rows.csv` and `data_splits.csv`.
+
+```toml
+[DatasetConfig]
+split_type = "scaffold_balanced"
+val_fraction = 0.1
+test_fraction = 0.1
+```
+
+Supported generated splits are `random`, `random_with_repeated_smiles`,
+`scaffold_balanced`, `kennard_stone`, and `kmeans`.
+
+For predefined splits:
 
 ```toml
 [DatasetConfig]
@@ -60,6 +74,20 @@ test_fraction = 0.1
 ```
 
 When `split_column` is provided, the loader respects the existing split rather than randomly splitting the data.
+
+For an independent test file, set `test_dataset_path` and disable the internal
+test split:
+
+```toml
+[DatasetConfig]
+dataset_path = "./data/train.csv"
+test_dataset_path = "./data/external_test.csv"
+test_fraction = 0.0
+```
+
+Graphormer also downloads and caches the official Microsoft PCQM4M v1
+checkpoint when `GraphormerConfig.pretrained_path` is omitted. A custom URL,
+path, and SHA-256 checksum can be configured when needed.
 
 ### Automatic task weighting
 
@@ -149,44 +177,113 @@ This produces bootstrap confidence intervals and distribution plots for each tas
 
 ## Installation
 
-### 1. Install Python
+ChemFlow requires Python 3.11. The recommended installation uses
+[Miniforge](https://github.com/conda-forge/miniforge), Mamba, and the supplied
+`environment.yaml`. Conda installs compiled scientific packages first; pip then
+installs the remaining Python packages and ChemFlow itself in editable mode.
 
-ChemFlow requires Python 3.10 or later.
-
-```bash
-python --version
-```
-
-### 2. Clone the repository
+### 1. Clone ChemFlow
 
 ```bash
 git clone https://github.com/yonglanliu/ChemFlow.git
 cd ChemFlow
 ```
 
-### 3. Create a virtual environment
+### 2. Create the recommended environment
+
+Run this command from the repository root:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+mamba env create -f environment.yaml
+mamba activate chemflow
 ```
 
-### 4. Install dependencies
+If the `chemflow` environment already exists, update it instead:
 
 ```bash
-pip install -r requirements.txt
+mamba env update --name chemflow --file environment.yaml --prune
+mamba activate chemflow
 ```
 
-Or install in editable mode:
+Confirm that the active interpreter is Python 3.11:
 
 ```bash
-pip install -e .
+python --version
+which python
 ```
 
-### 5. Verify installation
+On Windows, use `where python` instead of `which python`.
+
+### 3. Verify the installation
 
 ```bash
 chemflow --help
+
+python -c "import torch, torch_geometric, chemprop, lightgbm; print(torch.__version__)"
+```
+
+If you modify `requirements.txt`, synchronize the active environment with:
+
+```bash
+mamba env update --name chemflow --file environment.yaml --prune
+```
+
+### Alternative: pip virtual environment
+
+Use this only when Conda/Mamba is unavailable. Compiled dependencies such as
+RDKit, PyTorch, and LightGBM are generally easier to install through Conda.
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### Pretrained model downloads
+
+The first Graphormer or CheMeleon training run downloads its official
+pretrained weights automatically. Later runs reuse the cached files:
+
+```text
+~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt
+~/.cache/chemflow/chemeleon/chemeleon_mp.pt
+```
+
+Set `CHEMFLOW_CACHE_DIR` before training to use another cache location:
+
+```bash
+export CHEMFLOW_CACHE_DIR=/path/to/model_cache
+```
+
+You can also configure a local `pretrained_path` in the model's TOML section.
+This is useful on compute nodes without internet access.
+
+### Hardware notes
+
+- NVIDIA multi-GPU Graphormer training is launched with `torchrun`; CheMeleon
+  uses Lightning's `strategy = "ddp"` configuration.
+- Apple Silicon uses the MPS GPU backend for single-device training. MPS does
+  not support multi-device DDP.
+- Keep `num_workers = 0` on macOS if multiprocessing or shared-memory errors
+  occur.
+
+To check accelerator availability:
+
+```bash
+python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('MPS:', torch.backends.mps.is_available())"
+```
+
+### Troubleshooting imports
+
+If Python reports a missing package such as `lightgbm` or `torch_geometric`,
+confirm that the `chemflow` environment is active and reinstall from the
+environment specification:
+
+```bash
+mamba activate chemflow
+mamba env update --name chemflow --file environment.yaml --prune
+python -m pip check
 ```
 
 ---
@@ -322,7 +419,6 @@ This is useful for assay groups, multi-endpoint prediction, and mixed task avail
 |-----------|--------|
 | Graph | Graphormer |
 | Sequence | LSTM, GPT |
-| Diffusion | Molecular diffusion |
 | Fine-tuning | LoRA |
 | Learning | single-task and multitask learning |
 
@@ -344,8 +440,7 @@ This is useful for assay groups, multi-endpoint prediction, and mixed task avail
 ### Molecular generation
 
 - GPT-based generation
-- diffusion generation
-- transformer-based generation
+- LSTM generation
 
 ### Property prediction
 
@@ -360,8 +455,6 @@ This is useful for assay groups, multi-endpoint prediction, and mixed task avail
 
 - [ ] protein-ligand co-design
 - [ ] pocket-conditioned generation
-- [ ] reinforcement learning
-- [ ] active learning
 - [ ] molecular docking integration
 - [ ] free energy calculation
 - [ ] multimodal foundation models

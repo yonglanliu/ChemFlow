@@ -4,7 +4,7 @@
 
 [BaseConfig]
 
-workdir = "/Users/yonglanliu/Desktop/ChemFlow/graphormer_training_regression"
+workdir = "./example/graphormer_training/logS"
 
 task = "regression"
 
@@ -17,13 +17,20 @@ seed = 42
 
 [DatasetConfig]
 
-dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/ADMET/ExpansionRX/log_transformed_all.csv"
+dataset_path = "./dataset/ADMET/ExpansionRX/expansion_data_train.csv"
+
+# Optional independent test CSV. When enabled, set test_fraction = 0.0.
+# test_dataset_path = "/path/to/external_test.csv"
 
 smiles_column = "SMILES"
-target_column = "LogD"
+target_column = "LogS"
 
 val_fraction = 0.1
 test_fraction = 0.1
+
+# random | random_with_repeated_smiles | scaffold_balanced |
+# kennard_stone | kmeans
+split_type = "scaffold_balanced"
 
 preprocess_batch_size = 100000
 
@@ -35,46 +42,6 @@ reorder_atoms = false
 remove_hs = true
 
 seed = 42
-
-
-# ------------------------------------------------------------
-# Extra molecular features
-# ------------------------------------------------------------
-
-# Enable descriptor / fingerprint late fusion.
-use_extra_features = true
-
-# Supported examples:
-#   "descriptors"
-#   "ecfp4"
-#   "ecfp6"
-#   "fcfp4"
-#   "fcfp6"
-#   "maccs"
-#
-# Mixed representations are supported.
-extra_feature_types = [
-    "descriptors",
-#    "ecfp4",
-]
-
-# Descriptor preprocessing:
-#   descriptors are standardized using StandardScaler fitted
-#   ONLY on the training set.
-#
-# Fingerprint preprocessing:
-#   fingerprints remain binary and are not standardized.
-
-# Optional fingerprint feature filtering.
-#
-# null:
-#   keep all fingerprint bits.
-#
-# 0.0:
-#   remove bits with zero variance in the training set.
-#
-# Example for stronger filtering:
-# fingerprint_variance_threshold = 0.001
 
 
 # ============================================================
@@ -111,9 +78,6 @@ encoder_learning_rate = 1e-5
 lora_learning_rate = 1e-4
 head_learning_rate = 1e-4
 
-# Learning rate for descriptor / fingerprint encoders.
-extra_feature_learning_rate = 1e-4
-
 weight_decay = 0.01
 
 scheduler = "cosine"
@@ -135,7 +99,7 @@ plot_dpi = 300
 
 resume = false
 
-# resume_checkpoint = "/path/to/checkpoints/last_model.pt"
+# resume_checkpoint = "./example/graphormer_training/logS/checkpoints/last_model.pt"
 
 
 # ------------------------------------------------------------
@@ -175,7 +139,13 @@ plot_evaluation_metrics = true
 
 [GraphormerConfig]
 
-pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
+# A compatible PCQM4M v1 Graphormer checkpoint is downloaded from Hugging Face
+# and cached when pretrained_path is omitted. Set use_pretrained = false to train
+# from scratch, or set pretrained_path to use a local checkpoint.
+use_pretrained = true
+# pretrained_path = "/path/to/custom_graphormer_checkpoint.pt"
+# pretrained_url = "https://example.org/custom_checkpoint.pt"
+# pretrained_sha256 = "optional_sha256_for_custom_checkpoint"
 
 loss_type = "laplace_nll"
 # Options:
@@ -202,98 +172,6 @@ use_lora = true
 head_intermediate_dim = 256
 
 head_dropout = 0.1
-
-
-# ============================================================
-# Extra feature fusion
-# ============================================================
-
-# Keep this consistent with DatasetConfig.use_extra_features.
-use_extra_features = true
-
-
-# ------------------------------------------------------------
-# Descriptor branch
-# ------------------------------------------------------------
-
-use_descriptors = true
-
-# Your current descriptor featurizer produces:
-#
-# MolWt
-# MolLogP
-# TPSA
-# NumHAcceptors
-# NumHDonors
-# NumRotatableBonds
-# RingCount
-# HeavyAtomCount
-# FractionCSP3
-#
-# Therefore raw descriptor dimension = 9.
-descriptor_dim = 9
-
-descriptor_hidden_dim = 64
-
-descriptor_embedding_dim = 32
-
-descriptor_dropout = 0.1
-
-descriptor_activation = "gelu"
-
-
-# ------------------------------------------------------------
-# Fingerprint branch
-# ------------------------------------------------------------
-
-use_fingerprint = true
-
-fingerprint_type = "ecfp4"
-
-# ECFP4 is initially 2048 bits.
-#
-# IMPORTANT:
-# If fingerprint_variance_threshold is not null,
-# the final fingerprint dimension may become smaller.
-#
-# Ideally this value should be overwritten automatically from:
-#
-# manifest["extra_features"]["fingerprint_dim"]
-#
-fingerprint_dim = 2048
-
-fingerprint_hidden_dim = 512
-
-fingerprint_embedding_dim = 128
-
-fingerprint_dropout = 0.1
-
-fingerprint_activation = "gelu"
-
-
-# ------------------------------------------------------------
-# Fusion
-# ------------------------------------------------------------
-
-# Current architecture:
-#
-# Graphormer representation
-#       +
-# Descriptor embedding
-#       +
-# Fingerprint embedding
-#       ↓
-# concatenate
-#       ↓
-# regression head
-#
-# Example:
-#
-# Graphormer     768
-# Descriptor      32
-# ECFP4          128
-# ------------------
-# fused          928
 
 
 # ============================================================

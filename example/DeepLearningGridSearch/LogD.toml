@@ -301,7 +301,9 @@ lora_dropout = [0.05, 0.1]
 
 [GraphormerConfig]
 
-pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
+# Download and cache the official Microsoft PCQM4M v1 checkpoint when omitted.
+use_pretrained = true
+# pretrained_path = "/path/to/custom_graphormer_checkpoint.pt"
 
 
 # ------------------------------------------------------------

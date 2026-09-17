@@ -74,44 +74,6 @@ remove_hs = true
 seed = 42
 
 
-# ------------------------------------------------------------
-# Extra molecular features
-# ------------------------------------------------------------
-
-use_extra_features = true
-
-# Recommended first experiment:
-# Graphormer + molecular descriptors
-extra_feature_types = [
-    "descriptors",
-]
-
-# Current descriptors:
-#   MolWt
-#   MolLogP
-#   TPSA
-#   NumHAcceptors
-#   NumHDonors
-#   NumRotatableBonds
-#   RingCount
-#   HeavyAtomCount
-#   FractionCSP3
-#
-# Descriptor preprocessing:
-#   StandardScaler fitted on TRAIN only.
-#
-# For descriptors only, leave fingerprint settings undefined.
-
-# Later, for descriptors + ECFP4:
-#
-# extra_feature_types = [
-#     "descriptors",
-#     "ecfp4",
-# ]
-#
-# fingerprint_variance_threshold = 0.0
-
-
 # ============================================================
 # Featurizer
 # ============================================================
@@ -160,9 +122,6 @@ learning_rate = 1e-4
 encoder_learning_rate = 1e-5
 lora_learning_rate = 1e-4
 head_learning_rate = 1e-4
-
-# Descriptor / fingerprint encoder learning rate
-extra_feature_learning_rate = 1e-4
 
 weight_decay = 0.01
 
@@ -216,66 +175,13 @@ plot_evaluation_metrics = true
 
 [GraphormerConfig]
 
-pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
+# Download and cache a compatible PCQM4M v1 checkpoint when omitted.
+use_pretrained = true
+# pretrained_path = "/path/to/custom_graphormer_checkpoint.pt"
 
 num_tasks = 9
 
 loss_type = "laplace_NLL"
-
-
-# ============================================================
-# Extra Feature Fusion
-# ============================================================
-
-use_extra_features = true
-
-
-# ------------------------------------------------------------
-# Descriptor branch
-# ------------------------------------------------------------
-
-use_descriptors = true
-
-descriptor_dim = 9
-
-descriptor_hidden_dim = 64
-
-descriptor_embedding_dim = 32
-
-descriptor_dropout = 0.1
-
-descriptor_activation = "gelu"
-
-
-# ------------------------------------------------------------
-# Fingerprint branch
-# ------------------------------------------------------------
-
-use_fingerprint = false
-
-# Enable later if needed:
-#
-# fingerprint_type = "ecfp4"
-# fingerprint_dim = 2048
-# fingerprint_hidden_dim = 512
-# fingerprint_embedding_dim = 128
-# fingerprint_dropout = 0.1
-# fingerprint_activation = "gelu"
-
-
-# ------------------------------------------------------------
-# Fusion dimension
-# ------------------------------------------------------------
-
-# Descriptor-only:
-#
-# Graphormer representation = 768
-# Descriptor embedding      = 32
-# --------------------------------
-# Fused representation      = 800
-#
-# The fused 800-d representation is passed into
-# HardSharingMTL / SoftSharingMTL.
 
 
 # ============================================================
