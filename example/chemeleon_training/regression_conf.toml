@@ -22,6 +22,7 @@ val_fraction = 0.1
 test_fraction = 0.1
 
 [CheMeleonTrainingConfig]
+
 batch_size = 64
 # Single-process loading is the safest default on macOS. Increase this only
 # after confirming multiprocessing works in your runtime.
@@ -32,6 +33,7 @@ devices = 1
 strategy = "auto"
 num_nodes = 1
 sync_batchnorm = false
+
 # Multi-GPU CUDA example (batch_size is per GPU):
 # accelerator = "gpu"
 # devices = 2

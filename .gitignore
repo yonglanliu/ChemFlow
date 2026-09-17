@@ -87,7 +87,6 @@ app/
 similarity_search_test/
 test/
 
-src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt
 graphormer_multitask_training/
 graphormer_training/
 dataset/

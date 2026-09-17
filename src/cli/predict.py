@@ -807,6 +807,54 @@ def predict_graphormer(
 
 
 # ============================================================
+# CheMeleon prediction
+# ============================================================
+
+def predict_chemeleon(args) -> None:
+    from src.deep_learning.chemeleon.predictor import CheMeleonPredictor
+
+    input_frame = load_inference_input(
+        smiles=args.smiles,
+        input_path=args.input,
+        structure_column=args.structure_column,
+    )
+    predictor = CheMeleonPredictor(
+        checkpoint_path=args.model_checkpoint,
+        device=args.device,
+        threshold=args.threshold,
+    )
+    task_names = (
+        [name.strip() for name in args.task_names]
+        if args.task_names
+        else predictor.target_names
+    )
+    prediction_data = predictor.predict_smiles(
+        input_frame[args.structure_column].astype(str).tolist(),
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        task_names=task_names,
+    )
+    prediction_frame = pd.DataFrame(prediction_data)
+    duplicate_columns = set(input_frame.columns) & set(prediction_frame.columns)
+    if duplicate_columns:
+        raise ValueError(
+            "Prediction output columns already exist in the input: "
+            f"{sorted(duplicate_columns)}"
+        )
+    result_frame = pd.concat(
+        [input_frame.reset_index(drop=True), prediction_frame], axis=1
+    )
+    output_path = save_prediction_frame(result_frame, args.output)
+    print("\n" + "=" * 70)
+    print("CHEMELEON PREDICTION COMPLETE")
+    print("=" * 70)
+    print(f"Input molecules: {len(input_frame):,}")
+    print(f"Invalid molecules: {len(predictor.invalid_indices):,}")
+    print(f"Prediction columns: {prediction_frame.columns.tolist()}")
+    print(f"Output: {output_path}")
+
+
+# ============================================================
 # Traditional ML parser
 # ============================================================
 
@@ -1113,6 +1161,35 @@ def add_graphormer_predict_parser(
 
 
 # ============================================================
+# CheMeleon parser
+# ============================================================
+
+def add_chemeleon_predict_parser(model_subparsers) -> None:
+    parser = model_subparsers.add_parser(
+        "chemeleon",
+        help="Run single-task or multitask CheMeleon inference.",
+    )
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--smiles", type=str, default=None)
+    input_group.add_argument("--input", type=str, default=None)
+    parser.add_argument("--structure-column", type=str, default="SMILES")
+    parser.add_argument(
+        "--task-names",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional output task names; defaults to checkpoint target columns.",
+    )
+    parser.add_argument("--model-checkpoint", type=str, required=True)
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--output", type=str, required=True)
+    parser.set_defaults(func=predict_chemeleon)
+
+
+# ============================================================
 # Main predict parser
 # ============================================================
 
@@ -1128,6 +1205,7 @@ def add_predict_parser(
 
         chemflow predict ml
         chemflow predict graphormer
+        chemflow predict chemeleon
     """
 
     predict_parser = (
@@ -1161,5 +1239,13 @@ def add_predict_parser(
     # --------------------------------------------------------
 
     add_graphormer_predict_parser(
+        model_subparsers
+    )
+
+    # --------------------------------------------------------
+    # CheMeleon
+    # --------------------------------------------------------
+
+    add_chemeleon_predict_parser(
         model_subparsers
     )

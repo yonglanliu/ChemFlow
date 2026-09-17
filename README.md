@@ -304,6 +304,27 @@ Copy and edit `example/chemeleon_training/regression_conf.toml`, then run:
 chemflow train chemeleon example/chemeleon_training/regression_conf.toml
 ```
 
+For multitask training, set `target_column` to a TOML list or use the included
+example:
+
+```bash
+chemflow train chemeleon example/chemeleon_training/multitask_conf.toml
+```
+
+Missing multitask labels are masked automatically. Run prediction with the
+task names stored in the checkpoint:
+
+```bash
+chemflow predict chemeleon \
+  --input ./data/molecules.csv \
+  --structure-column SMILES \
+  --model-checkpoint ./path/to/checkpoints/best.ckpt \
+  --output ./predictions.csv
+```
+
+See [the CheMeleon tutorial](example/chemeleon_training/README.md) for
+multitask regression, classification, and prediction details.
+
 The trainer uses the official CheMeleon ChemProp graph featurizer,
 architecture, and pretrained message-passing weights. The weights are
 downloaded from Zenodo on first use and validated by SHA-256. Each run writes

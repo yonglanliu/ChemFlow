@@ -1,0 +1,57 @@
+# Multitask regression with the pretrained CheMeleon message-passing model.
+
+[BaseConfig]
+workdir = "./example/chemeleon_training/chemeleon_multitask_admet"
+task = "regression"
+seed = 42
+
+[DatasetConfig]
+dataset_path = "./dataset/ADMET/ExpansionRX/expansion_data_train.csv"
+smiles_column = "SMILES"
+target_column = [
+    "LogD",
+    "LogS",
+    "Log(MLM_Clint)",
+    "Log(HLM_Clint)",
+    "Log(Caco2_Papp)",
+    "Log(Caco2_ER)",
+    "Log(MPPB)",
+    "Log(MBPB)",
+    "Log(MGMB)",
+]
+
+# This dataset already contains Train, Validation, and Test labels.
+split_column = "split"
+split_type = "scaffold_balanced"
+val_fraction = 0.1
+test_fraction = 0.1
+
+[CheMeleonTrainingConfig]
+batch_size = 64
+num_workers = 0
+num_epochs = 30
+accelerator = "auto"
+devices = 1
+strategy = "auto"
+num_nodes = 1
+sync_batchnorm = false
+precision = "32-true"
+deterministic = true
+gradient_clip_value = 1.0
+early_stopping = true
+early_stopping_patience = 10
+evaluate_test = true
+plot_training_history = true
+verbose = true
+
+[CheMeleonConfig]
+# Omit pretrained_path to download and verify the official checkpoint.
+freeze_epochs = 0
+dropout = 0.0
+ffn_hidden_dim = 256
+ffn_num_layers = 1
+warmup_epochs = 2
+init_lr = 1e-4
+max_lr = 1e-3
+final_lr = 1e-4
+

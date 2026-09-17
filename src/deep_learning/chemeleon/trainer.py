@@ -51,7 +51,7 @@ class DatasetConfig:
     dataset_path: str
     test_dataset_path: str | None = None
     smiles_column: str = "SMILES"
-    target_column: str = "target"
+    target_column: str | list[str] = "target"
     split_column: str | None = None
     split_type: str = "random"
     val_fraction: float = 0.1
@@ -184,6 +184,15 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
         )
     if int(model.freeze_epochs) < 0:
         raise ValueError("freeze_epochs cannot be negative.")
+    if (
+        base.task == "classification"
+        and bool(training.class_balance)
+        and len(_target_columns(dataset)) > 1
+    ):
+        raise ValueError(
+            "class_balance is supported only for single-task classification. "
+            "Set class_balance=false for multitask classification."
+        )
 
     return CheMeleonRunConfig(base, dataset, training, model)
 
@@ -192,8 +201,20 @@ def _resolved_path(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def _target_columns(config: DatasetConfig) -> list[str]:
+    value = config.target_column
+    columns = [value] if isinstance(value, str) else list(value)
+    columns = [str(column).strip() for column in columns]
+    if not columns or any(not column for column in columns):
+        raise ValueError("target_column must contain at least one non-empty column name.")
+    if len(set(columns)) != len(columns):
+        raise ValueError(f"target_column contains duplicate names: {columns}")
+    return columns
+
+
 def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dict], list[dict]]:
-    required = [config.smiles_column, config.target_column]
+    target_columns = _target_columns(config)
+    required = [config.smiles_column, *target_columns]
     if config.split_column:
         required.append(config.split_column)
     missing = [column for column in required if column not in frame.columns]
@@ -204,13 +225,15 @@ def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dic
     rejected: list[dict] = []
     for row_index, row in frame.iterrows():
         smiles = str(row[config.smiles_column]).strip()
-        target = pd.to_numeric(pd.Series([row[config.target_column]]), errors="coerce").iloc[0]
+        targets = pd.to_numeric(row[target_columns], errors="coerce").to_numpy(
+            dtype=np.float32
+        )
         reason = None
         molecule = Chem.MolFromSmiles(smiles) if smiles else None
         if molecule is None:
             reason = "invalid_smiles"
-        elif not np.isfinite(target):
-            reason = "missing_or_non_numeric_target"
+        elif not np.isfinite(targets).any():
+            reason = "all_targets_missing_or_non_numeric"
 
         if reason:
             rejected.append(
@@ -222,7 +245,7 @@ def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dic
             {
                 "original_index": row_index,
                 "smiles": smiles,
-                "target": float(target),
+                "targets": targets,
                 "mol": molecule,
                 "split": (
                     str(row[config.split_column]).strip().lower()
@@ -285,7 +308,7 @@ def _datapoints(records: list[dict]) -> list[data.MoleculeDatapoint]:
     return [
         data.MoleculeDatapoint.from_smi(
             item["smiles"],
-            np.asarray([item["target"]], dtype=np.float32),
+            np.asarray(item["targets"], dtype=np.float32),
         )
         for item in records
     ]
@@ -296,6 +319,7 @@ def _save_split_manifest(
     train: list[dict],
     val: list[dict],
     test: list[dict],
+    target_columns: list[str],
 ) -> None:
     rows = []
     for split_name, records in (("train", train), ("validation", val), ("test", test)):
@@ -303,7 +327,10 @@ def _save_split_manifest(
             {
                 "original_index": item["original_index"],
                 "smiles": item["smiles"],
-                "target": item["target"],
+                **{
+                    target_name: float(item["targets"][task_index])
+                    for task_index, target_name in enumerate(target_columns)
+                },
                 "split": split_name,
             }
             for item in records
@@ -326,12 +353,15 @@ def _make_model(
     message_passing = nn.BondMessagePassing(**parameters)
     message_passing.load_state_dict(checkpoint["state_dict"], strict=True)
 
+    target_columns = _target_columns(config.dataset)
+    n_tasks = len(target_columns)
     output_transform = None
     if config.base.task == "regression":
         scaler = train_dataset.normalize_targets()
         val_dataset.normalize_targets(scaler)
         output_transform = nn.UnscaleTransform.from_standard_scaler(scaler)
         predictor = nn.RegressionFFN(
+            n_tasks=n_tasks,
             input_dim=message_passing.output_dim,
             hidden_dim=int(config.model.ffn_hidden_dim),
             n_layers=int(config.model.ffn_num_layers),
@@ -341,6 +371,7 @@ def _make_model(
         metrics = [nn.metrics.RMSE(), nn.metrics.MAE(), nn.metrics.R2Score()]
     else:
         predictor = nn.BinaryClassificationFFN(
+            n_tasks=n_tasks,
             input_dim=message_passing.output_dim,
             hidden_dim=int(config.model.ffn_hidden_dim),
             n_layers=int(config.model.ffn_num_layers),
@@ -370,27 +401,66 @@ def _evaluate(
     task: str,
     predictions: np.ndarray,
     targets: np.ndarray,
+    target_names: list[str],
 ) -> dict[str, float]:
-    prediction_tensor = torch.as_tensor(predictions, dtype=torch.float32).reshape(-1, 1)
-    target_tensor = torch.as_tensor(targets, dtype=torch.float32).reshape(-1, 1)
-    if task == "regression":
-        loss = functional.mse_loss(prediction_tensor, target_tensor).item()
-        return RegressionEvaluator().compute(
-            prediction_tensor,
-            target_tensor,
-            loss=loss,
-            prefix="test",
+    predictions = np.asarray(predictions, dtype=np.float32)
+    targets = np.asarray(targets, dtype=np.float32)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape(-1, 1)
+    if targets.ndim == 1:
+        targets = targets.reshape(-1, 1)
+    if predictions.shape != targets.shape:
+        raise ValueError(
+            f"Prediction and target shapes differ: {predictions.shape} and {targets.shape}."
+        )
+    if predictions.shape[1] != len(target_names):
+        raise ValueError(
+            "Prediction task count does not match target names: "
+            f"{predictions.shape[1]} and {len(target_names)}."
         )
 
-    probabilities = prediction_tensor.clamp(1e-7, 1.0 - 1e-7)
-    loss = functional.binary_cross_entropy(probabilities, target_tensor).item()
-    logits = torch.logit(probabilities)
-    return ClassificationEvaluator(loss_type="binary").compute(
-        logits,
-        target_tensor,
-        loss=loss,
-        prefix="test",
-    )
+    metrics: dict[str, float] = {}
+    aggregate: dict[str, list[float]] = {}
+    all_valid = np.isfinite(predictions) & np.isfinite(targets)
+
+    for task_index, target_name in enumerate(target_names):
+        valid = all_valid[:, task_index]
+        if not valid.any():
+            continue
+        prediction_tensor = torch.as_tensor(
+            predictions[valid, task_index], dtype=torch.float32
+        ).reshape(-1, 1)
+        target_tensor = torch.as_tensor(
+            targets[valid, task_index], dtype=torch.float32
+        ).reshape(-1, 1)
+
+        if task == "regression":
+            loss = functional.mse_loss(prediction_tensor, target_tensor).item()
+            task_metrics = RegressionEvaluator().compute(
+                prediction_tensor,
+                target_tensor,
+                loss=loss,
+                prefix="test",
+            )
+        else:
+            probabilities = prediction_tensor.clamp(1e-7, 1.0 - 1e-7)
+            loss = functional.binary_cross_entropy(probabilities, target_tensor).item()
+            task_metrics = ClassificationEvaluator(loss_type="binary").compute(
+                torch.logit(probabilities),
+                target_tensor,
+                loss=loss,
+                prefix="test",
+            )
+
+        for metric_name, value in task_metrics.items():
+            suffix = metric_name.removeprefix("test_")
+            metrics[f"test_{target_name}_{suffix}"] = float(value)
+            if math.isfinite(float(value)):
+                aggregate.setdefault(suffix, []).append(float(value))
+
+    for metric_name, values in aggregate.items():
+        metrics[f"test_{metric_name}"] = float(np.mean(values))
+    return metrics
 
 
 def _predict_checkpoint(
@@ -412,11 +482,101 @@ def _predict_checkpoint(
         for batch_index, batch in enumerate(dataloader):
             batch = model.transfer_batch_to_device(batch, device, 0)
             prediction = model.predict_step(batch, batch_index)
-            batches.append(prediction.detach().cpu().reshape(-1))
+            prediction = prediction.detach().cpu()
+            if prediction.ndim == 1:
+                prediction = prediction.reshape(-1, 1)
+            batches.append(prediction)
 
     if not batches:
-        return np.asarray([], dtype=np.float32)
-    return torch.cat(batches).numpy()
+        return np.empty((0, model.predictor.n_tasks), dtype=np.float32)
+    return torch.cat(batches, dim=0).numpy()
+
+
+def _validate_task_coverage(
+    records: list[dict],
+    target_columns: list[str],
+    split_name: str,
+) -> None:
+    target_matrix = np.asarray([item["targets"] for item in records], dtype=np.float32)
+    missing = [
+        target_name
+        for task_index, target_name in enumerate(target_columns)
+        if not np.isfinite(target_matrix[:, task_index]).any()
+    ]
+    if missing:
+        raise ValueError(
+            f"The {split_name} split has no finite labels for tasks: {missing}."
+        )
+
+
+def _embed_run_config(checkpoint_path: str | Path, resolved: dict[str, Any]) -> None:
+    path = Path(checkpoint_path)
+    if not path.is_file():
+        return
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    checkpoint["chemflow_config"] = resolved
+    torch.save(checkpoint, path)
+
+
+def _save_task_metrics_csv(
+    path: str | Path,
+    task: str,
+    metrics: dict[str, float],
+    target_names: list[str],
+    targets: np.ndarray,
+) -> None:
+    metric_names = (
+        ["loss", "mae", "rmse", "median_ae", "r2", "pearson", "spearman"]
+        if task == "regression"
+        else [
+            "loss",
+            "accuracy",
+            "balanced_accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "mcc",
+            "roc_auc",
+            "pr_auc",
+        ]
+    )
+    targets = np.asarray(targets, dtype=np.float64)
+    if targets.ndim == 1:
+        targets = targets.reshape(-1, 1)
+
+    rows: list[dict[str, Any]] = []
+    for task_index, target_name in enumerate(target_names):
+        row: dict[str, Any] = {
+            "split": "test",
+            "task": target_name,
+            "num_labeled": int(np.isfinite(targets[:, task_index]).sum()),
+        }
+        row.update(
+            {
+                metric_name: metrics.get(
+                    f"test_{target_name}_{metric_name}", float("nan")
+                )
+                for metric_name in metric_names
+            }
+        )
+        rows.append(row)
+
+    overall: dict[str, Any] = {
+        "split": "test",
+        "task": "overall_macro",
+        "num_labeled": int(np.isfinite(targets).sum()),
+    }
+    overall.update(
+        {
+            metric_name: metrics.get(f"test_{metric_name}", float("nan"))
+            for metric_name in metric_names
+        }
+    )
+    rows.append(overall)
+
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(output_path, index=False)
 
 
 def _plot_history(metrics_path: Path, output_path: Path) -> None:
@@ -467,6 +627,7 @@ class CheMeleonTrainer:
             raise FileNotFoundError(f"Dataset does not exist: {dataset_path}")
         frame = pd.read_csv(dataset_path)
         records, rejected = _valid_records(frame, self.config.dataset)
+        target_columns = _target_columns(self.config.dataset)
 
         train_records, val_records, test_records = _split_records(
             records,
@@ -496,8 +657,16 @@ class CheMeleonTrainer:
                 item["dataset"] = "external_test"
             rejected.extend(test_rejected)
 
+        _validate_task_coverage(train_records, target_columns, "training")
+        _validate_task_coverage(val_records, target_columns, "validation")
+
         if self.config.base.task == "classification":
-            labels = {item["target"] for item in (*records, *test_records)}
+            labels = {
+                float(label)
+                for item in (*records, *test_records)
+                for label in item["targets"]
+                if np.isfinite(label)
+            }
             if not labels.issubset({0.0, 1.0}):
                 raise ValueError(
                     "Binary classification targets must contain only 0 and 1; "
@@ -607,6 +776,8 @@ class CheMeleonTrainer:
                 "resolved_pretrained_path": str(pretrained_path),
             },
             "dataset_summary": {
+                "task_names": target_columns,
+                "num_tasks": len(target_columns),
                 "train_size": len(train_records),
                 "validation_size": len(val_records),
                 "test_size": len(test_records),
@@ -619,7 +790,11 @@ class CheMeleonTrainer:
                     self.workdir / "rejected_rows.csv", index=False
                 )
             _save_split_manifest(
-                self.workdir, train_records, val_records, test_records
+                self.workdir,
+                train_records,
+                val_records,
+                test_records,
+                target_columns,
             )
             save_json(resolved, self.workdir / "config.json")
 
@@ -651,12 +826,16 @@ class CheMeleonTrainer:
         metrics_path = Path(logger.log_dir) / "metrics.csv"
         if metrics_path.is_file():
             shutil.copy2(metrics_path, self.workdir / "training_history.csv")
+            shutil.copy2(metrics_path, self.checkpoint_dir / "history.csv")
         if self.config.training.plot_training_history:
             _plot_history(metrics_path, self.workdir / "plots" / "training_history.png")
 
         best_path = checkpoint_callback.best_model_path
         if not best_path:
             raise RuntimeError("Training completed without producing a best checkpoint.")
+
+        _embed_run_config(best_path, resolved)
+        _embed_run_config(checkpoint_callback.last_model_path, resolved)
 
         run_summary = {
             "best_checkpoint": best_path,
@@ -671,7 +850,7 @@ class CheMeleonTrainer:
         # contains ChemProp metric objects in addition to tensors.
         predictions = _predict_checkpoint(model, test_loader, best_path)
         targets = np.asarray(
-            [item["target"] for item in test_records],
+            [item["targets"] for item in test_records],
             dtype=np.float64,
         )
         if predictions.shape[0] != targets.shape[0]:
@@ -680,19 +859,35 @@ class CheMeleonTrainer:
                 f"{predictions.shape[0]} versus {targets.shape[0]}."
             )
 
-        metrics = _evaluate(self.config.base.task, predictions, targets)
+        metrics = _evaluate(
+            self.config.base.task,
+            predictions,
+            targets,
+            target_columns,
+        )
         save_json(
             {"checkpoint": best_path, **metrics},
             self.workdir / "test_metrics.json",
         )
-        prediction_frame = pd.DataFrame(
-            {
-                "original_index": [item["original_index"] for item in test_records],
-                self.config.dataset.smiles_column: [item["smiles"] for item in test_records],
-                f"true_{self.config.dataset.target_column}": targets,
-                f"pred_{self.config.dataset.target_column}": predictions,
-            }
+        _save_task_metrics_csv(
+            self.checkpoint_dir / "test_metrics.csv",
+            self.config.base.task,
+            metrics,
+            target_columns,
+            targets,
         )
+        prediction_data: dict[str, Any] = {
+            "original_index": [item["original_index"] for item in test_records],
+            self.config.dataset.smiles_column: [item["smiles"] for item in test_records],
+        }
+        for task_index, target_name in enumerate(target_columns):
+            prediction_data[f"true_{target_name}"] = targets[:, task_index]
+            prediction_data[f"pred_{target_name}"] = predictions[:, task_index]
+            if self.config.base.task == "classification":
+                prediction_data[f"class_{target_name}"] = (
+                    predictions[:, task_index] >= 0.5
+                ).astype(np.int64)
+        prediction_frame = pd.DataFrame(prediction_data)
         prediction_frame.to_csv(self.workdir / "test_predictions.csv", index=False)
 
         metric_text = " ".join(

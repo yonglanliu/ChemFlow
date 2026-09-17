@@ -141,7 +141,7 @@ def add_train_parser(subparsers):
 
     chemeleon_parser = model_subparsers.add_parser(
         "chemeleon",
-        help="Fine-tune the pretrained CheMeleon molecular model",
+        help="Fine-tune single-task or multitask CheMeleon models",
     )
 
     chemeleon_parser.add_argument(
