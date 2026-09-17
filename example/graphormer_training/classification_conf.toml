@@ -19,11 +19,18 @@ seed = 42
 
 dataset_path = "/Users/yonglanliu/Desktop/ChemFlow/dataset/combined/pi3k_alpha_combined_labeled.csv"
 
+# Optional independent test CSV. When enabled, set test_fraction = 0.0.
+# test_dataset_path = "/path/to/external_test.csv"
+
 smiles_column = "SMILES"
 target_column = "class_id"
 
 val_fraction = 0.1
 test_fraction = 0.1
+
+# random | random_with_repeated_smiles | scaffold_balanced |
+# kennard_stone | kmeans
+split_type = "scaffold_balanced"
 
 preprocess_batch_size = 100000
 
@@ -35,29 +42,6 @@ reorder_atoms = false
 remove_hs = true
 
 seed = 42
-
-
-# ------------------------------------------------------------
-# Extra molecular features
-# ------------------------------------------------------------
-
-use_extra_features = true
-
-# First experiment: descriptors only
-extra_feature_types = [
-    "descriptors",
-]
-
-# Leave undefined when fingerprints are not used.
-#
-# If later using fingerprints:
-#
-# extra_feature_types = [
-#     "descriptors",
-#     "ecfp4",
-# ]
-#
-# fingerprint_variance_threshold = 0.0
 
 
 # ============================================================
@@ -112,9 +96,6 @@ learning_rate = 1e-4
 encoder_learning_rate = 1e-5
 lora_learning_rate = 1e-4
 head_learning_rate = 1e-4
-
-# Descriptor / fingerprint encoder learning rate
-extra_feature_learning_rate = 1e-4
 
 weight_decay = 0.01
 
@@ -201,75 +182,9 @@ positive_weight = 0.572
 # Pretrained Graphormer
 # ------------------------------------------------------------
 
-pretrained_path = "src/deep_learning/graphormer/pretrained/graphormer-base-pcqm4mv1.pt"
-
-
-# ============================================================
-# Extra Feature Fusion
-# ============================================================
-
-use_extra_features = true
-
-
-# ------------------------------------------------------------
-# Descriptor branch
-# ------------------------------------------------------------
-
-use_descriptors = true
-
-# Current descriptor set:
-#
-# MolWt
-# MolLogP
-# TPSA
-# NumHAcceptors
-# NumHDonors
-# NumRotatableBonds
-# RingCount
-# HeavyAtomCount
-# FractionCSP3
-#
-# Total = 9
-
-descriptor_dim = 9
-
-descriptor_hidden_dim = 64
-
-descriptor_embedding_dim = 32
-
-descriptor_dropout = 0.1
-
-descriptor_activation = "gelu"
-
-
-# ------------------------------------------------------------
-# Fingerprint branch
-# ------------------------------------------------------------
-
-use_fingerprint = false
-
-# Enable later if needed:
-#
-# fingerprint_type = "ecfp4"
-# fingerprint_dim = 2048
-# fingerprint_hidden_dim = 512
-# fingerprint_embedding_dim = 128
-# fingerprint_dropout = 0.1
-# fingerprint_activation = "gelu"
-
-
-# ------------------------------------------------------------
-# Fusion architecture
-# ------------------------------------------------------------
-
-# Descriptor-only:
-#
-# Graphormer        768
-# Descriptor         32
-# ---------------------
-# fused             800
-#
-# ClassificationHead input = 800
+# Download and cache a compatible PCQM4M v1 checkpoint when omitted.
+use_pretrained = true
+# pretrained_path = "/path/to/custom_graphormer_checkpoint.pt"
 
 
 # ============================================================

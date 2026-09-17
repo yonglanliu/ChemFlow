@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 from omegaconf import II
 
-CURRENT_PATH = Path(__file__).resolve()
-
 def calculate_task_weights(
     train_df: pd.DataFrame,
     endpoints: list[str] | None = None,
@@ -64,10 +62,27 @@ class GraphormerPretrainedConfig:
     """
     Configuration for pretrained Graphormer models.
     """
-    pretrained_path: str | Path = field(
-        default=CURRENT_PATH.parent / "pretrained" / "graphormer-base-pcqm4mv1.pt",
-        metadata={"help": "Path to the pretrained model file."},
-        )
+    use_pretrained: bool = field(
+        default=True,
+        metadata={"help": "Whether to initialize from pretrained weights."},
+    )
+    pretrained_path: str | Path | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional local checkpoint path. The official PCQM4M v1 "
+                "checkpoint is downloaded to the ChemFlow cache when omitted."
+            )
+        },
+    )
+    pretrained_url: str | None = field(
+        default=None,
+        metadata={"help": "Optional checkpoint download URL."},
+    )
+    pretrained_sha256: str | None = field(
+        default=None,
+        metadata={"help": "Optional SHA-256 checksum for checkpoint validation."},
+    )
     
     max_nodes: int = field(
         default=128,
