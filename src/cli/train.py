@@ -62,6 +62,20 @@ def train_graphormer(args):
     trainer.train()
 
 
+def train_chemeleon(args):
+    from src.deep_learning.chemeleon.trainer import CheMeleonTrainer
+
+    config_path = Path(args.config).expanduser().resolve()
+
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {config_path}"
+        )
+
+    trainer = CheMeleonTrainer(config_path=config_path)
+    trainer.train()
+
+
 def add_train_parser(subparsers):
     train_parser = subparsers.add_parser(
         "train",
@@ -119,6 +133,24 @@ def add_train_parser(subparsers):
 
     graphormer_parser.set_defaults(
         func=train_graphormer
+    )
+
+    # ========================================================
+    # CheMeleon
+    # ========================================================
+
+    chemeleon_parser = model_subparsers.add_parser(
+        "chemeleon",
+        help="Fine-tune the pretrained CheMeleon molecular model",
+    )
+
+    chemeleon_parser.add_argument(
+        "config",
+        type=str,
+    )
+
+    chemeleon_parser.set_defaults(
+        func=train_chemeleon
     )
 
     # ========================================================

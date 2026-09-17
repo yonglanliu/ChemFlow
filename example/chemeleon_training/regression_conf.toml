@@ -1,0 +1,58 @@
+# Fine-tune the official pretrained CheMeleon message-passing model.
+
+[BaseConfig]
+workdir = "./example/chemeleon_training/chemeleon_training_regression_logS"
+task = "regression"
+seed = 42
+
+[DatasetConfig]
+dataset_path = "./dataset/ADMET/ExpansionRX/expansion_data_train.csv"
+# To evaluate a completely separate CSV, uncomment the next line and set
+# test_fraction = 0.0 below. The test CSV must use the same SMILES and target
+# column names and is never used for training, normalization, or validation.
+# test_dataset_path = "./dataset/ADMET/ExpansionRX/external_test.csv"
+smiles_column = "SMILES"
+target_column = "LogS"
+
+# Supported: random, scaffold_balanced, random_with_repeated_smiles,
+# kennard_stone, and kmeans. Alternatively, set split_column to a CSV
+# column containing train/validation/test labels.
+split_type = "scaffold_balanced"
+val_fraction = 0.1
+test_fraction = 0.1
+
+[CheMeleonTrainingConfig]
+batch_size = 64
+# Single-process loading is the safest default on macOS. Increase this only
+# after confirming multiprocessing works in your runtime.
+num_workers = 0
+num_epochs = 30
+accelerator = "auto"
+devices = 1
+strategy = "auto"
+num_nodes = 1
+sync_batchnorm = false
+# Multi-GPU CUDA example (batch_size is per GPU):
+# accelerator = "gpu"
+# devices = 2
+# strategy = "ddp"
+precision = "32-true"
+deterministic = true
+gradient_clip_value = 1.0
+early_stopping = true
+early_stopping_patience = 10
+evaluate_test = true
+plot_training_history = true
+verbose = true
+
+[CheMeleonConfig]
+# The official Zenodo weights are downloaded and SHA-256 validated when
+# pretrained_path is omitted.
+freeze_epochs = 0
+dropout = 0.0
+ffn_hidden_dim = 256
+ffn_num_layers = 1
+warmup_epochs = 2
+init_lr = 1e-4
+max_lr = 1e-3
+final_lr = 1e-4
