@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from src.chemflow.data.config import DataCollectionConfig
+from chemflow.data.config import DataCollectionConfig
 
 import logging
 

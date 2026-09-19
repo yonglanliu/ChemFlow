@@ -16,7 +16,7 @@ from rdkit.ML.Cluster import Butina
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.model_selection import train_test_split
 
-from src.chemflow.featurization import smiles_to_fp
+from chemflow.featurization import smiles_to_fp
 
 
 @dataclass

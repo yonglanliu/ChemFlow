@@ -1,0 +1,72 @@
+defaults:
+  hyperparameter_tuning: true
+  tuning_method: RandomizedSearchCV
+  n_iter: 50
+  cv: 5
+  cv_strategy: cv
+  cv_random_seed: 42
+  n_jobs: -1
+
+scoring:
+  classification:
+    scoring_metrics:
+      - roc_auc
+      - balanced_accuracy
+      - f1
+      - precision
+      - recall
+    refit_metric: balanced_accuracy
+
+  regression:
+    scoring_metrics:
+      - r2
+      - root_mean_squared_error
+      - mean_absolute_error
+    refit_metric: root_mean_squared_error
+
+# Search spaces are maintained centrally in
+# src/chemflow/machine_learning/utils/get_grid_param.py. A run configuration
+# can still provide a model-specific param_grid to override those defaults.
+classification_models:
+  - model_name: Random Forest
+    estimator: RandomForestClassifier
+  - model_name: Extra Trees
+    estimator: ExtraTreesClassifier
+  - model_name: Gradient Boosting
+    estimator: GradientBoostingClassifier
+  - model_name: XGBoost
+    estimator: XGBClassifier
+  - model_name: LightGBM
+    estimator: LGBMClassifier
+  - model_name: SVM_RBF
+    estimator: SVC
+  - model_name: KNN
+    estimator: KNeighborsClassifier
+  - model_name: MLP
+    estimator: MLPClassifier
+  - model_name: Logistic Regression
+    estimator: LogisticRegression
+
+regression_models:
+  - model_name: Random Forest
+    estimator: RandomForestRegressor
+  - model_name: Extra Trees
+    estimator: ExtraTreesRegressor
+  - model_name: Gradient Boosting
+    estimator: GradientBoostingRegressor
+  - model_name: XGBoost
+    estimator: XGBRegressor
+  - model_name: LightGBM
+    estimator: LGBMRegressor
+  - model_name: SVM_RBF
+    estimator: SVR
+  - model_name: KNN
+    estimator: KNeighborsRegressor
+  - model_name: MLP
+    estimator: MLPRegressor
+  - model_name: Ridge Regression
+    estimator: Ridge
+  - model_name: Lasso Regression
+    estimator: Lasso
+  - model_name: PLS
+    estimator: PLSRegression

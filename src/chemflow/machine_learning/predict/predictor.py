@@ -13,7 +13,7 @@ from typing import (
 import numpy as np
 import pandas as pd
 
-from src.chemflow.machine_learning.data.data_pipeline import (
+from chemflow.machine_learning.data.data_pipeline import (
     featurize_array,
 )
 
@@ -366,6 +366,10 @@ class ChemFlowPredictor:
                 dummy_y,
 
                 self.feature_types,
+
+                descriptor_names_by_feature=self.feature_config.get(
+                    "descriptor_names_by_feature"
+                ),
             )
         )
 

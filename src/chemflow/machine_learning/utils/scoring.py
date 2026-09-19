@@ -20,8 +20,9 @@ from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
 )
-from src.config import PROJECT_ROOT 
-CONFIG_PATH = PROJECT_ROOT / "src"/"config" / "grid_search_conf.yaml"
+from chemflow.config import CURRENT_DIR as CONFIG_DIR
+
+CONFIG_PATH = CONFIG_DIR / "grid_search_conf.yaml"
 
 
 def load_training_config(config_path: str | Path):

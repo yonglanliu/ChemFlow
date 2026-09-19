@@ -24,4 +24,4 @@ dependencies:
 
   # Pip installs the remaining pinned packages and this local project.
   - pip:
-      - -r requirements-torch.txt
+      - -r requirements-hpc-torch.txt

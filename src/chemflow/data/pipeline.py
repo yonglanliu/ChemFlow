@@ -4,10 +4,10 @@ from pathlib import Path
 import pandas as pd
 from typing import Any, Callable
 
-from src.chemflow.data.partition import DatasetPartitioner
-from src.chemflow.data.execution import WorkerExecutor
-from src.chemflow.data.collection import ResultCollector
-from src.chemflow.data.config import DataPipelineConfig
+from chemflow.data.partition import DatasetPartitioner
+from chemflow.data.execution import WorkerExecutor
+from chemflow.data.collection import ResultCollector
+from chemflow.data.config import DataPipelineConfig
 
 import logging
 logger = logging.getLogger(__name__)

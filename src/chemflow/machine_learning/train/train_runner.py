@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
-from rdkit import Chem
+from rdkit import Chem, rdBase
 import logging
 from threading import Lock
 
@@ -27,20 +27,26 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
-from src.chemflow.machine_learning.data import DataSplitter
-from src.chemflow.machine_learning.data.data_pipeline import featurize_array
+from chemflow.machine_learning.data import DataSplitter
+from chemflow.machine_learning.data.data_pipeline import featurize_array
+from chemflow.featurization import (
+    DESC_NAMES,
+    DESC_TYPES,
+    RDKIT2D_DESC_NAMES,
+    RDKIT2D_DESC_TYPES,
+)
 
-from src.chemflow.machine_learning.train.utils import (
+from chemflow.machine_learning.train.utils import (
     build_split_config,
     load_training_data,
     _json_safe,
 )
 
-from src.chemflow.machine_learning.train.regular_training import (
+from chemflow.machine_learning.train.regular_training import (
     regular_training_multiple_models,
 )
 
-from src.chemflow.machine_learning.train.hyperparameter_tuning import (
+from chemflow.machine_learning.train.hyperparameter_tuning import (
     tune_parameters_multiple_model,
 )
 
@@ -220,7 +226,9 @@ def get_feature_types(featurization_config):
     if feature_types is None:
         logger.error("Missing molecular representation config. Expected 'features' in featurization config.")
         raise ValueError("Missing molecular representation config. Expected 'features' in featurization config.")
-    return list(feature_types)
+    if isinstance(feature_types, str):
+        feature_types = [feature_types]
+    return [str(feature).strip().lower() for feature in feature_types]
 
 
 def get_split_npz_path(split_config):
@@ -243,6 +251,237 @@ def get_split_npz_path(split_config):
     return save_dir / f"{prefix_name}_split_data.npz"
 
 
+def get_split_csv_path(split_config):
+    """Return the human-readable split path when split caching is enabled."""
+    if not split_config.get("save_split_data", True):
+        return None
+
+    save_dir = Path(split_config.get("save_dir", "split_data"))
+    save_dir.mkdir(parents=True, exist_ok=True)
+    split_method = split_config.get("split_method", "split")
+    random_seed = split_config.get("random_seed", 42)
+    split_name = split_config.get(
+        "split_name",
+        split_config.get("prefix_name", f"{split_method}_seed{random_seed}"),
+    )
+    return save_dir / f"{split_name}_split_data.csv"
+
+
+def save_split_dataframe(
+    frame,
+    split_config,
+    smiles_col=None,
+    target_col=None,
+    train_indices=None,
+    valid_indices=None,
+    test_indices=None,
+    split_labels=None,
+):
+    """Save source columns plus a canonical train/validation/test column."""
+    csv_path = get_split_csv_path(split_config)
+    if csv_path is None:
+        return None
+
+    output = frame.copy().reset_index(drop=True)
+    normalized_columns = {
+        str(column).strip().lower().replace("_", " "): column
+        for column in output.columns
+    }
+    name_column = next(
+        (
+            normalized_columns[candidate]
+            for candidate in (
+                "molecule name",
+                "compound name",
+                "molecule id",
+                "compound id",
+                "name",
+            )
+            if candidate in normalized_columns
+        ),
+        None,
+    )
+    selected_columns = []
+    if name_column is not None:
+        selected_columns.append(name_column)
+    for column in (smiles_col, target_col):
+        if column is not None and column not in selected_columns:
+            if column not in output.columns:
+                raise ValueError(
+                    f"Cannot export split CSV because column '{column}' is missing."
+                )
+            selected_columns.append(column)
+    if selected_columns:
+        output = output.loc[:, selected_columns].copy()
+    if split_labels is not None:
+        labels = np.asarray(split_labels, dtype=str)
+        if len(labels) != len(output):
+            raise ValueError("Split labels must have the same length as the dataframe.")
+        output["split"] = labels
+    else:
+        partition_frames = []
+        partitions = (
+            (train_indices, "train"),
+            (valid_indices, "validation"),
+            (test_indices, "test"),
+        )
+        for indices, label in partitions:
+            if indices is None:
+                continue
+            indices = np.asarray(indices, dtype=int)
+            if indices.size:
+                partition = output.iloc[indices].copy()
+                partition["split"] = label
+                partition_frames.append(partition)
+        output = (
+            pd.concat(partition_frames, ignore_index=True)
+            if partition_frames
+            else output.iloc[0:0].assign(split=pd.Series(dtype=str))
+        )
+
+    # Only rows actually used by a partition belong in the exported split.
+    output = output.loc[output["split"] != "unassigned"].copy()
+    output.to_csv(csv_path, index=False)
+    logger.info("Saved human-readable split CSV to: %s", csv_path)
+    return csv_path
+
+
+def load_test_metadata(split_config, smiles_col, expected_rows):
+    """Load aligned molecule names and SMILES from the readable split CSV."""
+    csv_path = get_split_csv_path(split_config)
+    if csv_path is None or not csv_path.exists():
+        return None
+
+    frame = pd.read_csv(csv_path)
+    if "split" not in frame.columns or smiles_col not in frame.columns:
+        return None
+    test_frame = frame.loc[
+        frame["split"].astype(str).str.strip().str.lower().isin({"test", "testing"})
+    ].reset_index(drop=True)
+    if len(test_frame) != int(expected_rows):
+        logger.warning(
+            "Cannot attach test metadata: split CSV has %d test rows but predictions have %d.",
+            len(test_frame),
+            expected_rows,
+        )
+        return None
+
+    normalized_columns = {
+        str(column).strip().lower().replace("_", " "): column
+        for column in test_frame.columns
+    }
+    name_column = next(
+        (
+            normalized_columns[candidate]
+            for candidate in (
+                "molecule name",
+                "compound name",
+                "molecule id",
+                "compound id",
+                "name",
+            )
+            if candidate in normalized_columns
+        ),
+        None,
+    )
+    names = (
+        test_frame[name_column].astype(str).to_numpy()
+        if name_column is not None
+        else np.asarray([f"Test_{index + 1}" for index in range(len(test_frame))])
+    )
+    return {
+        "Molecule Name": names,
+        "SMILES": test_frame[smiles_col].astype(str).to_numpy(),
+    }
+
+
+def ensure_split_csv_from_cache(
+    training_data_file,
+    smiles_col,
+    y_col,
+    split_config,
+    cached_data,
+    job_dir,
+):
+    """Create a missing CSV companion from cached indices or source labels."""
+    csv_path = get_split_csv_path(split_config)
+    if csv_path is None or training_data_file is None:
+        return csv_path
+
+    payload = load_training_data(training_data_file)
+    frame = payload["data"]
+    if not isinstance(frame, pd.DataFrame):
+        return None
+
+    source_normalized = {
+        str(column).strip().lower().replace("_", " "): column
+        for column in frame.columns
+    }
+    source_name_column = next(
+        (
+            source_normalized[candidate]
+            for candidate in (
+                "molecule name",
+                "compound name",
+                "molecule id",
+                "compound id",
+                "name",
+            )
+            if candidate in source_normalized
+        ),
+        None,
+    )
+    if csv_path.exists():
+        existing_columns = set(pd.read_csv(csv_path, nrows=0).columns)
+        required_columns = {smiles_col, y_col, "split"}
+        if source_name_column is not None:
+            required_columns.add(source_name_column)
+        if required_columns.issubset(existing_columns):
+            return csv_path
+
+    clean_frame = clean_raw_dataframe(
+        df=frame,
+        smiles_col=smiles_col,
+        target_col=y_col,
+        job_dir=job_dir,
+        split_label="split_csv_export",
+    )
+    method = str(split_config.get("split_method", "")).strip().lower()
+    if method in {"predefined", "splitted"}:
+        split_column = split_config.get("split_column", "split")
+        if split_column not in clean_frame.columns:
+            return None
+        values = clean_frame[split_column].astype(str).str.strip().str.lower()
+        labels = np.full(len(clean_frame), "unassigned", dtype="<U10")
+        labels[values.isin({"train", "training"}).to_numpy()] = "train"
+        labels[values.isin({"val", "valid", "validation", "dev"}).to_numpy()] = "validation"
+        labels[values.isin({"test", "testing"}).to_numpy()] = "test"
+        return save_split_dataframe(
+            clean_frame,
+            split_config,
+            smiles_col=smiles_col,
+            target_col=y_col,
+            split_labels=labels,
+        )
+
+    keys = set(cached_data.files)
+    if not {"train_indices", "test_indices"}.issubset(keys):
+        return None
+    return save_split_dataframe(
+        clean_frame,
+        split_config,
+        smiles_col=smiles_col,
+        target_col=y_col,
+        train_indices=np.asarray(cached_data["train_indices"], dtype=int),
+        valid_indices=(
+            np.asarray(cached_data["valid_indices"], dtype=int)
+            if "valid_indices" in keys
+            else None
+        ),
+        test_indices=np.asarray(cached_data["test_indices"], dtype=int),
+    )
+
+
 def save_cached_split_arrays(
     training_data_file,
     split_config,
@@ -254,6 +493,8 @@ def save_cached_split_arrays(
     X_valid,
     y_valid=None,
     split_source=None,
+    train_smiles=None,
+    feature_types=None,
 ):
     if not split_config.get("save_split_data", True):
         return None
@@ -280,6 +521,12 @@ def save_cached_split_arrays(
 
     if split_source is not None:
         arrays_to_save["split_source"] = np.asarray([split_source])
+
+    if train_smiles is not None:
+        arrays_to_save["train_smiles"] = np.asarray(train_smiles, dtype=str)
+
+    if feature_types is not None:
+        arrays_to_save["feature_types"] = np.asarray(feature_types, dtype=str)
 
     np.savez_compressed(cache_path, **arrays_to_save)
     logger.info("Saved cached split NPZ to: %s", cache_path)
@@ -340,7 +587,17 @@ def load_pre_split_features(training_data_file, job_dir):
 
     y_valid = split_data.get("y_valid") if has_y_valid else None
     
-    return X_train, y_train, X_test, y_test, X_valid, y_valid, "pre_split_npz"
+    train_smiles = split_data.get("train_smiles")
+    return (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        X_valid,
+        y_valid,
+        "pre_split_npz",
+        train_smiles,
+    )
 
 
 def load_split_column_features(
@@ -396,11 +653,26 @@ def load_split_column_features(
     test_df = clean_df.loc[test_mask].copy()
     valid_df = clean_df.loc[valid_mask].copy()
 
-    X_train, y_train, _ = featurize_array(
+    used_mask = train_mask | valid_mask | test_mask
+    canonical_labels = np.where(
+        train_mask.loc[used_mask],
+        "train",
+        np.where(valid_mask.loc[used_mask], "validation", "test"),
+    )
+    save_split_dataframe(
+        frame=clean_df.loc[used_mask],
+        split_config=split_config or {},
+        smiles_col=smiles_col,
+        target_col=y_col,
+        split_labels=canonical_labels,
+    )
+
+    X_train, y_train, train_valid_indices = featurize_array(
         train_df[smiles_col].to_numpy(),
         train_df[y_col].to_numpy(),
         feature_types,
     )
+    train_smiles = train_df[smiles_col].to_numpy()[train_valid_indices]
 
     X_test, y_test, _ = featurize_array(
         test_df[smiles_col].to_numpy(),
@@ -439,9 +711,20 @@ def load_split_column_features(
         X_valid=X_valid,
         y_valid=y_valid,
         split_source="pre_split_column",
+        train_smiles=train_smiles,
+        feature_types=feature_types,
     )
 
-    return X_train, y_train, X_test, y_test, X_valid, y_valid, "pre_split_column"
+    return (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        X_valid,
+        y_valid,
+        "pre_split_column",
+        train_smiles,
+    )
 
 
 def load_explicit_split_features(
@@ -486,11 +769,12 @@ def load_explicit_split_features(
     if test_df is None:
         raise ValueError("test_data_file is required when using explicit split files.")
 
-    X_train, y_train, _ = featurize_array(
+    X_train, y_train, train_valid_indices = featurize_array(
         train_df[smiles_col].to_numpy(),
         train_df[y_col].to_numpy(),
         feature_types,
     )
+    train_smiles = train_df[smiles_col].to_numpy()[train_valid_indices]
 
     X_test, y_test, _ = featurize_array(
         test_df[smiles_col].to_numpy(),
@@ -507,6 +791,19 @@ def load_explicit_split_features(
             valid_df[y_col].to_numpy(),
             feature_types,
         )
+
+    split_frames = [train_df.assign(split="train")]
+    if valid_df is not None and len(valid_df) > 0:
+        split_frames.append(valid_df.assign(split="validation"))
+    split_frames.append(test_df.assign(split="test"))
+    split_export = pd.concat(split_frames, ignore_index=True)
+    save_split_dataframe(
+        frame=split_export.drop(columns="split"),
+        split_config=split_config or {},
+        smiles_col=smiles_col,
+        target_col=y_col,
+        split_labels=split_export["split"].to_numpy(),
+    )
 
     x_train_shape = getattr(X_train, "shape", None)
     x_test_shape = getattr(X_test, "shape", None)
@@ -528,9 +825,145 @@ def load_explicit_split_features(
         X_valid=X_valid,
         y_valid=y_valid,
         split_source="explicit_split_files",
+        train_smiles=train_smiles,
+        feature_types=feature_types,
     )
 
-    return X_train, y_train, X_test, y_test, X_valid, y_valid, "explicit_split_files"
+    return (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        X_valid,
+        y_valid,
+        "explicit_split_files",
+        train_smiles,
+    )
+
+
+def rebuild_cached_features_from_indices(
+    training_data_file,
+    smiles_col,
+    y_col,
+    feature_types,
+    split_npz_path,
+    cached_data,
+    job_dir,
+):
+    """Rebuild features while preserving indices from an existing split cache."""
+    required_indices = {"train_indices", "test_indices"}
+    available_keys = set(cached_data.files)
+    missing = required_indices.difference(available_keys)
+    if missing:
+        raise ValueError(
+            "The cached split cannot be reused safely because it contains "
+            f"legacy feature arrays and is missing {sorted(missing)}."
+        )
+
+    cached_indices = {
+        key: np.asarray(cached_data[key], dtype=int)
+        for key in ("train_indices", "test_indices", "valid_indices")
+        if key in available_keys
+    }
+    # The upgraded cache replaces the legacy file. Close its zip handle first
+    # so this also works on platforms that prohibit replacing an open file.
+    cached_data.close()
+
+    payload = load_training_data(training_data_file)
+    frame = payload["data"]
+    if not isinstance(frame, pd.DataFrame):
+        raise ValueError(
+            "A legacy split cache can only be rebuilt from its original "
+            "tabular source dataset."
+        )
+    clean_frame = clean_raw_dataframe(
+        df=frame,
+        smiles_col=smiles_col,
+        target_col=y_col,
+        job_dir=job_dir,
+        split_label="cached_split_rebuild",
+    )
+    all_smiles = clean_frame[smiles_col].to_numpy()
+    all_targets = clean_frame[y_col].to_numpy()
+
+    save_split_dataframe(
+        frame=clean_frame,
+        split_config={
+            "save_split_data": True,
+            "save_dir": str(split_npz_path.parent),
+            "split_name": split_npz_path.stem.removesuffix("_split_data"),
+        },
+        smiles_col=smiles_col,
+        target_col=y_col,
+        train_indices=cached_indices["train_indices"],
+        valid_indices=cached_indices.get("valid_indices"),
+        test_indices=cached_indices["test_indices"],
+    )
+
+    def rebuild_partition(indices_key):
+        indices = cached_indices[indices_key]
+        if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= len(clean_frame)):
+            raise ValueError(
+                f"Cached {indices_key} are incompatible with the current source dataset."
+            )
+        features, targets, valid_local_indices = featurize_array(
+            all_smiles[indices],
+            all_targets[indices],
+            feature_types,
+        )
+        if features is None:
+            raise ValueError(f"No valid molecules remain in cached {indices_key}.")
+        aligned_smiles = np.asarray(all_smiles[indices], dtype=str)[valid_local_indices]
+        return features, targets, indices, aligned_smiles
+
+    X_train, y_train, train_indices, train_smiles = rebuild_partition(
+        "train_indices"
+    )
+    X_test, y_test, test_indices, _ = rebuild_partition("test_indices")
+
+    X_valid = None
+    y_valid = None
+    valid_indices = None
+    if "valid_indices" in cached_indices:
+        valid_indices = cached_indices["valid_indices"]
+        if valid_indices.size:
+            X_valid, y_valid, valid_indices, _ = rebuild_partition("valid_indices")
+
+    arrays_to_save = {
+        "X_train": np.asarray(X_train, dtype=np.float32),
+        "X_test": np.asarray(X_test, dtype=np.float32),
+        "y_train": np.asarray(y_train),
+        "y_test": np.asarray(y_test),
+        "train_indices": train_indices,
+        "test_indices": test_indices,
+        "train_smiles": np.asarray(train_smiles, dtype=str),
+        "feature_types": np.asarray(feature_types, dtype=str),
+    }
+    if X_valid is not None:
+        arrays_to_save["X_valid"] = np.asarray(X_valid, dtype=np.float32)
+        arrays_to_save["y_valid"] = np.asarray(y_valid)
+        arrays_to_save["valid_indices"] = valid_indices
+
+    np.savez_compressed(split_npz_path, **arrays_to_save)
+    logger.info(
+        "Upgraded cached split without repartitioning: %s",
+        split_npz_path,
+    )
+    write_log(
+        job_dir,
+        "Reused cached split indices and rebuilt its feature arrays; no data "
+        "were repartitioned.",
+    )
+    return (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        X_valid,
+        y_valid,
+        "split",
+        train_smiles,
+    )
 
 
 def load_or_create_split_features(
@@ -541,30 +974,114 @@ def load_or_create_split_features(
     split_config,
     split_npz_path,
     job_dir,
+    require_train_smiles=False,
 ):
     if split_npz_path is not None:
         logger.info("Checking split feature data: %s", split_npz_path)
 
     if split_npz_path is not None and split_npz_path.exists():
         logger.info("Existing featurized split data found. Loading NPZ...")
+        with np.load(split_npz_path, allow_pickle=False) as data:
+            requested_features = [str(name).strip().lower() for name in feature_types]
+            cached_features = (
+                [str(name).strip().lower() for name in data["feature_types"].tolist()]
+                if "feature_types" in data.files
+                else None
+            )
+            if cached_features != requested_features:
+                logger.warning(
+                    "Cached features %s do not match requested features %s. "
+                    "Reusing split indices and rebuilding feature arrays.",
+                    cached_features,
+                    requested_features,
+                )
+                if "train_indices" not in data.files or "test_indices" not in data.files:
+                    raise ValueError(
+                        "The feature cache does not match the requested representations "
+                        "and has no split indices. Use a new split_name or remove the "
+                        "old NPZ cache."
+                    )
+                return rebuild_cached_features_from_indices(
+                    training_data_file=training_data_file,
+                    smiles_col=smiles_col,
+                    y_col=y_col,
+                    feature_types=feature_types,
+                    split_npz_path=split_npz_path,
+                    cached_data=data,
+                    job_dir=job_dir,
+                )
+            try:
+                X_train = data["X_train"]
+                X_test = data["X_test"]
+                y_train = data["y_train"]
+                y_test = data["y_test"]
+                X_valid = data["X_valid"] if "X_valid" in data.files else None
+                y_valid = data["y_valid"] if "y_valid" in data.files else None
+                train_smiles = (
+                    data["train_smiles"] if "train_smiles" in data.files else None
+                )
+            except ValueError as exc:
+                if "Object arrays cannot be loaded" not in str(exc):
+                    raise
+                logger.warning(
+                    "Legacy object-based feature cache detected. Reusing its "
+                    "stored split indices and rebuilding numeric features."
+                )
+                return rebuild_cached_features_from_indices(
+                    training_data_file=training_data_file,
+                    smiles_col=smiles_col,
+                    y_col=y_col,
+                    feature_types=feature_types,
+                    split_npz_path=split_npz_path,
+                    cached_data=data,
+                    job_dir=job_dir,
+                )
 
-        data = np.load(split_npz_path, allow_pickle=False)
+            logger.info("Loaded X_train shape: %s", X_train.shape)
+            logger.info("Loaded X_test shape: %s", X_test.shape)
 
-        X_train = data["X_train"]
-        X_test = data["X_test"]
-        y_train = data["y_train"]
-        y_test = data["y_test"]
+            if X_valid is not None:
+                logger.info("Loaded X_valid shape: %s", X_valid.shape)
 
-        X_valid = data["X_valid"] if "X_valid" in data.files else None
-        y_valid = data["y_valid"] if "y_valid" in data.files else None
+            ensure_split_csv_from_cache(
+                training_data_file=training_data_file,
+                smiles_col=smiles_col,
+                y_col=y_col,
+                split_config=split_config,
+                cached_data=data,
+                job_dir=job_dir,
+            )
 
-        logger.info("Loaded X_train shape: %s", X_train.shape)
-        logger.info("Loaded X_test shape: %s", X_test.shape)
-
-        if X_valid is not None:
-            logger.info("Loaded X_valid shape: %s", X_valid.shape)
-
-        return X_train, y_train, X_test, y_test, X_valid, y_valid, "split"
+            if not require_train_smiles or train_smiles is not None:
+                return (
+                    X_train,
+                    y_train,
+                    X_test,
+                    y_test,
+                    X_valid,
+                    y_valid,
+                    "split",
+                    train_smiles,
+                )
+            if "train_indices" in data.files and "test_indices" in data.files:
+                logger.warning(
+                    "Cached split has no train_smiles required for "
+                    "scaffold-grouped CV. Reusing its stored indices and "
+                    "rebuilding the cache."
+                )
+                return rebuild_cached_features_from_indices(
+                    training_data_file=training_data_file,
+                    smiles_col=smiles_col,
+                    y_col=y_col,
+                    feature_types=feature_types,
+                    split_npz_path=split_npz_path,
+                    cached_data=data,
+                    job_dir=job_dir,
+                )
+            logger.warning(
+                "Cached split has no train_smiles or reusable indices; "
+                "regenerating it from the source dataset."
+            )
 
     logger.info("No existing split data found. Loading raw training data...")
     logger.info("Training data file: %s", training_data_file)
@@ -580,32 +1097,32 @@ def load_or_create_split_features(
 
     split_method = str(split_config.get("split_method", "random")).strip().lower()
 
-    if split_method == "splitted":
+    if split_method in {"splitted", "predefined"}:
         if not isinstance(df, pd.DataFrame):
             raise ValueError(
-                "split_method='splitted' requires a tabular dataset containing a split column."
+                "split_method='predefined' requires a tabular dataset containing a split column."
             )
 
         split_column = split_config.get("split_column", split_config.get("split_col", "split"))
 
         if not split_column:
             raise ValueError(
-                "split_method='splitted' requires 'split_column' in data_split config."
+                "split_method='predefined' requires 'split_column' in data_split config."
             )
 
         if split_column not in df.columns:
             raise ValueError(
-                f"split_method='splitted' requested split_column '{split_column}', "
+                f"Predefined split requested split_column '{split_column}', "
                 f"but that column was not found in the dataset."
             )
 
         logger.info(
-            "split_method='splitted': using column '%s' to define train/test/validation sets.",
+            "Using predefined column '%s' to define train/test/validation sets.",
             split_column,
         )
         write_log(
             job_dir,
-            f"Using existing split column '{split_column}' because split_method='splitted'.",
+            f"Using existing split column '{split_column}' without repartitioning.",
         )
 
         split_column_result = load_split_column_features(
@@ -660,14 +1177,25 @@ def load_or_create_split_features(
     test_indices = split_result.test_indices
     valid_indices = split_result.valid_indices
 
+    save_split_dataframe(
+        frame=clean_df,
+        split_config=split_config,
+        smiles_col=smiles_col,
+        target_col=y_col,
+        train_indices=train_indices,
+        valid_indices=valid_indices,
+        test_indices=test_indices,
+    )
+
     write_status(job_dir, "running", 40)
     logger.info("Featurizing train/test/valid arrays...")
 
-    X_train, y_train, _ = featurize_array(
+    X_train, y_train, train_valid_feature_indices = featurize_array(
         X_train_raw,
         y_train_raw,
         feature_types,
     )
+    train_smiles = np.asarray(X_train_raw, dtype=str)[train_valid_feature_indices]
 
     X_test, y_test, _ = featurize_array(
         X_test_raw,
@@ -701,6 +1229,8 @@ def load_or_create_split_features(
             "y_test": y_test,
             "train_indices": train_indices,
             "test_indices": test_indices,
+            "train_smiles": train_smiles,
+            "feature_types": np.asarray(feature_types, dtype=str),
         }
 
         if X_valid is not None:
@@ -715,7 +1245,16 @@ def load_or_create_split_features(
         np.savez_compressed(split_npz_path, **arrays_to_save)
         logger.info("Saved featurized split NPZ to: %s", split_npz_path)
 
-    return X_train, y_train, X_test, y_test, X_valid, y_valid, "split"
+    return (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        X_valid,
+        y_valid,
+        "split",
+        train_smiles,
+    )
 
 
 # ============================================================
@@ -768,6 +1307,10 @@ def get_loaded_model_info(model_package):
         "best_params": metrics.get("best_params"),
         "model_params": metrics.get("model_params"),
         "refit_metric": metrics.get("refit_metric"),
+        "cv_strategy": metrics.get("cv_strategy"),
+        "cv_folds": metrics.get("cv_folds"),
+        "cv_unique_scaffolds": metrics.get("cv_unique_scaffolds"),
+        "feature_reduction": metrics.get("feature_reduction"),
     }
 
 
@@ -801,7 +1344,12 @@ def train(training_config):
         if task_type not in ["classification", "regression"]:
             raise ValueError(f"Invalid task_type: {task_type}")
 
-        training_data_file = data_config["data_file"]
+        training_data_file = data_config.get("data_file")
+        explicit_train_data_file = data_config.get("train_data_file")
+        if training_data_file is None and explicit_train_data_file is None:
+            raise ValueError(
+                "Data config requires either 'data_file' or 'train_data_file'."
+            )
         smiles_col = data_config.get("X_col", data_config.get("smiles_col"))
         y_col = data_config.get("y_col", data_config.get("target_col"))
 
@@ -832,13 +1380,31 @@ def train(training_config):
             if "data_split" in training_config
             else {}
         )
+        cv_strategy = str(
+            training_config.get("cv_strategy", "cv")
+        ).strip().lower()
+        require_train_smiles = bool(
+            training_config.get("hyperparameter_tuning", True)
+        ) and cv_strategy in {
+            "scaffold",
+            "scaffold_grouped",
+            "scaffold-grouped",
+        }
 
-        explicit_train_data_file = data_config.get("train_data_file")
         explicit_test_data_file = data_config.get("test_data_file")
         explicit_validation_data_file = data_config.get("validation_data_file", data_config.get("valid_data_file"))
 
         if explicit_train_data_file or explicit_test_data_file or explicit_validation_data_file:
-            X_train, y_train, X_test, y_test, X_valid, y_valid, split_source = load_explicit_split_features(
+            (
+                X_train,
+                y_train,
+                X_test,
+                y_test,
+                X_valid,
+                y_valid,
+                split_source,
+                train_smiles,
+            ) = load_explicit_split_features(
                 train_data_file=explicit_train_data_file or training_data_file,
                 test_data_file=explicit_test_data_file,
                 validation_data_file=explicit_validation_data_file,
@@ -851,7 +1417,16 @@ def train(training_config):
         else:
             split_npz_path = get_split_npz_path(split_config) if split_config else None
 
-            X_train, y_train, X_test, y_test, X_valid, y_valid, split_source = load_or_create_split_features(
+            (
+                X_train,
+                y_train,
+                X_test,
+                y_test,
+                X_valid,
+                y_valid,
+                split_source,
+                train_smiles,
+            ) = load_or_create_split_features(
                 training_data_file=training_data_file,
                 smiles_col=smiles_col,
                 y_col=y_col,
@@ -859,11 +1434,18 @@ def train(training_config):
                 split_config=split_config,
                 split_npz_path=split_npz_path,
                 job_dir=job_dir,
+                require_train_smiles=require_train_smiles,
             )
 
         x_train_shape = getattr(X_train, "shape", None)
         x_test_shape = getattr(X_test, "shape", None)
         x_valid_shape = getattr(X_valid, "shape", None) if X_valid is not None else None
+
+        test_metadata = load_test_metadata(
+            split_config=split_config,
+            smiles_col=smiles_col,
+            expected_rows=len(y_test),
+        )
 
         feature_config_to_save = {
             **featurization_config,
@@ -871,6 +1453,23 @@ def train(training_config):
             "representations": feature_types,
             "features": feature_types,
             "fp_bits": featurization_config.get("fp_bits"),
+            "desc_names": (
+                list(RDKIT2D_DESC_NAMES)
+                if any(name in RDKIT2D_DESC_TYPES for name in feature_types)
+                else list(DESC_NAMES)
+                if any(name in DESC_TYPES for name in feature_types)
+                else []
+            ),
+            "descriptor_names_by_feature": {
+                name: (
+                    list(RDKIT2D_DESC_NAMES)
+                    if name in RDKIT2D_DESC_TYPES
+                    else list(DESC_NAMES)
+                )
+                for name in feature_types
+                if name in (*DESC_TYPES, *RDKIT2D_DESC_TYPES)
+            },
+            "rdkit_version": rdBase.rdkitVersion,
             "smiles_col": smiles_col,
             "target_col": y_col,
             "y_col": y_col,
@@ -951,6 +1550,8 @@ def train(training_config):
                 n_classes=n_classes,
                 output_dir=str(job_dir),
                 feature_config=feature_config_to_save,
+                train_smiles=train_smiles,
+                test_metadata=test_metadata,
                 progress_callback=on_training_step_complete,
             )
 
@@ -966,6 +1567,7 @@ def train(training_config):
                 parent_config=training_config,
                 output_dir=str(job_dir),
                 feature_config=feature_config_to_save,
+                test_metadata=test_metadata,
                 progress_callback=on_training_step_complete,
             )
 

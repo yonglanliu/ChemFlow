@@ -13,31 +13,160 @@ from pathlib import Path
 from typing import Any, Union, cast
 
 import joblib
+import numpy as np
 import pandas as pd
-from sklearn.model_selection import RandomizedSearchCV
+from rdkit import Chem
+from rdkit.Chem.Scaffolds import MurckoScaffold
+from sklearn.model_selection import (
+    GroupKFold,
+    KFold,
+    ParameterGrid,
+    RandomizedSearchCV,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+)
 from sklearn.pipeline import Pipeline
 from tqdm.auto import tqdm
 
-from src.chemflow.machine_learning import (
+from chemflow.machine_learning import (
     MODEL_OPTIONS,
     get_default_param_grid,
     get_model,
     get_refit_metrics,
     get_scoring,
 )
-from src.chemflow.machine_learning.data.data_pipeline import (
+from chemflow.machine_learning.data.data_pipeline import (
+    fitted_feature_dimensions,
     make_scaled_pipeline,
 )
-from src.chemflow.machine_learning.eval.eval_ml import evaluate_model
-from src.chemflow.machine_learning.train.utils import (
+from chemflow.machine_learning.eval.eval_ml import evaluate_model
+from chemflow.machine_learning.train.utils import (
     _json_safe,
     _merge_parent_config,
     safe_name,
     write_model_info,
+    write_test_predictions,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+def _scaffold_group_labels(smiles):
+    labels = []
+    scaffold_ids = {}
+    for value in smiles:
+        molecule = Chem.MolFromSmiles(str(value))
+        if molecule is None:
+            raise ValueError(f"Cannot generate a scaffold for SMILES {value!r}.")
+        scaffold = MurckoScaffold.MurckoScaffoldSmiles(
+            mol=molecule,
+            includeChirality=False,
+        )
+        if scaffold not in scaffold_ids:
+            scaffold_ids[scaffold] = len(scaffold_ids)
+        labels.append(scaffold_ids[scaffold])
+    return np.asarray(labels, dtype=int)
+
+
+def build_cv_splitter(config, task_type, train_smiles=None):
+    """Build ordinary or scaffold-grouped inner cross-validation."""
+    n_splits = int(config.get("cv", 5))
+    if n_splits < 2:
+        raise ValueError("cv must be at least 2.")
+    strategy = str(config.get("cv_strategy", "cv")).strip().lower()
+    seed = int(config.get("cv_random_seed", config.get("search_seed", 42)))
+
+    if strategy in {"kfold", "cv", "standard"}:
+        splitter = (
+            StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+            if task_type == "classification"
+            else KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        )
+        return splitter, None, "cv"
+
+    if strategy in {"scaffold", "scaffold_grouped", "scaffold-grouped"}:
+        if train_smiles is None:
+            raise ValueError(
+                "cv_strategy='scaffold-grouped' requires training SMILES. "
+                "Regenerate an old cached split so it includes train_smiles, "
+                "or use cv_strategy='cv'."
+            )
+        groups = _scaffold_group_labels(train_smiles)
+        unique_groups = int(np.unique(groups).size)
+        if unique_groups < n_splits:
+            raise ValueError(
+                f"Scaffold-grouped CV requested {n_splits} folds but the "
+                f"training set contains only {unique_groups} unique scaffolds."
+            )
+        splitter = (
+            StratifiedGroupKFold(
+                n_splits=n_splits,
+                shuffle=True,
+                random_state=seed,
+            )
+            if task_type == "classification"
+            else GroupKFold(n_splits=n_splits)
+        )
+        return splitter, groups, "scaffold-grouped"
+
+    raise ValueError(
+        "cv_strategy must be 'cv' or 'scaffold-grouped'. "
+        f"Got {strategy!r}."
+    )
+
+
+def _materialize_cv_splits(cv, X, y, groups, task_type, scoring_metrics):
+    """Create deterministic folds and validate classification coverage."""
+    splits = list(cv.split(X, y, groups=groups))
+    if not splits:
+        raise ValueError("Cross-validation did not produce any folds.")
+
+    needs_all_classes = task_type == "classification" and any(
+        metric in {"roc_auc", "average_precision"}
+        for metric in scoring_metrics
+    )
+    if needs_all_classes:
+        all_classes = set(np.unique(y))
+        for fold_number, (train_indices, validation_indices) in enumerate(
+            splits,
+            start=1,
+        ):
+            train_classes = set(np.unique(np.asarray(y)[train_indices]))
+            validation_classes = set(np.unique(np.asarray(y)[validation_indices]))
+            if train_classes != all_classes or validation_classes != all_classes:
+                raise ValueError(
+                    f"CV fold {fold_number} does not contain every class in both "
+                    "its training and validation portions. Reduce cv, use "
+                    "cv_strategy='cv', or collect more examples/scaffolds for "
+                    "the missing class before using ROC-AUC or average precision."
+                )
+    return splits
+
+
+def _filter_size_dependent_grid(param_grid, model_name, min_fold_train_size, n_features):
+    """Remove candidates that cannot be fitted within the smallest CV fold."""
+    grid = dict(param_grid)
+
+    def filter_values(parameter, maximum):
+        for key in (parameter, f"model__{parameter}"):
+            if key not in grid:
+                continue
+            values = [value for value in grid[key] if int(value) <= maximum]
+            if not values:
+                raise ValueError(
+                    f"No valid {parameter} candidates remain for {model_name}; "
+                    f"the maximum allowed by the smallest CV training fold is {maximum}."
+                )
+            grid[key] = values
+
+    if model_name == "KNN":
+        filter_values("n_neighbors", max(1, int(min_fold_train_size)))
+    elif model_name == "PLS":
+        maximum = max(1, min(int(min_fold_train_size) - 1, int(n_features)))
+        filter_values("n_components", maximum)
+
+    return grid
 
 
 # ============================================================
@@ -117,6 +246,8 @@ def tune_hyperparameters(
     n_classes=None,
     output_dir: Union[str, Path] = "model_tuning_results",
     feature_config=None,
+    train_smiles=None,
+    test_metadata=None,
 ):
     """
     Perform RandomizedSearchCV hyperparameter tuning for one model.
@@ -180,9 +311,21 @@ def tune_hyperparameters(
         )
 
     search_seed = int(config.get("search_seed", 42))
-    n_iter = int(config.get("n_iter", 50))
-    cv = int(config.get("cv", 5))
+    requested_n_iter = int(config.get("n_iter", 50))
+    if requested_n_iter < 1:
+        raise ValueError("n_iter must be at least 1.")
+    cv_folds = int(config.get("cv", 5))
     n_jobs = int(config.get("n_jobs", -1))
+    cv, cv_groups, cv_strategy = build_cv_splitter(
+        config,
+        task_type,
+        train_smiles=train_smiles,
+    )
+    if cv_groups is not None and len(cv_groups) != len(X_train):
+        raise ValueError(
+            "Training SMILES and feature rows are misaligned: "
+            f"{len(cv_groups)} SMILES versus {len(X_train)} feature rows."
+        )
 
     # --------------------------------------------------------
     # XGBoost safety settings
@@ -217,6 +360,18 @@ def tune_hyperparameters(
             f"{list(scoring.keys())}"
         )
 
+    cv_splits = _materialize_cv_splits(
+        cv,
+        X_train,
+        y_train,
+        cv_groups,
+        task_type,
+        config.get("scoring_metrics", []),
+    )
+    cv = cv_splits
+    cv_folds = len(cv_splits)
+    min_fold_train_size = min(len(train_indices) for train_indices, _ in cv_splits)
+
     # --------------------------------------------------------
     # Create model
     # --------------------------------------------------------
@@ -236,6 +391,18 @@ def tune_hyperparameters(
         model = make_scaled_pipeline(
             model=base_model,
             feature_types=feature_config["feature_types"],
+            descriptor_correlation_threshold=feature_config.get(
+                "descriptor_correlation_threshold", 0.95
+            ),
+            descriptor_model_selection=feature_config.get(
+                "descriptor_model_selection", False
+            ),
+            descriptor_selection_threshold=feature_config.get(
+                "descriptor_selection_threshold", "mean"
+            ),
+            descriptor_selection_estimators=feature_config.get(
+                "descriptor_selection_estimators", 128
+            ),
         )
 
     else:
@@ -247,16 +414,29 @@ def tune_hyperparameters(
 
     param_grid = config.get("param_grid")
 
-    if param_grid is None:
+    if not param_grid:
         param_grid = get_default_param_grid(
             model_name,
             task_type,
         )
 
+    param_grid = _filter_size_dependent_grid(
+        param_grid,
+        model_name=model_name,
+        min_fold_train_size=min_fold_train_size,
+        n_features=X_train.shape[1],
+    )
+
     param_grid = _prefix_param_grid_for_pipeline(
         param_grid,
         model,
     )
+
+    try:
+        available_candidates = len(ParameterGrid(param_grid))
+    except TypeError:
+        available_candidates = requested_n_iter
+    n_iter = min(requested_n_iter, available_candidates)
 
     # --------------------------------------------------------
     # XGBoost-specific tuning safety
@@ -345,18 +525,22 @@ def tune_hyperparameters(
             verbose=0,
 
             return_train_score=True,
-            error_score="raise",
+            # A single estimator-specific numerical failure should not abort
+            # every other candidate. RandomizedSearchCV still raises when all
+            # candidates fail.
+            error_score=np.nan,
         )
 
         # Number of CV model-fitting jobs
-        total_fits = n_iter * cv
+        total_fits = n_iter * cv_folds
 
         logger.info(
-            "Starting hyperparameter tuning for %s: "
+            "Starting hyperparameter tuning for %s with %s: "
             "%d candidates × %d folds = %d fits",
             model_name,
+            cv_strategy,
             n_iter,
-            cv,
+            cv_folds,
             total_fits,
         )
 
@@ -372,15 +556,12 @@ def tune_hyperparameters(
             dynamic_ncols=True,
             postfix={
                 "candidates": n_iter,
-                "cv": cv,
+                "cv": cv_folds,
             },
         )
 
         with tqdm_joblib(progress_bar):
-            search.fit(
-                X_train,
-                y_train,
-            )
+            search.fit(X_train, y_train)
 
         # ----------------------------------------------------
         # Best model
@@ -408,6 +589,17 @@ def tune_hyperparameters(
             ),
             "runtime_seconds": float(
                 time.time() - start_time
+            ),
+            "search_candidates_requested": requested_n_iter,
+            "search_candidates_evaluated": n_iter,
+            "cv_strategy": cv_strategy,
+            "cv_folds": cv_folds,
+            "cv_unique_scaffolds": (
+                int(np.unique(cv_groups).size) if cv_groups is not None else None
+            ),
+            "feature_reduction": fitted_feature_dimensions(
+                best_model,
+                X_train.shape[1],
             ),
         }
 
@@ -462,6 +654,14 @@ def tune_hyperparameters(
 
         results.update(
             test_results
+        )
+
+        write_test_predictions(
+            output_dir=output_dir,
+            model_name=model_name,
+            task_type=task_type,
+            evaluation_results=test_results,
+            test_metadata=test_metadata,
         )
 
         # ----------------------------------------------------
@@ -601,6 +801,8 @@ def tune_parameters_multiple_model(
     n_classes=None,
     output_dir="model_tuning_results",
     feature_config=None,
+    train_smiles=None,
+    test_metadata=None,
     progress_callback=None,
 ):
     """
@@ -678,6 +880,8 @@ def tune_parameters_multiple_model(
             n_classes=n_classes,
             output_dir=model_output_dir,
             feature_config=feature_config,
+            train_smiles=train_smiles,
+            test_metadata=test_metadata,
         )
 
         all_results.append(

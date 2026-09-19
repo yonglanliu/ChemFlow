@@ -6,22 +6,18 @@ task = "regression"
 seed = 42
 
 [DatasetConfig]
-dataset_path = "./dataset/ADMET/ExpansionRX/expansion_data_train.csv"
+dataset_path = "./dataset/curated/Biogen_ExpansionRX_clearance_training.csv"
 smiles_column = "SMILES"
 target_column = [
-    "LogD",
-    "LogS",
-    "Log(MLM_Clint)",
-    "Log(HLM_Clint)",
-    "Log(Caco2_Papp)",
-    "Log(Caco2_ER)",
-    "Log(MPPB)",
-    "Log(MBPB)",
-    "Log(MGMB)",
+    "Log_HLM_CLint",
+    "Log_RLM_CLint",
+    "Log_MLM_CLint",
 ]
 
 # This dataset already contains Train, Validation, and Test labels.
-split_column = "split"
+# If the dataset already contains train, validation, and test labels, set the
+# split column name here.
+# split_column = "split"
 split_type = "scaffold_balanced"
 val_fraction = 0.1
 test_fraction = 0.1
@@ -54,4 +50,3 @@ warmup_epochs = 2
 init_lr = 1e-4
 max_lr = 1e-3
 final_lr = 1e-4
-

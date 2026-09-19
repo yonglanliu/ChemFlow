@@ -4,7 +4,7 @@ import time
 import requests
 import pandas as pd
 from typing import Iterable, List
-from src.config import CONFIG
+from chemflow.config import CONFIG
 
 BASE = CONFIG["pubchem"]["base_url"]
 

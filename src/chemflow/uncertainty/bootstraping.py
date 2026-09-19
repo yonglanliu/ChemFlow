@@ -5,8 +5,8 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-from src.chemflow.uncertainty.metrics import METRICS
-from src.chemflow.uncertainty.metrics import (
+from chemflow.uncertainty.metrics import METRICS
+from chemflow.uncertainty.metrics import (
     mean_absolute_error,
     mean_squared_error,
     r2_score,

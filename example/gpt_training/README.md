@@ -151,7 +151,7 @@ torchrun \
   --standalone \
   --nnodes=1 \
   --nproc_per_node=4 \
-  -m src.cli.main \
+  -m chemflow.cli.main \
   train gpt example/gpt_training/conf.toml
 ```
 

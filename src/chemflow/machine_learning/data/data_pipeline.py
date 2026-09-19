@@ -2,21 +2,201 @@ from __future__ import annotations
 
 import numpy as np
 
+from sklearn.base import BaseEstimator, TransformerMixin, is_classifier
 from sklearn.compose import ColumnTransformer
-from sklearn.feature_selection import VarianceThreshold
+from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+from sklearn.feature_selection import SelectFromModel, VarianceThreshold
+from sklearn.linear_model import ElasticNet, Lasso, LogisticRegression, Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC, LinearSVR, SVC, SVR
 
-from src.chemflow.featurization import (
+from chemflow.featurization import (
     DESC_NAMES,
     DESC_TYPES,
     FP_BITS,
     FP_TYPES,
     MACCS_TYPES,
+    RDKIT2D_DESC_NAMES,
+    RDKIT2D_DESC_TYPES,
     smiles_to_descriptors,
+    smiles_to_avalon,
+    smiles_to_erg,
     smiles_to_fp,
     smiles_to_maccs,
+    smiles_to_rdkit2d,
 )
+
+
+class CorrelationThreshold(BaseEstimator, TransformerMixin):
+    """Remove later columns whose absolute training correlation is too high."""
+
+    def __init__(self, threshold=0.95):
+        self.threshold = threshold
+
+    def fit(self, X, y=None):
+        values = np.asarray(X, dtype=float)
+        if values.ndim != 2:
+            raise ValueError("CorrelationThreshold expects a two-dimensional array.")
+        threshold = float(self.threshold)
+        if not 0.0 < threshold <= 1.0:
+            raise ValueError("Correlation threshold must be in the interval (0, 1].")
+
+        n_features = values.shape[1]
+        if n_features == 0:
+            raise ValueError("CorrelationThreshold received no features.")
+        if n_features == 1:
+            self.support_mask_ = np.ones(1, dtype=bool)
+            self.n_features_in_ = 1
+            return self
+
+        correlation = np.corrcoef(values, rowvar=False)
+        correlation = np.nan_to_num(correlation, nan=0.0)
+        support = np.ones(n_features, dtype=bool)
+        for column in range(1, n_features):
+            previous = np.flatnonzero(support[:column])
+            if previous.size and np.any(
+                np.abs(correlation[column, previous]) > threshold
+            ):
+                support[column] = False
+
+        self.support_mask_ = support
+        self.n_features_in_ = n_features
+        return self
+
+    def transform(self, X):
+        if not hasattr(self, "support_mask_"):
+            raise RuntimeError("CorrelationThreshold must be fitted before transform.")
+        values = np.asarray(X)
+        if values.ndim != 2 or values.shape[1] != self.n_features_in_:
+            raise ValueError("Input feature dimensions do not match the fitted data.")
+        return values[:, self.support_mask_]
+
+    def get_support(self, indices=False):
+        if not hasattr(self, "support_mask_"):
+            raise RuntimeError("CorrelationThreshold must be fitted before get_support.")
+        if indices:
+            return np.flatnonzero(self.support_mask_)
+        return self.support_mask_.copy()
+
+
+_LINEAR_OR_SVM_MODELS = (
+    ElasticNet,
+    Lasso,
+    LinearSVC,
+    LinearSVR,
+    LogisticRegression,
+    Ridge,
+    SVC,
+    SVR,
+)
+
+
+def _descriptor_pipeline(
+    model,
+    correlation_threshold,
+    model_selection,
+    selection_threshold,
+    selection_estimators,
+):
+    steps = [
+        ("variance_filter", VarianceThreshold(threshold=0.0)),
+        (
+            "correlation_filter",
+            CorrelationThreshold(threshold=float(correlation_threshold)),
+        ),
+        ("scaler", StandardScaler()),
+    ]
+
+    if bool(model_selection) and isinstance(model, _LINEAR_OR_SVM_MODELS):
+        selector_model = (
+            ExtraTreesClassifier(
+                n_estimators=int(selection_estimators),
+                random_state=42,
+                n_jobs=1,
+                class_weight="balanced",
+            )
+            if is_classifier(model)
+            else ExtraTreesRegressor(
+                n_estimators=int(selection_estimators),
+                random_state=42,
+                n_jobs=1,
+            )
+        )
+        steps.append(
+            (
+                "model_selector",
+                SelectFromModel(
+                    selector_model,
+                    threshold=selection_threshold,
+                ),
+            )
+        )
+
+    return Pipeline(steps)
+
+
+def fitted_feature_dimensions(model, raw_feature_count):
+    """Summarize the feature counts retained by a fitted ChemFlow pipeline."""
+    raw_feature_count = int(raw_feature_count)
+    summary = {
+        "raw_total": raw_feature_count,
+        "descriptor_raw": 0,
+        "descriptor_after_zero_variance": 0,
+        "descriptor_after_correlation": 0,
+        "descriptor_after_model_selection": 0,
+        "fingerprint_raw": raw_feature_count,
+        "fingerprint_after_zero_variance": raw_feature_count,
+        "final_model_input": raw_feature_count,
+    }
+    if not isinstance(model, Pipeline):
+        return summary
+
+    descriptor_pipeline = None
+    if "descriptor_preprocessor" in model.named_steps:
+        descriptor_pipeline = model.named_steps["descriptor_preprocessor"]
+    elif "preprocessor" in model.named_steps:
+        preprocessor = model.named_steps["preprocessor"]
+        descriptor_pipeline = preprocessor.named_transformers_.get(
+            "descriptor_preprocessor"
+        )
+
+    descriptor_final = 0
+    if isinstance(descriptor_pipeline, Pipeline):
+        descriptor_variance = descriptor_pipeline.named_steps["variance_filter"]
+        descriptor_raw = int(descriptor_variance.n_features_in_)
+        after_variance = int(descriptor_variance.get_support().sum())
+        correlation_filter = descriptor_pipeline.named_steps["correlation_filter"]
+        after_correlation = int(correlation_filter.get_support().sum())
+        selector = descriptor_pipeline.named_steps.get("model_selector")
+        descriptor_final = (
+            int(selector.get_support().sum())
+            if selector is not None
+            else after_correlation
+        )
+        summary.update(
+            {
+                "descriptor_raw": descriptor_raw,
+                "descriptor_after_zero_variance": after_variance,
+                "descriptor_after_correlation": after_correlation,
+                "descriptor_after_model_selection": descriptor_final,
+                "fingerprint_raw": raw_feature_count - descriptor_raw,
+            }
+        )
+
+    global_variance = model.named_steps.get("variance_filter")
+    if global_variance is not None:
+        support = global_variance.get_support()
+        final_count = int(support.sum())
+        fingerprint_start = descriptor_final
+        fingerprint_after = int(support[fingerprint_start:].sum())
+    else:
+        final_count = descriptor_final or raw_feature_count
+        fingerprint_after = summary["fingerprint_raw"]
+
+    summary["fingerprint_after_zero_variance"] = fingerprint_after
+    summary["final_model_input"] = final_count
+    return summary
 
 
 # ============================================================
@@ -45,6 +225,7 @@ def _normalize_feature_types(
 def _featurize_single_smiles(
     smi,
     feature_types,
+    descriptor_names_by_feature=None,
 ):
     mol_features = []
 
@@ -116,6 +297,27 @@ def _featurize_single_smiles(
             )
 
         # ----------------------------------------------------
+        # Avalon structural fingerprint
+        # ----------------------------------------------------
+
+        elif feature_type == "avalon":
+
+            x = smiles_to_avalon(
+                smi,
+                n_bits=FP_BITS["avalon"],
+            )
+
+        # ----------------------------------------------------
+        # ErG pharmacophore fingerprint
+        # ----------------------------------------------------
+
+        elif feature_type == "erg":
+
+            x = smiles_to_erg(
+                smi
+            )
+
+        # ----------------------------------------------------
         # Descriptors
         # ----------------------------------------------------
 
@@ -126,6 +328,18 @@ def _featurize_single_smiles(
 
             x = smiles_to_descriptors(
                 smi
+            )
+
+        # ----------------------------------------------------
+        # Expanded RDKit 2D descriptors
+        # ----------------------------------------------------
+
+        elif feature_type in RDKIT2D_DESC_TYPES:
+
+            saved_names = (descriptor_names_by_feature or {}).get(feature_type)
+            x = smiles_to_rdkit2d(
+                smi,
+                descriptor_names=saved_names,
             )
 
         else:
@@ -165,16 +379,6 @@ def _featurize_single_smiles(
     # IMPORTANT:
     # Feature order follows feature_types.
     #
-    # For:
-    #   ["descriptors", "ecfp4"]
-    #
-    # output is:
-    #
-    #   9 descriptors
-    #   +
-    #   2048 ECFP4 bits
-    #
-    # = 2057 features
     return np.concatenate(
         mol_features,
         axis=0,
@@ -189,6 +393,7 @@ def featurize_dataframe(
     df,
     smiles_col="SMILES",
     feature_types=None,
+    descriptor_names_by_feature=None,
 ):
     """
     Featurize molecules from a DataFrame.
@@ -219,6 +424,7 @@ def featurize_dataframe(
         x = _featurize_single_smiles(
             smi,
             feature_types,
+            descriptor_names_by_feature=descriptor_names_by_feature,
         )
 
         if x is not None:
@@ -256,6 +462,7 @@ def featurize_array(
     X,
     y,
     feature_types=None,
+    descriptor_names_by_feature=None,
 ):
     """
     Featurize SMILES stored in an array.
@@ -298,6 +505,7 @@ def featurize_array(
         x = _featurize_single_smiles(
             smi,
             feature_types,
+            descriptor_names_by_feature=descriptor_names_by_feature,
         )
 
         if x is not None:
@@ -350,6 +558,10 @@ def featurize_array(
 def make_scaled_pipeline(
     model,
     feature_types,
+    descriptor_correlation_threshold=0.95,
+    descriptor_model_selection=False,
+    descriptor_selection_threshold="mean",
+    descriptor_selection_estimators=128,
 ):
     """
     Build the preprocessing/model pipeline.
@@ -362,12 +574,15 @@ def make_scaled_pipeline(
 
     Descriptors only:
         VarianceThreshold(0.0)
+        -> CorrelationThreshold
         -> StandardScaler
+        -> optional model-based selection for linear/SVM models
         -> model
 
     Mixed descriptors + fingerprints:
         ColumnTransformer:
-            descriptors -> StandardScaler
+            descriptors -> variance/correlation filtering -> scaling
+                           -> optional linear/SVM model selection
             fingerprints -> passthrough
 
         then:
@@ -431,6 +646,15 @@ def make_scaled_pipeline(
             current_start += (
                 n_desc
             )
+
+        elif feature in RDKIT2D_DESC_TYPES:
+
+            has_desc = True
+            n_desc = len(RDKIT2D_DESC_NAMES)
+            desc_indices.extend(
+                range(current_start, current_start + n_desc)
+            )
+            current_start += n_desc
 
         # ----------------------------------------------------
         # Fingerprints
@@ -499,17 +723,15 @@ def make_scaled_pipeline(
         return Pipeline(
             [
                 (
-                    "variance_filter",
-                    VarianceThreshold(
-                        threshold=0.0
+                    "descriptor_preprocessor",
+                    _descriptor_pipeline(
+                        model=model,
+                        correlation_threshold=descriptor_correlation_threshold,
+                        model_selection=descriptor_model_selection,
+                        selection_threshold=descriptor_selection_threshold,
+                        selection_estimators=descriptor_selection_estimators,
                     ),
                 ),
-
-                (
-                    "scaler",
-                    StandardScaler(),
-                ),
-
                 (
                     "model",
                     model,
@@ -525,8 +747,14 @@ def make_scaled_pipeline(
 
         transformers=[
             (
-                "descriptor_scaler",
-                StandardScaler(),
+                "descriptor_preprocessor",
+                _descriptor_pipeline(
+                    model=model,
+                    correlation_threshold=descriptor_correlation_threshold,
+                    model_selection=descriptor_model_selection,
+                    selection_threshold=descriptor_selection_threshold,
+                    selection_estimators=descriptor_selection_estimators,
+                ),
                 desc_indices,
             ),
         ],

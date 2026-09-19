@@ -10,19 +10,21 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
-from src.chemflow.machine_learning import (
+from chemflow.machine_learning import (
     MODEL_OPTIONS,
     get_model,
 )
-from src.chemflow.machine_learning.data.data_pipeline import (
+from chemflow.machine_learning.data.data_pipeline import (
+    fitted_feature_dimensions,
     make_scaled_pipeline,
 )
-from src.chemflow.machine_learning.eval.eval_ml import evaluate_model
-from src.chemflow.machine_learning.train.utils import (
+from chemflow.machine_learning.eval.eval_ml import evaluate_model
+from chemflow.machine_learning.train.utils import (
     _json_safe,
     _merge_parent_config,
     safe_name,
     write_model_info,
+    write_test_predictions,
 )
 
 
@@ -38,6 +40,7 @@ def regular_training(
     model_config,
     output_dir="model_training_results",
     feature_config=None,
+    test_metadata=None,
     progress_callback=None,
 ):
     """
@@ -134,7 +137,7 @@ def regular_training(
     ):
         print(message)
 
-        from src.chemflow.machine_learning.train.train_runner import (
+        from chemflow.machine_learning.train.train_runner import (
             write_log,
         )
 
@@ -294,6 +297,18 @@ def regular_training(
                     feature_types=feature_config[
                         "feature_types"
                     ],
+                    descriptor_correlation_threshold=feature_config.get(
+                        "descriptor_correlation_threshold", 0.95
+                    ),
+                    descriptor_model_selection=feature_config.get(
+                        "descriptor_model_selection", False
+                    ),
+                    descriptor_selection_threshold=feature_config.get(
+                        "descriptor_selection_threshold", "mean"
+                    ),
+                    descriptor_selection_estimators=feature_config.get(
+                        "descriptor_selection_estimators", 128
+                    ),
                 )
 
             else:
@@ -351,6 +366,10 @@ def regular_training(
                 "runtime_seconds": float(
                     time.time() - start_time
                 ),
+                "feature_reduction": fitted_feature_dimensions(
+                    model,
+                    X_train.shape[1],
+                ),
             }
 
             # ------------------------------------------------
@@ -372,6 +391,14 @@ def regular_training(
 
             results.update(
                 evaluation_results
+            )
+
+            write_test_predictions(
+                output_dir=seed_output_dir,
+                model_name=model_name,
+                task_type=task_type,
+                evaluation_results=evaluation_results,
+                test_metadata=test_metadata,
             )
 
             log(
@@ -566,6 +593,7 @@ def regular_training_multiple_models(
     parent_config=None,
     output_dir="model_training_results",
     feature_config=None,
+    test_metadata=None,
     progress_callback=None,
 ):
     """
@@ -677,6 +705,7 @@ def regular_training_multiple_models(
             model_config=cfg,
             output_dir=model_output_dir,
             feature_config=feature_config,
+            test_metadata=test_metadata,
             progress_callback=progress_callback,
         )
 

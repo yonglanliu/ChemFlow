@@ -33,7 +33,7 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --standalone \
         --nnodes=1 \
         --nproc_per_node="${NUM_GPUS}" \
-        -m src.cli.main \
+        -m chemflow.cli.main \
         train gpt \
         "${CONFIG}"
 

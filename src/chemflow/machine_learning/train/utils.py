@@ -50,12 +50,17 @@ def build_split_config(data_split_cfg: Dict[str, Any]) -> Dict[str, Any]:
     split_method_value = data_split_cfg.get("split_method")
     split_column_value = data_split_cfg.get("split_column", data_split_cfg.get("split_col"))
 
-    split_method = str(split_method_value).lower() if split_method_value is not None else ""
+    split_method = str(split_method_value).strip().lower() if split_method_value is not None else ""
+    # ``splitted`` was the original public name. Keep accepting it while
+    # storing the clearer canonical name used by new configurations.
+    if split_method == "splitted":
+        split_method = "predefined"
 
     if not split_method:
         if split_column_value is None:
             raise ValueError("split_config must contain either 'split_method' or 'split_column'.")
 
+        result_conf["split_method"] = "predefined"
         result_conf["split_column"] = str(split_column_value)
         result_conf["save_split_data"] = bool(
             data_split_cfg.get("save_split_data", data_split_cfg.get("save_dataset", True))
@@ -71,9 +76,9 @@ def build_split_config(data_split_cfg: Dict[str, Any]) -> Dict[str, Any]:
         result_conf["prefix_name"] = split_name
         return result_conf
 
-    if split_method == "splitted":
+    if split_method == "predefined":
         if split_column_value is None:
-            raise ValueError("split_method='splitted' requires 'split_column'.")
+            raise ValueError("split_method='predefined' requires 'split_column'.")
 
         result_conf["split_method"] = split_method
         result_conf["split_column"] = str(split_column_value)
@@ -91,15 +96,12 @@ def build_split_config(data_split_cfg: Dict[str, Any]) -> Dict[str, Any]:
         result_conf["prefix_name"] = split_name
         return result_conf
 
-    if split_method not in ["random", "scaffold", "butina", "cluster", "splitted"]:
+    if split_method not in ["random", "scaffold", "butina", "cluster"]:
         raise ValueError(f"Invalid split_method: {split_method}")
 
     result_conf["split_method"] = split_method
 
-    if split_method == "splitted":
-        train_fraction = None
-    else:
-        train_fraction = data_split_cfg.get("train_fraction", data_split_cfg.get("train_size"))
+    train_fraction = data_split_cfg.get("train_fraction", data_split_cfg.get("train_size"))
         
     test_size = data_split_cfg.get("test_size", data_split_cfg.get("test_fraction"))
     validation_size = data_split_cfg.get(
@@ -216,6 +218,10 @@ def write_model_info(
         "feature_types": feature_config.get("feature_types"),
         "n_bits": feature_config.get("n_bits"),
         "desc_names": feature_config.get("desc_names"),
+        "descriptor_names_by_feature": feature_config.get(
+            "descriptor_names_by_feature"
+        ),
+        "rdkit_version": feature_config.get("rdkit_version"),
         "smiles_col": feature_config.get("smiles_col"),
         "target_col": feature_config.get("target_col"),
         "split_method": feature_config.get("split_method"),
@@ -226,6 +232,10 @@ def write_model_info(
         "best_params": metrics.get("best_params"),
         "model_params": metrics.get("model_params"),
         "refit_metric": metrics.get("refit_metric"),
+        "cv_strategy": metrics.get("cv_strategy"),
+        "cv_folds": metrics.get("cv_folds"),
+        "cv_unique_scaffolds": metrics.get("cv_unique_scaffolds"),
+        "feature_reduction": metrics.get("feature_reduction"),
         "metrics_summary": {
             k: v
             for k, v in metrics.items()
@@ -236,6 +246,57 @@ def write_model_info(
 
     with open(output_dir / f"{model_tag}_model_info.json", "w", encoding="utf-8") as f:
         json.dump(_json_safe(model_info), f, indent=4)
+
+
+def write_test_predictions(
+    output_dir,
+    model_name,
+    task_type,
+    evaluation_results,
+    test_metadata=None,
+):
+    """Write row-level test truth, predictions, errors, and probabilities."""
+    y_true = np.asarray(evaluation_results.get("y_test", []))
+    y_pred = np.asarray(evaluation_results.get("y_pred", []))
+    if y_true.shape[0] != y_pred.shape[0]:
+        raise ValueError("Test truth and prediction arrays must have equal lengths.")
+
+    predictions = pd.DataFrame(
+        {
+            "test_row": np.arange(len(y_true), dtype=int),
+            "true_value": y_true,
+            "predicted_value": y_pred,
+        }
+    )
+    if test_metadata:
+        for column in reversed(("Molecule Name", "SMILES")):
+            if column not in test_metadata:
+                continue
+            values = np.asarray(test_metadata[column])
+            if len(values) != len(predictions):
+                raise ValueError(
+                    f"Test metadata column '{column}' has {len(values)} rows; "
+                    f"expected {len(predictions)}."
+                )
+            predictions.insert(0, column, values)
+    if str(task_type).lower() == "regression":
+        residual = y_true.astype(float) - y_pred.astype(float)
+        predictions["residual"] = residual
+        predictions["absolute_error"] = np.abs(residual)
+
+    probabilities = evaluation_results.get("y_proba")
+    if probabilities is not None:
+        probabilities = np.asarray(probabilities)
+        if probabilities.ndim == 1:
+            probabilities = probabilities.reshape(-1, 1)
+        if probabilities.shape[0] != len(predictions):
+            raise ValueError("Test probabilities and predictions must have equal lengths.")
+        for class_index in range(probabilities.shape[1]):
+            predictions[f"probability_class_{class_index}"] = probabilities[:, class_index]
+
+    output_path = Path(output_dir) / f"{safe_name(model_name)}_test_predictions.csv"
+    predictions.to_csv(output_path, index=False)
+    return output_path
 
 def safe_name(name: str) -> str:
     return str(name).lower().replace(" ", "_").replace("/", "_").replace("-", "_")

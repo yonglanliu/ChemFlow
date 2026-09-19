@@ -1,13 +1,13 @@
-workdir: ./example/ml_training/logD/ecfp4_desc
+workdir: ./example/ml_training/HLM_Clint/ecfp4
 task_type: regression
 
 # ============================================================
 # Data
 # ============================================================
 data:
-  data_file: ./example/ml_training/single_task_LogD.csv
+  data_file: ./dataset/curated/Biogen_ExpansionRX_clearance_training.csv
   X_col: SMILES
-  y_col: LogD
+  y_col: Log_HLM_CLint
 
   # Only used for classification.
   # n_classes: 2
@@ -17,47 +17,66 @@ data:
 # Featurization
 # ============================================================
 featurization:
+  # Select one or more supported representations. Their vectors are
+  # concatenated in the listed order.
   features:
     - ecfp4
+    # - rdkit2d
     # - ecfp6
-    - descriptor
+    # - fcfp4
+    # - fcfp6
+    # - avalon
+    # - erg
+    # - descriptor  # legacy nine-descriptor physicochemical subset
     # - maccs
 
   fp_bits: 2048
+
+  # Descriptor-only reduction is fitted independently inside each CV fold.
+  descriptor_correlation_threshold: 0.95
+
+  # Optional supervised selection for linear and SVM estimators only.
+  # Tree estimators keep fingerprint bits unchanged apart from the universal
+  # zero-variance filter.
+  descriptor_model_selection: false
+  descriptor_selection_threshold: mean
+  descriptor_selection_estimators: 128
 
 
 # ============================================================
 # Data split
 # ============================================================
 data_split:
-  split_method: splitted  # Supported methods: random, scaffold, stratified, splitted, clustered, butina
-  split_column: split  # if split_method is "splitted", this column will be used to split the data into train/valid/test sets
+  # Use "predefined" when data_file already has train/val/test assignments.
+  # Supported methods: random, scaffold, predefined, cluster, butina
+  split_method: scaffold
+  split_column: split  # Used only when split_method is "predefined"
 
   test_fraction: 0.1
   valid_fraction: 0.1
 
   random_seed: 42
 
-  # Save featurized train/test/validation arrays
+  # Save the featurized NPZ and a readable CSV containing a "split" column.
   save_split_data: true
 
-  save_dir: ./example/ml_training/logD/ecfp4_desc/split_data
+  save_dir: ./example/ml_training/HLM_Clint/split_data
 
-  split_name: single_task_logd_random_split
+  split_name: single_task_HLM_Clint_scaffold_split
 
 
 # ============================================================
 # Models
 # ============================================================
 models:
-  - model_name: Random Forest
-    estimator: RandomForestRegressor
+  # - model_name: Random Forest
+  #   estimator: RandomForestRegressor
 
-  - model_name: XGBoost
-    estimator: XGBRegressor
+  # - model_name: XGBoost
+  #   estimator: XGBRegressor
 
-  - model_name: SVM_RBF
-    estimator: SVR
+  # - model_name: SVM_RBF
+  #   estimator: SVR
 
   - model_name: LightGBM
     estimator: LGBMRegressor
@@ -70,6 +89,11 @@ hyperparameter_tuning: true
 
 n_iter: 50
 cv: 5
+# Inner cross-validation used only for hyperparameter selection:
+#   cv                 - shuffled K-fold (stratified for classification)
+#   scaffold-grouped   - keep each Bemis-Murcko scaffold in one fold
+cv_strategy: scaffold-grouped
+cv_random_seed: 42
 n_jobs: -1
 
 scoring_metrics:

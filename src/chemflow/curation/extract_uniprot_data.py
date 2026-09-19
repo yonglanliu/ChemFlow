@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from src.config import CONFIG
+from chemflow.config import CONFIG
 
 
 def query_gene(gene: str) -> pd.DataFrame:

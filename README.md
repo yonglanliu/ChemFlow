@@ -171,16 +171,70 @@ This produces bootstrap confidence intervals and distribution plots for each tas
 - checkpointing
 - CLI-based workflows
 - Streamlit UI
+- optional native Qt and PyOpenGL desktop workspace
 - multi-GPU and single-GPU support
+
+### Native desktop workspace
+
+Install the optional desktop dependencies and launch ChemFlow Studio:
+
+```bash
+mamba activate chemflow
+python -m pip install -e ".[desktop]"
+chemflow-install-ketcher
+chemflow-desktop
+```
+
+To launch the focused HLM/RLM/MLM clearance deployment interface instead:
+
+```bash
+admet-desktop
+```
+
+Ketcher is installed as an offline chemical structure editor for the desktop;
+drawn molecules stay on the local computer.
+
+The desktop combines training, prediction, similarity search, molecular
+generation, and uncertainty evaluation with a live task console. See the
+[desktop guide](src/chemflow/desktop/README.md) for details.
+
+---
+
+## Source layout
+
+All importable runtime code lives under the `chemflow` package:
+
+```text
+src/chemflow/
+├── cli/
+├── config/
+├── deep_learning/
+├── desktop/
+├── machine_learning/
+├── streamlit/
+├── featurization/
+└── utils/
+```
+
+Tests live in `tests/`, while one-off dataset and maintenance programs live in
+`scripts/`. New code should import modules through `chemflow.*`. A small
+compatibility package keeps historical `src.deep_learning.*` and
+`src.chemflow.*` paths loadable for older checkpoints and serialized models.
 
 ---
 
 ## Installation
 
 ChemFlow requires Python 3.11. The recommended installation uses
-[Miniforge](https://github.com/conda-forge/miniforge), Mamba, and the supplied
-`environment.yaml`. Conda installs compiled scientific packages first; pip then
-installs the remaining Python packages and ChemFlow itself in editable mode.
+[Miniforge](https://github.com/conda-forge/miniforge) and Mamba. Two environment
+specifications are provided:
+
+- `environment.yaml` for local development, CPU systems, and Apple Silicon.
+- `environment-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs. It uses
+  `requirements-hpc-torch.txt` to install the CUDA 12.6 PyTorch build.
+
+Conda installs the compiled scientific packages first; pip then installs the
+remaining Python packages and ChemFlow itself in editable mode.
 
 ### 1. Clone ChemFlow
 
@@ -189,7 +243,7 @@ git clone https://github.com/yonglanliu/ChemFlow.git
 cd ChemFlow
 ```
 
-### 2. Create the recommended environment
+### 2A. Local, CPU, or Apple Silicon installation
 
 Run this command from the repository root:
 
@@ -204,6 +258,77 @@ If the `chemflow` environment already exists, update it instead:
 mamba env update --name chemflow --file environment.yaml --prune
 mamba activate chemflow
 ```
+
+### 2B. NVIDIA GPU installation on an HPC cluster
+
+Use this installation only on a Linux cluster with NVIDIA GPUs and a driver
+compatible with CUDA 12.6. The NVIDIA driver is normally maintained by the HPC
+administrators; do not install or replace the system driver inside the Conda
+environment.
+
+If your cluster uses environment modules, inspect the available CUDA versions
+and load the module recommended by the cluster documentation:
+
+```bash
+module avail cuda
+module load cuda/12.6  # module name may differ on your cluster
+```
+
+Create the HPC environment from the repository root:
+
+```bash
+mamba env create -f environment-hpc.yaml
+mamba activate chemflow
+```
+
+To update an existing HPC environment:
+
+```bash
+mamba env update --name chemflow --file environment-hpc.yaml --prune
+mamba activate chemflow
+```
+
+If the cluster loads an incompatible system C++ runtime and reports errors such
+as `GLIBCXX_* not found`, install an activation hook that gives the Conda
+environment's `libstdc++` precedence:
+
+```bash
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
+
+cat > "$CONDA_PREFIX/etc/conda/activate.d/chemflow.sh" <<'EOF'
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6${LD_PRELOAD:+:$LD_PRELOAD}"
+EOF
+```
+
+Add a matching deactivation hook so the preload is removed when leaving the
+`chemflow` environment:
+
+```bash
+mkdir -p "$CONDA_PREFIX/etc/conda/deactivate.d"
+
+cat > "$CONDA_PREFIX/etc/conda/deactivate.d/chemflow.sh" <<'EOF'
+export LD_PRELOAD="${LD_PRELOAD#"$CONDA_PREFIX/lib/libstdc++.so.6"}"
+export LD_PRELOAD="${LD_PRELOAD#:}"
+if [[ -z "$LD_PRELOAD" ]]; then
+    unset LD_PRELOAD
+fi
+EOF
+```
+
+Reactivate the environment after creating the hooks:
+
+```bash
+mamba deactivate
+mamba activate chemflow
+```
+
+Use this workaround only when the HPC runtime requires it; `LD_PRELOAD`
+affects every dynamically linked program launched from the active environment.
+
+`environment-hpc.yaml` installs the packages pinned in
+`requirements-hpc-torch.txt`, including the CUDA 12.6 builds of PyTorch and
+Torchvision. A complete system CUDA Toolkit is generally unnecessary unless
+you need to compile custom CUDA extensions.
 
 Confirm that the active interpreter is Python 3.11:
 
@@ -222,10 +347,38 @@ chemflow --help
 python -c "import torch, torch_geometric, chemprop, lightgbm; print(torch.__version__)"
 ```
 
+On HPC, perform the GPU check from an allocated GPU compute node rather than a
+login node:
+
+```bash
+nvidia-smi
+
+python - <<'PY'
+import torch
+
+print("PyTorch:", torch.__version__)
+print("CUDA runtime:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+print("GPU count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+PY
+```
+
+For an HPC installation, `CUDA available` should report `True`. A `False`
+result on a login node does not necessarily indicate a broken installation,
+because many clusters expose GPUs only inside scheduled jobs.
+
 If you modify `requirements.txt`, synchronize the active environment with:
 
 ```bash
 mamba env update --name chemflow --file environment.yaml --prune
+```
+
+If you modify `requirements-hpc-torch.txt`, update the HPC environment instead:
+
+```bash
+mamba env update --name chemflow --file environment-hpc.yaml --prune
 ```
 
 ### Alternative: pip virtual environment

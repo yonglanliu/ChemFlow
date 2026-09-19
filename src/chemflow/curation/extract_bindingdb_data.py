@@ -4,7 +4,7 @@
 import time
 from dataclasses import dataclass
 import pandas as pd
-from src.config import CONFIG
+from chemflow.config import CONFIG
 import requests
 
 # ============================================================

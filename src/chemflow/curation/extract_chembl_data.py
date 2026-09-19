@@ -4,7 +4,7 @@
 import pandas as pd
 
 from chembl_webresource_client.new_client import new_client
-from src.config import CONFIG
+from chemflow.config import CONFIG
 from dataclasses import dataclass
 
 # ============================================================
@@ -93,7 +93,7 @@ def add_compounds(df, cfg):
             out_df = df.copy()
         out_df.reset_index(drop=True, inplace=True)
     if "SMILES" in out_df.columns:
-        from src.utils.chem import safe_mol_wt
+        from chemflow.utils.chem import safe_mol_wt
         out_df["mw"] = out_df["SMILES"].apply(safe_mol_wt)
     return out_df
 

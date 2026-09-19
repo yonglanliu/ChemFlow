@@ -10,6 +10,7 @@ __pycache__/
 .venv/
 env/
 .chemflow_v/
+.chemflow/
 
 # ============================================================
 # IDE
@@ -90,6 +91,17 @@ test/
 graphormer_multitask_training/
 graphormer_training/
 dataset/
+# Keep the ExpansionRX downloader versioned while all dataset files remain ignored.
+!dataset/
+dataset/*
+!dataset/ADMET/
+dataset/ADMET/*
+!dataset/ADMET/Biogen_ADME/
+dataset/ADMET/Biogen_ADME/*
+!dataset/ADMET/Biogen_ADME/load_Biogen_ADME.ipynb
+!dataset/ADMET/ExpansionRX/
+dataset/ADMET/ExpansionRX/*
+!dataset/ADMET/ExpansionRX/download_expansionrx.ipynb
 lstm_training/
 diffusion_training/
 graphormer_training_regression/

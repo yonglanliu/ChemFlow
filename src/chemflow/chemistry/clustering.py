@@ -7,11 +7,11 @@ from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
-from src.config import PROJECT_ROOT
-from src.utils.style import load_css as inject_css
-from src.streamlit.utils.select_file import file_picker
-from src.chemflow.io.load_database import load_molecule_database
-from src.chemflow.chemistry.similarity_search import SimilarityCalculator
+from chemflow.config import PROJECT_ROOT
+from chemflow.utils.style import load_css as inject_css
+from chemflow.streamlit.utils.select_file import file_picker
+from chemflow.io.load_database import load_molecule_database
+from chemflow.chemistry.similarity_search import SimilarityCalculator
 import pandas as pd
 import numpy as np
 

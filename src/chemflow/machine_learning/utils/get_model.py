@@ -14,11 +14,11 @@ from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.linear_model import LogisticRegression, Ridge, Lasso
 from sklearn.cross_decomposition import PLSRegression
 
-from src.chemflow.machine_learning.utils.scoring import get_scoring_config
-from src.config import PROJECT_ROOT 
+from chemflow.machine_learning.utils.scoring import get_scoring_config
+from chemflow.config import CURRENT_DIR as CONFIG_DIR
 
-GRID_SEARCH_CONFIG_PATH = PROJECT_ROOT / "src"/"config" / "grid_search_conf.yaml"
-ML_CONFIG_PATH = PROJECT_ROOT / "src"/"config" / "ml_model_conf.yaml"
+GRID_SEARCH_CONFIG_PATH = CONFIG_DIR / "grid_search_conf.yaml"
+ML_CONFIG_PATH = CONFIG_DIR / "ml_model_conf.yaml"
 
 ESTIMATOR_REGISTRY = {
     "RandomForestClassifier": RandomForestClassifier,
@@ -74,6 +74,8 @@ def get_base_model_config(
         "tuning_method": defaults.get("tuning_method", "RandomizedSearchCV") if hyperparameter_tuning else None,
         "n_iter": defaults.get("n_iter", 50) if hyperparameter_tuning else None,
         "cv": defaults.get("cv", 5) if hyperparameter_tuning else None,
+        "cv_strategy": defaults.get("cv_strategy", "cv") if hyperparameter_tuning else None,
+        "cv_random_seed": defaults.get("cv_random_seed", 42) if hyperparameter_tuning else None,
         "seeds": seeds,
         "n_runs": len(seeds),
         "scoring_metrics": scoring_cfg["scoring_metrics"],
@@ -185,23 +187,46 @@ def get_model(
 
     if model_name == "Random Forest":
         cls = RandomForestClassifier if task_type == "classification" else RandomForestRegressor
+        params.setdefault("n_estimators", 500)
+        params.setdefault("n_jobs", 1 if tune_hyperparameter else -1)
+        if task_type == "classification" and not tune_hyperparameter:
+            params.setdefault("class_weight", "balanced")
         return cls(**add_seed(params))
 
     elif model_name == "Extra Trees":
         cls = ExtraTreesClassifier if task_type == "classification" else ExtraTreesRegressor
+        params.setdefault("n_estimators", 500)
+        params.setdefault("n_jobs", 1 if tune_hyperparameter else -1)
+        if task_type == "classification" and not tune_hyperparameter:
+            params.setdefault("class_weight", "balanced")
         return cls(**add_seed(params))
 
     elif model_name == "Gradient Boosting":
         cls = GradientBoostingClassifier if task_type == "classification" else GradientBoostingRegressor
+        if not tune_hyperparameter:
+            params.setdefault("n_estimators", 300)
+            params.setdefault("learning_rate", 0.05)
+            params.setdefault("max_depth", 3)
+            params.setdefault("subsample", 0.8)
         return cls(**add_seed(params))
 
     elif model_name == "XGBoost":
         cls = XGBClassifier if task_type == "classification" else XGBRegressor
         params = add_seed(params)
-        #params.setdefault("n_jobs", 1)
-        params["n_jobs"] = 1  # Ensure n_jobs is set to 1 for XGBoost
+        params["n_jobs"] = 1  # Avoid nested OpenMP parallelism during CV.
+        params.setdefault("verbosity", 0)
         if task_type == "classification":
             params.setdefault("eval_metric", "logloss")
+        elif not tune_hyperparameter:
+            params.setdefault("objective", "reg:squarederror")
+        if not tune_hyperparameter:
+            params.setdefault("n_estimators", 500)
+            params.setdefault("learning_rate", 0.05)
+            params.setdefault("max_depth", 5)
+            params.setdefault("subsample", 0.8)
+            params.setdefault("colsample_bytree", 0.8)
+            params.setdefault("reg_alpha", 0.1)
+            params.setdefault("reg_lambda", 1.0)
         return cls(**params)
     
     elif model_name == "LightGBM":
@@ -210,6 +235,19 @@ def get_model(
         params = add_seed(params)
         params.setdefault("n_jobs", 1)
         params.setdefault("verbosity", -1)
+        if not tune_hyperparameter:
+            params.setdefault("n_estimators", 500)
+            params.setdefault("learning_rate", 0.05)
+            params.setdefault("num_leaves", 31)
+            params.setdefault("max_depth", 6)
+            params.setdefault("min_child_samples", 20)
+            params.setdefault("subsample", 0.8)
+            params.setdefault("subsample_freq", 1)
+            params.setdefault("colsample_bytree", 0.8)
+            params.setdefault("reg_alpha", 0.1)
+            params.setdefault("reg_lambda", 1.0)
+            if task_type == "classification":
+                params.setdefault("class_weight", "balanced")
 
         return cls(**params)
 
@@ -225,17 +263,26 @@ def get_model(
 
     elif model_name == "KNN":
         cls = KNeighborsClassifier if task_type == "classification" else KNeighborsRegressor
+        params.setdefault("n_neighbors", 5)
+        params.setdefault("weights", "distance")
+        params.setdefault("algorithm", "brute")
         return cls(**params)
 
     elif model_name == "MLP":
         cls = MLPClassifier if task_type == "classification" else MLPRegressor
         params = add_seed(params)
+        params.setdefault("max_iter", 1000)
+        params.setdefault("early_stopping", True)
+        params.setdefault("n_iter_no_change", 20)
         return cls(**params)
 
     elif model_name == "Logistic Regression":
         if task_type != "classification":
             raise ValueError("Logistic Regression only supports classification.")
         params = add_seed(params)
+        params.setdefault("max_iter", 2000)
+        if not tune_hyperparameter:
+            params.setdefault("class_weight", "balanced")
         return LogisticRegression(**params)
 
     elif model_name == "Ridge Regression":
@@ -246,11 +293,13 @@ def get_model(
     elif model_name == "Lasso Regression":
         if task_type != "regression":
             raise ValueError("Lasso Regression only supports regression.")
+        params.setdefault("max_iter", 10000)
         return Lasso(**params)
 
     elif model_name == "PLS":
         if task_type != "regression":
             raise ValueError("PLS only supports regression.")
+        params.setdefault("max_iter", 1000)
         return PLSRegression(**params)
 
     else:

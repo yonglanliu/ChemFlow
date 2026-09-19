@@ -32,14 +32,21 @@ desktop = [
 # CLI Entry Point
 # ===========================
 [project.scripts]
-chemflow = "src.cli.main:main"
-chemflow-desktop = "src.desktop.app:main"
-admet-desktop = "src.desktop.admet_app:main"
-chemflow-install-ketcher = "src.desktop.install_ketcher:main"
+chemflow = "chemflow.cli.main:main"
+chemflow-desktop = "chemflow.desktop.app:main"
+admet-desktop = "chemflow.desktop.admet_app:main"
+chemflow-install-ketcher = "chemflow.desktop.install_ketcher:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
+where = ["src"]
+include = ["chemflow*", "src*"]
 
 [tool.setuptools.package-data]
-"src.desktop" = ["*.md"]
+"chemflow.desktop" = ["*.md"]
+"chemflow.config" = ["*.toml", "*.yaml"]
+"chemflow.deep_learning.gpt.config" = ["*.toml"]
+"chemflow.deep_learning.lstm" = ["*.toml"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
