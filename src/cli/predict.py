@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pandas as pd
@@ -822,6 +823,11 @@ def predict_chemeleon(args) -> None:
         checkpoint_path=args.model_checkpoint,
         device=args.device,
         threshold=args.threshold,
+        applicability_domain=args.applicability_domain,
+        embedding_dimensions=args.embedding_dimensions,
+        calibration_confidence=args.calibration_confidence,
+        similarity_radius=args.similarity_radius,
+        similarity_bits=args.similarity_bits,
     )
     task_names = (
         [name.strip() for name in args.task_names]
@@ -1185,6 +1191,21 @@ def add_chemeleon_predict_parser(model_subparsers) -> None:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--applicability-domain",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Calculate checkpoint-contained calibration and domain diagnostics.",
+    )
+    parser.add_argument(
+        "--embedding-dimensions",
+        type=int,
+        default=None,
+        help="Number of stored PCA embedding dimensions to use (default: all).",
+    )
+    parser.add_argument("--calibration-confidence", type=float, default=0.90)
+    parser.add_argument("--similarity-radius", type=int, default=2)
+    parser.add_argument("--similarity-bits", type=int, default=2048)
     parser.add_argument("--output", type=str, required=True)
     parser.set_defaults(func=predict_chemeleon)
 

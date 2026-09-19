@@ -20,6 +20,32 @@ class CheMeleonCliTest(unittest.TestCase):
         self.assertEqual(args.model, "chemeleon")
         self.assertEqual(args.func.__name__, "train_chemeleon")
 
+    def test_applicability_controls_belong_to_prediction(self):
+        args = build_parser().parse_args(
+            [
+                "predict",
+                "chemeleon",
+                "--smiles",
+                "CCO",
+                "--model-checkpoint",
+                "best.ckpt",
+                "--embedding-dimensions",
+                "64",
+                "--calibration-confidence",
+                "0.95",
+                "--similarity-radius",
+                "3",
+                "--similarity-bits",
+                "1024",
+                "--output",
+                "predictions.csv",
+            ]
+        )
+        self.assertEqual(args.embedding_dimensions, 64)
+        self.assertEqual(args.calibration_confidence, 0.95)
+        self.assertEqual(args.similarity_radius, 3)
+        self.assertEqual(args.similarity_bits, 1024)
+
 
 class CheMeleonConfigTest(unittest.TestCase):
     def test_minimal_config_uses_expected_defaults(self):

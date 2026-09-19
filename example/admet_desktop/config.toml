@@ -1,0 +1,22 @@
+[checkpoints]
+# Paths may be absolute or relative to this config file. The desktop also
+# expands ~ and environment variables such as ${HOME}.
+multitask = "checkpoints/Clint_multitask_chemeleon_best.ckpt"
+mlm = "checkpoints/MLM_singletask_chemeleon_best.ckpt"
+
+[inference]
+device = "auto"
+batch_size = 64
+num_workers = 0
+applicability_domain = true
+embedding_dimensions = 128
+calibration_confidence = 0.90
+similarity_radius = 2
+similarity_bits = 2048
+
+[quality_control]
+# Heuristic review thresholds. Tune these using held-out validation behavior.
+min_tanimoto_similarity = 0.35
+max_embedding_distance = 0.35
+max_log_interval_width = 1.0
+ood_score_threshold = 0.95

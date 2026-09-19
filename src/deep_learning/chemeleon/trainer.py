@@ -27,6 +27,23 @@ from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from rdkit import Chem
 
+from src.deep_learning.chemeleon.applicability import (
+    APPLICABILITY_VERSION,
+    DEFAULT_CALIBRATION_CONFIDENCE,
+    DEFAULT_LOCAL_MAX_SAMPLES,
+    DEFAULT_LOCAL_MIN_SAMPLES,
+    DEFAULT_LOCAL_PROFILE_RADIUS,
+    DEFAULT_OOD_CONFIDENCE,
+    DEFAULT_SIMILARITY_BITS,
+    DEFAULT_SIMILARITY_RADIUS,
+    MAX_EMBEDDING_DIMENSIONS,
+    applicability_diagnostics,
+    extract_model_embeddings,
+    fit_embedding_projection,
+    fit_validation_calibration,
+    fit_ood_calibration,
+    packed_morgan_fingerprints,
+)
 from src.deep_learning.chemeleon.pretrained import (
     CHEMELEON_WEIGHTS_SHA256,
     CHEMELEON_WEIGHTS_URL,
@@ -199,6 +216,18 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
 
 def _resolved_path(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def _complete_batch_size(dataset_size: int, requested_batch_size: int) -> int:
+    """Choose a ChemProp batch size that cannot trigger its drop-last guard."""
+    if dataset_size < 1:
+        raise ValueError("Cannot build a dataloader for an empty dataset.")
+    batch_size = min(int(requested_batch_size), int(dataset_size))
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1.")
+    while batch_size > 1 and dataset_size % batch_size == 1:
+        batch_size -= 1
+    return batch_size
 
 
 def _target_columns(config: DatasetConfig) -> list[str]:
@@ -401,7 +430,7 @@ def _evaluate(
     task: str,
     predictions: np.ndarray,
     targets: np.ndarray,
-    target_names: list[str],
+    target_names: list[str] | None = None,
 ) -> dict[str, float]:
     predictions = np.asarray(predictions, dtype=np.float32)
     targets = np.asarray(targets, dtype=np.float32)
@@ -409,6 +438,8 @@ def _evaluate(
         predictions = predictions.reshape(-1, 1)
     if targets.ndim == 1:
         targets = targets.reshape(-1, 1)
+    if target_names is None:
+        target_names = [f"task_{index}" for index in range(predictions.shape[1])]
     if predictions.shape != targets.shape:
         raise ValueError(
             f"Prediction and target shapes differ: {predictions.shape} and {targets.shape}."
@@ -472,6 +503,12 @@ def _predict_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
 
+    return _predict_checkpoint_predictions(model, dataloader)
+
+
+def _predict_checkpoint_predictions(model: models.MPNN, dataloader) -> np.ndarray:
+    """Predict using the weights currently loaded into ``model``."""
+
     try:
         device = next(model.parameters()).device
     except StopIteration:
@@ -516,6 +553,182 @@ def _embed_run_config(checkpoint_path: str | Path, resolved: dict[str, Any]) -> 
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     checkpoint["chemflow_config"] = resolved
     torch.save(checkpoint, path)
+
+
+def _embed_applicability_payload(
+    checkpoint_path: str | Path,
+    payload: dict[str, Any],
+) -> None:
+    path = Path(checkpoint_path)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    checkpoint["chemflow_applicability"] = payload
+    torch.save(checkpoint, path)
+
+
+def _reference_partition(
+    records: list[dict],
+    embeddings: np.ndarray,
+    target_names: list[str],
+    *,
+    predictions: np.ndarray | None = None,
+) -> dict[str, Any]:
+    if len(records) != len(embeddings):
+        raise RuntimeError(
+            "Reference embedding count does not match the corresponding dataset."
+        )
+    partition: dict[str, Any] = {
+        "original_index": [item["original_index"] for item in records],
+        "smiles": [item["smiles"] for item in records],
+        "target_names": list(target_names),
+        "targets": torch.as_tensor(
+            np.asarray([item["targets"] for item in records], dtype=np.float32)
+        ),
+        "embeddings": torch.as_tensor(embeddings),
+    }
+    if predictions is not None:
+        partition["predictions"] = torch.as_tensor(
+            np.asarray(predictions, dtype=np.float32)
+        )
+    return partition
+
+
+def _build_applicability_payload(
+    *,
+    model: models.MPNN,
+    train_loader,
+    val_loader,
+    train_records: list[dict],
+    val_records: list[dict],
+    target_names: list[str],
+    task: str,
+    seed: int,
+) -> dict[str, Any]:
+    train_embeddings = extract_model_embeddings(model, train_loader)
+    val_embeddings = extract_model_embeddings(model, val_loader)
+    val_predictions = _predict_checkpoint_predictions(model, val_loader)
+    projection, train_projected, val_projected = fit_embedding_projection(
+        train_embeddings,
+        val_embeddings,
+        dimensions=MAX_EMBEDDING_DIMENSIONS,
+        seed=int(seed),
+    )
+    val_targets = np.asarray(
+        [item["targets"] for item in val_records], dtype=np.float32
+    )
+    calibration = fit_validation_calibration(
+        task,
+        val_targets,
+        val_predictions,
+        target_names,
+        confidence=DEFAULT_CALIBRATION_CONFIDENCE,
+    )
+    payload = {
+        "version": APPLICABILITY_VERSION,
+        "embedding_space": "fine_tuned_mean_mpn_pca",
+        "projection": projection,
+        "similarity": {
+            "method": "morgan_tanimoto",
+            "radius": DEFAULT_SIMILARITY_RADIUS,
+            "bits": DEFAULT_SIMILARITY_BITS,
+        },
+        "training": _reference_partition(
+            train_records, train_projected, target_names
+        ),
+        "validation": _reference_partition(
+            val_records,
+            val_projected,
+            target_names,
+            predictions=val_predictions,
+        ),
+        "calibration": calibration,
+    }
+    payload["training"]["fingerprints"] = torch.from_numpy(
+        packed_morgan_fingerprints(
+            payload["training"]["smiles"],
+            radius=DEFAULT_SIMILARITY_RADIUS,
+            bits=DEFAULT_SIMILARITY_BITS,
+        )
+    )
+    payload["training_by_task"] = {}
+    target_matrix = np.asarray(
+        [item["targets"] for item in train_records], dtype=np.float32
+    )
+    for task_index, target_name in enumerate(target_names):
+        selected = np.flatnonzero(np.isfinite(target_matrix[:, task_index]))
+        task_records = [
+            {
+                **train_records[int(index)],
+                "targets": np.asarray(
+                    [train_records[int(index)]["targets"][task_index]],
+                    dtype=np.float32,
+                ),
+            }
+            for index in selected
+        ]
+        task_partition = _reference_partition(
+            task_records,
+            train_projected[selected],
+            [target_name],
+        )
+        task_partition["fingerprints"] = torch.from_numpy(
+            packed_morgan_fingerprints(
+                task_partition["smiles"],
+                radius=DEFAULT_SIMILARITY_RADIUS,
+                bits=DEFAULT_SIMILARITY_BITS,
+            )
+        )
+        payload["training_by_task"][target_name] = task_partition
+    payload["ood_calibration"] = {}
+    payload["validation_by_task"] = {}
+    payload["local_calibration"] = {
+        "method": "comparable_validation_residuals",
+        "min_samples": DEFAULT_LOCAL_MIN_SAMPLES,
+        "max_samples": DEFAULT_LOCAL_MAX_SAMPLES,
+        "profile_radius": DEFAULT_LOCAL_PROFILE_RADIUS,
+    }
+    validation_matrix = np.asarray(
+        [item["targets"] for item in val_records], dtype=np.float32
+    )
+    for task_index, target_name in enumerate(target_names):
+        selected = np.flatnonzero(np.isfinite(validation_matrix[:, task_index]))
+        task_validation_records = [
+            {
+                **val_records[int(index)],
+                "targets": np.asarray(
+                    [val_records[int(index)]["targets"][task_index]],
+                    dtype=np.float32,
+                ),
+            }
+            for index in selected
+        ]
+        validation_partition = _reference_partition(
+            task_validation_records,
+            val_projected[selected],
+            [target_name],
+            predictions=val_predictions[selected, task_index : task_index + 1],
+        )
+        validation_partition["fingerprints"] = torch.from_numpy(
+            packed_morgan_fingerprints(
+                validation_partition["smiles"],
+                radius=DEFAULT_SIMILARITY_RADIUS,
+                bits=DEFAULT_SIMILARITY_BITS,
+            )
+        )
+        payload["validation_by_task"][target_name] = validation_partition
+        validation_smiles = [val_records[int(index)]["smiles"] for index in selected]
+        diagnostics = applicability_diagnostics(
+            validation_smiles,
+            val_embeddings[selected],
+            list(range(len(selected))),
+            payload,
+            reference_task=target_name,
+        )
+        payload["ood_calibration"][target_name] = fit_ood_calibration(
+            diagnostics["train_max_tanimoto"],
+            diagnostics["train_embedding_cosine_distance"],
+            confidence=DEFAULT_OOD_CONFIDENCE,
+        )
+    return payload
 
 
 def _save_task_metrics_csv(
@@ -708,16 +921,22 @@ class CheMeleonTrainer:
             ),
             seed=int(self.config.base.seed),
         )
+        train_reference_loader = data.build_dataloader(
+            train_dataset,
+            batch_size=_complete_batch_size(len(train_dataset), batch_size),
+            num_workers=workers,
+            shuffle=False,
+        )
         val_loader = data.build_dataloader(
             val_dataset,
-            batch_size=batch_size,
+            batch_size=_complete_batch_size(len(val_dataset), batch_size),
             num_workers=workers,
             shuffle=False,
         )
         test_loader = (
             data.build_dataloader(
                 test_dataset,
-                batch_size=batch_size,
+                batch_size=_complete_batch_size(len(test_dataset), batch_size),
                 num_workers=workers,
                 shuffle=False,
             )
@@ -732,6 +951,7 @@ class CheMeleonTrainer:
             mode="min",
             save_top_k=1,
             save_last=True,
+            save_weights_only=True,
             auto_insert_metric_name=False,
         )
         callbacks: list[Callback] = [checkpoint_callback]
@@ -836,6 +1056,22 @@ class CheMeleonTrainer:
 
         _embed_run_config(best_path, resolved)
         _embed_run_config(checkpoint_callback.last_model_path, resolved)
+
+        best_checkpoint = torch.load(
+            best_path, map_location="cpu", weights_only=False
+        )
+        model.load_state_dict(best_checkpoint["state_dict"], strict=True)
+        applicability = _build_applicability_payload(
+            model=model,
+            train_loader=train_reference_loader,
+            val_loader=val_loader,
+            train_records=train_records,
+            val_records=val_records,
+            target_names=target_columns,
+            task=self.config.base.task,
+            seed=int(self.config.base.seed),
+        )
+        _embed_applicability_payload(best_path, applicability)
 
         run_summary = {
             "best_checkpoint": best_path,

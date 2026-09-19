@@ -54,6 +54,13 @@ error, R², Pearson correlation, and Spearman correlation. For classification,
 it reports loss, accuracy, balanced accuracy, precision, recall, F1, MCC,
 ROC-AUC, and PR-AUC.
 
+CheMeleon's `best.ckpt` also contains an applicability-domain package by
+default: training and validation SMILES/targets, compact PCA-projected
+fine-tuned embeddings, validation predictions, and calibration inputs.
+Packaging happens after gradient-based training and requires no training
+configuration. Optimizer state is not stored, so these files do not support
+optimizer-level training resume.
+
 ## Prediction
 
 Task names are read from the checkpoint automatically:
@@ -76,9 +83,31 @@ chemflow predict chemeleon \
 ```
 
 Use `--task-names name1 name2 ...` to override output names. The number of
-names must equal the checkpoint's number of tasks. Regression produces one
-column per task. Classification produces `prob_<task>` and `class_<task>`
-columns; change the default decision threshold with `--threshold`.
+names must equal the checkpoint's number of tasks. Regression produces raw and
+validation-calibrated values plus a validation-residual interval. Classification
+produces raw and isotonic-calibrated probabilities and classes; change the
+decision threshold with `--threshold`.
+
+Checkpoints with applicability data also report `train_max_tanimoto` and
+`train_embedding_cosine_distance`, together with the nearest training SMILES
+for each measure. High Tanimoto similarity and low embedding distance indicate
+that a query is closer to the training domain, but do not guarantee accuracy.
+
+Applicability and calibration behavior is configured during inference:
+
+```bash
+chemflow predict chemeleon \
+  --input ./dataset/molecules.csv \
+  --model-checkpoint ./path/to/best.ckpt \
+  --embedding-dimensions 128 \
+  --calibration-confidence 0.90 \
+  --similarity-radius 2 \
+  --similarity-bits 2048 \
+  --output ./predictions.csv
+```
+
+Use `--no-applicability-domain` to return model predictions without calculating
+calibration, similarity, or embedding-distance columns.
 
 CSV, Parquet, SMI, SMILES, and text inputs are supported. Invalid molecules
 remain in the output with missing prediction values.
