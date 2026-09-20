@@ -170,11 +170,16 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
         "scaffold_balanced",
         "kennard_stone",
         "kmeans",
+        "predefined",
     }
     if dataset.split_type not in allowed_splits:
         raise ValueError(
             f"Unsupported split_type {dataset.split_type!r}; "
             f"expected one of {sorted(allowed_splits)}."
+        )
+    if dataset.split_type == "predefined" and not dataset.split_column:
+        raise ValueError(
+            "split_type='predefined' requires DatasetConfig.split_column."
         )
 
     if not 0.0 < float(dataset.val_fraction) < 1.0:
