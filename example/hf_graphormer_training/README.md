@@ -137,6 +137,12 @@ The final `best_model/` also contains:
   fingerprint and embedding OOD thresholds;
 - `calibration.json`: a human-readable copy of the residual and OOD calibration.
 
+Local regression calibration uses the nearest labeled validation compounds
+that pass both Morgan-Tanimoto and fine-tuned embedding-cosine thresholds. It
+uses up to 100 neighbors and requires at least 20; otherwise inference must
+fall back to the global validation residual calibration and flag weak local
+support.
+
 The test split is not used to construct the applicability domain or calibrate
 predictions. On a resumed run, these artifacts are rebuilt from the selected
 best model and the unchanged training/validation split.

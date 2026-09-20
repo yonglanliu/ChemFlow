@@ -115,6 +115,7 @@ def get_model_config(
     cfg["estimator"] = model_cfg["estimator"]
     if hyperparameter_tuning:
         cfg["param_grid"] = model_cfg.get("param_grid", {})
+        cfg["model_params"] = model_cfg.get("model_params", {})
     else:
         cfg["model_params"] = model_cfg.get("model_params", {})
 
@@ -178,7 +179,9 @@ def get_model(
     if task_type not in ["classification", "regression"]:
         raise ValueError("task_type must be 'classification' or 'regression'.")
 
-    params = {} if tune_hyperparameter else dict(model_params or {})
+    # Fixed estimator settings such as an SVM kernel-cache size are useful
+    # during tuning too. Searched values remain in ``param_grid``.
+    params = dict(model_params or {})
 
     def add_seed(params):
         params = dict(params)

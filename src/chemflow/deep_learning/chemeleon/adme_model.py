@@ -69,6 +69,7 @@ class ADMEModel(nn.Module):
         calibration_confidence: float = 0.90,
         similarity_radius: int = 2,
         similarity_bits: int = 2048,
+        mc_dropout_samples: int = 0,
     ) -> None:
         super().__init__()
         if multitask_checkpoint is None and mlm_single_checkpoint is None:
@@ -83,6 +84,7 @@ class ADMEModel(nn.Module):
                 calibration_confidence=calibration_confidence,
                 similarity_radius=similarity_radius,
                 similarity_bits=similarity_bits,
+                mc_dropout_samples=mc_dropout_samples,
             )
             if multitask_checkpoint is not None
             else None
@@ -96,6 +98,7 @@ class ADMEModel(nn.Module):
                 calibration_confidence=calibration_confidence,
                 similarity_radius=similarity_radius,
                 similarity_bits=similarity_bits,
+                mc_dropout_samples=mc_dropout_samples,
             )
             if mlm_single_checkpoint is not None
             else None
@@ -285,6 +288,12 @@ class ADMEModel(nn.Module):
             output[RAW_OUTPUT_COLUMNS[species]] = _inverse_log10(
                 log_predictions[species]
             )
+            task_name = task_names[species]
+            values = predictor_values[species]
+            if task_name is not None and f"mc_std_{task_name}" in values:
+                output[f"Log_{species}_CLint_mc_std"] = np.asarray(
+                    values[f"mc_std_{task_name}"], dtype=np.float64
+                )
             if species in calibrated_predictions:
                 calibrated = calibrated_predictions[species]
                 output[f"Log_{species}_CLint_calibrated"] = calibrated

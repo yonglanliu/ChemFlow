@@ -77,6 +77,16 @@ models:
 
   # - model_name: SVM_RBF
   #   estimator: SVR
+  #   # Exact RBF SVR scales poorly on large molecular datasets. Override the
+  #   # global 50-candidate/5-fold search for this model only (8 x 3 = 24 fits).
+  #   n_iter: 8
+  #   cv: 3
+  #   model_params:
+  #     cache_size: 1024  # MB per concurrently fitted SVR process
+  #   param_grid:
+  #     C: [0.1, 1.0, 10.0]
+  #     gamma: [scale, 0.001, 0.01]
+  #     epsilon: [0.05, 0.1, 0.2]
 
   - model_name: LightGBM
     estimator: LGBMRegressor

@@ -33,6 +33,17 @@ PCQM4Mv1 checkpoint for single-task and masked multitask regression. It
 supports target scaling, weighted multitask loss, checkpoint resume, DDP,
 per-task metrics, and applicability-domain calibration.
 
+### ChemBERTa
+
+ChemFlow can fine-tune `DeepChem/ChemBERTa-77M-MLM` directly from canonical
+SMILES for regression, binary classification, homogeneous multitask, or mixed
+multitask property prediction. Missing labels are masked and regression target
+scaling is fitted only on the training split. It supports the same operational
+workflow as HF Graphormer: DDP, checkpoint resume, per-task metrics, weighted
+losses, external or predefined test splits, applicability-only packaging,
+validation calibration, local neighbor uncertainty, OOD diagnostics, and
+MC-dropout inference.
+
 ### Split-aware dataset loading
 
 The model dataset loaders support molecule-aware global splits, predefined
@@ -112,6 +123,7 @@ This produces bootstrap confidence intervals and distribution plots for each tas
 ### Molecular AI
 
 - Hugging Face Graphormer
+- ChemBERTa
 - LSTM
 - GPT-style generation
 - single-task and multitask learning
@@ -341,6 +353,14 @@ included examples use:
 ~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt
 ```
 
+ChemBERTa accepts a Hugging Face model ID or a local downloaded model directory
+through `ModelConfig.model_name`. Install its optional dependency with
+`pip install -e '.[chemberta]'`; use `local_files_only = true` on offline HPC
+compute nodes. The included DeepChem checkpoint uses
+`ModelConfig.architecture = "roberta"`. If an institutional proxy causes
+`CERTIFICATE_VERIFY_FAILED`, configure `REQUESTS_CA_BUNDLE` with the trusted
+institution CA or install `pip-system-certs`; do not disable TLS verification.
+
 ### Hardware notes
 
 - NVIDIA multi-GPU Graphormer training is launched with `torchrun`; CheMeleon
@@ -382,6 +402,15 @@ HF Graphormer and CheMeleon support single-task, homogeneous multitask, and
 mixed regression/binary-classification training. Set `BaseConfig.task = "mixed"`
 and provide `DatasetConfig.task_types` in target-column order; see
 [the HF Graphormer tutorial](example/hf_graphormer_training/README.md).
+
+### Train ChemBERTa
+
+```bash
+pip install -e '.[chemberta]'
+chemflow train chemberta example/chemberta_training/physchem_conf.toml
+```
+
+See [the ChemBERTa tutorial](example/chemberta_training/README.md).
 
 ### Fine-tune the pretrained CheMeleon model
 
@@ -483,7 +512,7 @@ chemflow uncertainty bootstrap \
 | Category | Models |
 |-----------|--------|
 | Graph | Hugging Face Graphormer, CheMeleon |
-| Sequence | LSTM, GPT |
+| Sequence | ChemBERTa, LSTM, GPT |
 | Fine-tuning | LoRA |
 | Learning | single-task and multitask learning |
 

@@ -317,6 +317,11 @@ def simplify_adme_results(
         uncertainty = f"{property_name}_uncertainty_log_width"
         if uncertainty in frame:
             simplified[f"{property_name}_uncertainty_log"] = frame[uncertainty]
+        mc_standard_deviation = f"Log_{property_name}_CLint_mc_std"
+        if mc_standard_deviation in frame:
+            simplified[f"{property_name}_MC_std_log"] = frame[
+                mc_standard_deviation
+            ]
 
     prefixes = list(properties)
     for prefix in prefixes:
@@ -417,6 +422,7 @@ class _PredictionWorker(QObject):
                     calibration_confidence=float(self.model_key[5]),
                     similarity_radius=int(self.model_key[6]),
                     similarity_bits=int(self.model_key[7]),
+                    mc_dropout_samples=int(self.model_key[8]),
                 )
             predictions = self.model.predict_frame(
                 self.smiles,
@@ -444,6 +450,7 @@ class ADMEDeploymentPage(QWidget):
         self.max_embedding_distance = 0.35
         self.max_log_interval_width = 1.0
         self.ood_score_threshold = 0.95
+        self.mc_dropout_samples = 0
 
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -566,6 +573,7 @@ class ADMEDeploymentPage(QWidget):
             self.calibration_confidence.setValue(config.calibration_confidence)
             self.similarity_radius.setValue(config.similarity_radius)
             self.similarity_bits.setCurrentText(str(config.similarity_bits))
+            self.mc_dropout_samples = config.mc_dropout_samples
             self.min_tanimoto_similarity = config.min_tanimoto_similarity
             self.max_embedding_distance = config.max_embedding_distance
             self.max_log_interval_width = config.max_log_interval_width
@@ -751,6 +759,7 @@ class ADMEDeploymentPage(QWidget):
                 self.calibration_confidence.value(),
                 self.similarity_radius.value(),
                 int(self.similarity_bits.currentText()),
+                self.mc_dropout_samples,
             )
             cached_model = self._model if model_key == self._model_key else None
         except Exception as error:

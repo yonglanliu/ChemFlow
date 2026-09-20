@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from chemflow.deep_learning.chemeleon.applicability import (
     applicability_diagnostics,
     apply_calibration,
     apply_local_calibration,
+    apply_mc_dropout_intervals,
 )
 from chemflow.deep_learning.task_weighting import resolve_task_types
 
@@ -73,6 +75,7 @@ class CheMeleonPredictor:
         calibration_confidence: float = DEFAULT_CALIBRATION_CONFIDENCE,
         similarity_radius: int = DEFAULT_SIMILARITY_RADIUS,
         similarity_bits: int = DEFAULT_SIMILARITY_BITS,
+        mc_dropout_samples: int = 0,
     ) -> None:
         self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
         if not self.checkpoint_path.is_file():
@@ -89,6 +92,10 @@ class CheMeleonPredictor:
             raise ValueError("similarity_radius must be at least 1.")
         if int(similarity_bits) < 64:
             raise ValueError("similarity_bits must be at least 64.")
+        if int(mc_dropout_samples) not in (0, 1) and int(mc_dropout_samples) < 2:
+            raise ValueError("mc_dropout_samples must be 0 or at least 2.")
+        if int(mc_dropout_samples) == 1:
+            raise ValueError("mc_dropout_samples=1 cannot estimate uncertainty.")
 
         self.device = _select_device(device)
         self.threshold = float(threshold)
@@ -96,6 +103,7 @@ class CheMeleonPredictor:
         self.calibration_confidence = float(calibration_confidence)
         self.similarity_radius = int(similarity_radius)
         self.similarity_bits = int(similarity_bits)
+        self.mc_dropout_samples = int(mc_dropout_samples)
         checkpoint = torch.load(
             self.checkpoint_path, map_location="cpu", weights_only=False
         )
@@ -131,6 +139,31 @@ class CheMeleonPredictor:
         )
         self.model.to(self.device)
         self.model.eval()
+        self.dropout_modules = [
+            module
+            for module in self.model.modules()
+            if isinstance(
+                module,
+                (
+                    torch.nn.Dropout,
+                    torch.nn.Dropout1d,
+                    torch.nn.Dropout2d,
+                    torch.nn.Dropout3d,
+                    torch.nn.AlphaDropout,
+                ),
+            )
+        ]
+        if self.mc_dropout_samples and not any(
+            float(getattr(module, "p", 0.0)) > 0.0
+            for module in self.dropout_modules
+        ):
+            warnings.warn(
+                "MC dropout was requested, but this checkpoint contains no "
+                "dropout layer with p > 0. MC dropout has been disabled.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.mc_dropout_samples = 0
         self.featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
         self.invalid_indices: list[int] = []
 
@@ -166,6 +199,8 @@ class CheMeleonPredictor:
             (len(smiles_list), len(names)), np.nan, dtype=np.float32
         )
         valid_embeddings = np.empty((0, 0), dtype=np.float32)
+        valid_mc_mean: np.ndarray | None = None
+        valid_mc_std: np.ndarray | None = None
         if datapoints:
             dataset = data.MoleculeDataset(datapoints, self.featurizer)
             loader = data.build_dataloader(
@@ -176,6 +211,8 @@ class CheMeleonPredictor:
             )
             batches: list[torch.Tensor] = []
             embedding_batches: list[torch.Tensor] = []
+            mc_batches: list[torch.Tensor] = []
+            mc_std_batches: list[torch.Tensor] = []
             with torch.inference_mode():
                 for batch_index, batch in enumerate(loader):
                     batch = self.model.transfer_batch_to_device(
@@ -191,8 +228,27 @@ class CheMeleonPredictor:
                             bmg, atom_descriptors, extra_descriptors
                         ).detach().float().cpu()
                     )
+                    if self.mc_dropout_samples:
+                        for module in self.dropout_modules:
+                            module.train()
+                        stochastic = []
+                        for _ in range(self.mc_dropout_samples):
+                            stochastic_value = self.model.predict_step(
+                                batch, batch_index
+                            ).detach().float().cpu()
+                            if stochastic_value.ndim == 1:
+                                stochastic_value = stochastic_value.reshape(-1, 1)
+                            stochastic.append(stochastic_value)
+                        self.model.eval()
+                        stacked = torch.stack(stochastic, dim=0)
+                        mc_batches.append(stacked.mean(dim=0))
+                        mc_std_batches.append(stacked.std(dim=0, unbiased=True))
             valid_predictions = torch.cat(batches, dim=0).numpy()
             valid_embeddings = torch.cat(embedding_batches, dim=0).numpy()
+            if mc_batches:
+                valid_mc_mean = torch.cat(mc_batches, dim=0).numpy()
+                valid_mc_std = torch.cat(mc_std_batches, dim=0).numpy()
+                valid_predictions = valid_mc_mean
             if valid_predictions.shape != (len(valid_indices), len(names)):
                 raise RuntimeError(
                     "Unexpected CheMeleon prediction shape: "
@@ -203,6 +259,13 @@ class CheMeleonPredictor:
         output: dict[str, np.ndarray] = {}
         for task_index, name in enumerate(names):
             values = predictions[:, task_index]
+            if valid_mc_mean is not None and valid_mc_std is not None:
+                mc_mean = np.full(len(smiles_list), np.nan, dtype=np.float32)
+                mc_std = np.full(len(smiles_list), np.nan, dtype=np.float32)
+                mc_mean[np.asarray(valid_indices)] = valid_mc_mean[:, task_index]
+                mc_std[np.asarray(valid_indices)] = valid_mc_std[:, task_index]
+                output[f"mc_mean_{name}"] = mc_mean
+                output[f"mc_std_{name}"] = mc_std
             if self.task_types[task_index] == "regression":
                 output[name] = values
             else:
@@ -269,6 +332,11 @@ class CheMeleonPredictor:
             apply_local_calibration(
                 output,
                 [self.target_names[index] for index in regression_indices],
+                [names[index] for index in regression_indices],
+                self.calibration_confidence,
+            )
+            apply_mc_dropout_intervals(
+                output,
                 [names[index] for index in regression_indices],
                 self.calibration_confidence,
             )

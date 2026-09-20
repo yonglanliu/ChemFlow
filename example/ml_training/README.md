@@ -560,6 +560,32 @@ models:
       min_samples_leaf: [1, 2, 4]
 ```
 
+Model entries may also override the global `n_iter` and `cv`. This is useful
+for exact RBF SVMs, whose time and memory requirements grow much faster with
+the number of training compounds than tree models:
+
+```yaml
+models:
+  - model_name: SVM_RBF
+    estimator: SVR
+    n_iter: 8
+    cv: 3
+    model_params:
+      cache_size: 1024  # MB for each concurrently fitted SVR process
+    param_grid:
+      C: [0.1, 1.0, 10.0]
+      gamma: [scale, 0.001, 0.01]
+      epsilon: [0.05, 0.1, 0.2]
+```
+
+This example performs 24 fits instead of 250 while leaving the global search
+settings unchanged for other models. `cache_size` can reduce repeated kernel
+recomputation, but it is allocated per concurrent fit, so keep
+`cache_size * n_jobs` within the Slurm memory request. For roughly 10,000 or
+more compounds, prefer LightGBM/XGBoost or a linear/approximate-kernel model
+unless RBF SVM is essential; reducing CV does not change the unfavorable
+scaling of exact SVR.
+
 `refit_metric` must also appear in `scoring_metrics`. Error metrics such as
 RMSE and MAE are negated internally during cross-validation so that larger
 scores remain better; the reported evaluation files contain the interpretable
@@ -647,7 +673,16 @@ python example/ml_training/compare_representations.py \
 ```
 
 The script aligns prediction files by molecule name, SMILES, and test-row index,
-then uses the same resampled molecules for every representation. It writes a
-metric CSV and six-panel comparison figure for HLM, MLM, and RLM, plus one
-combined metrics CSV. Change `--model` to another output folder such as
-`random_forest`, `xgboost`, or `svm_rbf` to compare that model instead.
+then uses the same resampled molecules for every representation. All tasks and
+metrics are placed in one grouped error-bar figure, saved as both PNG and PDF.
+It also creates a multi-task pairwise significance heatmap; select the heatmap
+metric with `--pairwise-metric` (default: `RMSE`). Green means the row
+representation is better, pink means the column representation is better, and
+white means the Holm-adjusted difference is not significant. Training outputs
+are read from `{task}_ml/<representation>/<model>/`. It
+also writes paired comparisons for every representation pair and metric. A
+positive `Improvement_A_over_B` always favors representation A: error metrics
+are sign-reversed because lower MAE/RMSE is better. The paired table includes
+the 95% bootstrap interval, probability that A is better, two-sided bootstrap
+p-value, and Holm-adjusted p-value. Change `--model` to another output folder
+such as `random_forest`, `xgboost`, or `svm_rbf` to compare that model instead.

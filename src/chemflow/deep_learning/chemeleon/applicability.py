@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from statistics import NormalDist
 from typing import Any, Sequence
 
 import numpy as np
@@ -13,7 +14,7 @@ from sklearn.decomposition import PCA
 from sklearn.isotonic import IsotonicRegression
 
 
-APPLICABILITY_VERSION = 5
+APPLICABILITY_VERSION = 6
 MAX_EMBEDDING_DIMENSIONS = 128
 DEFAULT_CALIBRATION_CONFIDENCE = 0.90
 DEFAULT_OOD_CONFIDENCE = 0.95
@@ -22,6 +23,8 @@ DEFAULT_SIMILARITY_BITS = 2048
 DEFAULT_LOCAL_MIN_SAMPLES = 20
 DEFAULT_LOCAL_MAX_SAMPLES = 100
 DEFAULT_LOCAL_PROFILE_RADIUS = 1.0
+DEFAULT_LOCAL_MIN_FP_SIMILARITY = 0.30
+DEFAULT_LOCAL_MIN_EMBEDDING_SIMILARITY = 0.50
 _BYTE_BIT_COUNTS = np.unpackbits(
     np.arange(256, dtype=np.uint8).reshape(-1, 1), axis=1
 ).sum(axis=1)
@@ -451,12 +454,14 @@ def applicability_diagnostics(
     similarities = np.full(size, np.nan, dtype=np.float32)
     similarity_neighbors = np.full(size, "", dtype=object)
     similarity_neighbor_indices = np.full(size, None, dtype=object)
+    query_packed_by_index: dict[int, np.ndarray] = {}
     for output_index, value in zip(valid_indices, valid_smiles):
         query_fingerprint = generator.GetFingerprint(Chem.MolFromSmiles(value))
+        query_packed = np.frombuffer(
+            DataStructs.BitVectToBinaryText(query_fingerprint), dtype=np.uint8
+        )
+        query_packed_by_index[int(output_index)] = query_packed
         if reference_packed is not None:
-            query_packed = np.frombuffer(
-                DataStructs.BitVectToBinaryText(query_fingerprint), dtype=np.uint8
-            )
             score, nearest = _nearest_packed_tanimoto(
                 query_packed, reference_packed
             )
@@ -529,16 +534,18 @@ def applicability_diagnostics(
         if reference_task is not None and isinstance(validation_by_task, dict)
         else None
     )
-    if (
-        isinstance(validation, dict)
-        and validation.get("smiles")
-        and isinstance(ood_calibration, dict)
-    ):
+    if isinstance(validation, dict) and validation.get("smiles"):
         settings = payload.get("local_calibration", {})
         min_samples = int(settings.get("min_samples", DEFAULT_LOCAL_MIN_SAMPLES))
         max_samples = int(settings.get("max_samples", DEFAULT_LOCAL_MAX_SAMPLES))
-        profile_radius = float(
-            settings.get("profile_radius", DEFAULT_LOCAL_PROFILE_RADIUS)
+        min_fp_similarity = float(
+            settings.get("min_fp_similarity", DEFAULT_LOCAL_MIN_FP_SIMILARITY)
+        )
+        min_embedding_similarity = float(
+            settings.get(
+                "min_embedding_similarity",
+                DEFAULT_LOCAL_MIN_EMBEDDING_SIMILARITY,
+            )
         )
         validation_targets = np.asarray(validation["targets"], dtype=np.float32).reshape(
             len(validation["smiles"]), -1
@@ -550,44 +557,52 @@ def applicability_diagnostics(
         local_bias = np.full(size, np.nan, dtype=np.float32)
         local_radius = np.full(size, np.nan, dtype=np.float32)
         local_used = np.zeros(size, dtype=bool)
+        validation_max_fp = np.full(size, np.nan, dtype=np.float32)
+        validation_max_embedding = np.full(size, np.nan, dtype=np.float32)
         confidence = float(
             payload.get("calibration", {}).get(
                 "confidence", DEFAULT_CALIBRATION_CONFIDENCE
             )
         )
-        calibration_fp_similarity = 1.0 - np.asarray(
-            ood_calibration.get("fp_novelty", []), dtype=np.float32
+        stored_validation_fingerprints = validation.get("fingerprints")
+        validation_fingerprints = (
+            np.asarray(stored_validation_fingerprints, dtype=np.uint8)
+            if (
+                stored_validation_fingerprints is not None
+                and int(payload.get("similarity", {}).get("radius", radius)) == radius
+                and int(payload.get("similarity", {}).get("bits", bits)) == bits
+            )
+            else packed_morgan_fingerprints(
+                validation["smiles"], radius=radius, bits=bits
+            )
         )
-        calibration_embedding_similarity = 1.0 - np.asarray(
-            ood_calibration.get("embedding_distance", []), dtype=np.float32
-        )
-        fp_scale = max(float(np.nanstd(calibration_fp_similarity)), 0.05)
-        embedding_scale = max(
-            float(np.nanstd(calibration_embedding_similarity)), 0.05
-        )
-        for result_index in valid_indices:
-            profile_distance = np.sqrt(
-                (
-                    (calibration_fp_similarity - similarities[result_index])
-                    / fp_scale
-                )
-                ** 2
-                + (
-                    (
-                        calibration_embedding_similarity
-                        - (1.0 - distances[result_index])
-                    )
-                    / embedding_scale
-                )
-                ** 2
+        validation_embeddings = np.asarray(
+            validation.get("embeddings"), dtype=np.float32
+        )[:, :dimensions]
+        for valid_position, result_index in enumerate(valid_indices):
+            fp_similarities = _packed_tanimoto_scores(
+                query_packed_by_index[int(result_index)], validation_fingerprints
+            )
+            embedding_similarities = _cosine_similarities(
+                projected[valid_position],
+                validation_embeddings,
+            )
+            validation_max_fp[result_index] = float(np.max(fp_similarities))
+            validation_max_embedding[result_index] = float(
+                np.max(embedding_similarities)
             )
             comparable_indices = np.flatnonzero(
-                (profile_distance <= profile_radius)
+                (fp_similarities >= min_fp_similarity)
+                & (embedding_similarities >= min_embedding_similarity)
                 & np.isfinite(validation_targets)
                 & np.isfinite(validation_predictions)
             )
             if comparable_indices.size > max_samples:
-                order = np.argsort(profile_distance[comparable_indices])[:max_samples]
+                combined_distance = (
+                    (1.0 - fp_similarities[comparable_indices])
+                    + (1.0 - embedding_similarities[comparable_indices]) / 2.0
+                )
+                order = np.argsort(combined_distance)[:max_samples]
                 comparable_indices = comparable_indices[order]
             count = int(comparable_indices.size)
             local_count[result_index] = count
@@ -608,6 +623,8 @@ def applicability_diagnostics(
         output["local_calibration_used"] = local_used
         output["local_calibration_bias"] = local_bias
         output["local_uncertainty_radius"] = local_radius
+        output["validation_max_tanimoto"] = validation_max_fp
+        output["validation_max_embedding_similarity"] = validation_max_embedding
     return output
 
 
@@ -645,3 +662,43 @@ def apply_local_calibration(
         upper[used] = calibrated[used] + radius[used]
         output[lower_key] = lower
         output[upper_key] = upper
+
+
+def apply_mc_dropout_intervals(
+    output: dict[str, np.ndarray],
+    output_names: Sequence[str],
+    confidence: float,
+) -> None:
+    """Combine MC-dropout spread with validation-calibrated intervals.
+
+    Validation residual intervals remain the coverage anchor.  The interval is
+    widened only when the Gaussian MC-dropout radius is larger, avoiding a
+    falsely narrow interval for a query with unusually unstable forward passes.
+    """
+    confidence = float(confidence)
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("calibration_confidence must be between 0 and 1.")
+    coverage_label = int(round(confidence * 100))
+    z_value = float(NormalDist().inv_cdf(0.5 + confidence / 2.0))
+    for output_name in output_names:
+        std_key = f"mc_std_{output_name}"
+        lower_key = f"{output_name}_lower_{coverage_label}"
+        upper_key = f"{output_name}_upper_{coverage_label}"
+        if std_key not in output or lower_key not in output or upper_key not in output:
+            continue
+        standard_deviation = np.asarray(output[std_key], dtype=np.float32)
+        lower = np.asarray(output[lower_key], dtype=np.float32).copy()
+        upper = np.asarray(output[upper_key], dtype=np.float32).copy()
+        center = np.asarray(
+            output.get(f"calibrated_{output_name}", output[output_name]),
+            dtype=np.float32,
+        )
+        residual_radius = np.maximum(center - lower, upper - center)
+        mc_radius = z_value * standard_deviation
+        combined_radius = np.fmax(residual_radius, mc_radius)
+        finite = np.isfinite(center) & np.isfinite(combined_radius)
+        lower[finite] = center[finite] - combined_radius[finite]
+        upper[finite] = center[finite] + combined_radius[finite]
+        output[lower_key] = lower
+        output[upper_key] = upper
+        output[f"{output_name}_mc_radius_{coverage_label}"] = mc_radius

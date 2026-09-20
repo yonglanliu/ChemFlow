@@ -9,6 +9,7 @@ from chemflow.deep_learning.chemeleon.applicability import (
     applicability_diagnostics,
     apply_calibration,
     apply_local_calibration,
+    apply_mc_dropout_intervals,
     fit_validation_calibration,
     fit_ood_calibration,
     packed_morgan_fingerprints,
@@ -16,6 +17,19 @@ from chemflow.deep_learning.chemeleon.applicability import (
 
 
 class CheMeleonApplicabilityTest(unittest.TestCase):
+    def test_mc_dropout_widens_a_narrower_calibrated_interval(self):
+        output = {
+            "clearance": np.asarray([1.0, 2.0], dtype=np.float32),
+            "calibrated_clearance": np.asarray([1.0, 2.0], dtype=np.float32),
+            "clearance_lower_90": np.asarray([0.9, 1.0], dtype=np.float32),
+            "clearance_upper_90": np.asarray([1.1, 3.0], dtype=np.float32),
+            "mc_std_clearance": np.asarray([0.5, 0.1], dtype=np.float32),
+        }
+        apply_mc_dropout_intervals(output, ["clearance"], 0.90)
+        self.assertLess(output["clearance_lower_90"][0], 0.2)
+        self.assertAlmostEqual(output["clearance_lower_90"][1], 1.0)
+        self.assertAlmostEqual(output["clearance_upper_90"][1], 3.0)
+
     def test_local_calibration_overrides_global_values_only_when_supported(self):
         output = {
             "clearance": np.asarray([1.0, 2.0], dtype=np.float32),
@@ -101,6 +115,49 @@ class CheMeleonApplicabilityTest(unittest.TestCase):
         self.assertTrue(
             np.isnan(diagnostics["train_embedding_cosine_distance"][1])
         )
+
+    def test_local_calibration_uses_nearest_validation_compound(self):
+        smiles = ["CCO", "c1ccccc1"]
+        fingerprints = torch.from_numpy(
+            packed_morgan_fingerprints(smiles, radius=2, bits=256)
+        )
+        payload = {
+            "projection": {"mean": torch.zeros(2), "components": torch.eye(2)},
+            "similarity": {"radius": 2, "bits": 256},
+            "calibration": {"confidence": 0.9},
+            "training_by_task": {
+                "sol": {
+                    "smiles": smiles,
+                    "embeddings": torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+                    "fingerprints": fingerprints,
+                }
+            },
+            "validation_by_task": {
+                "sol": {
+                    "smiles": smiles,
+                    "embeddings": torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+                    "fingerprints": fingerprints,
+                    "targets": torch.tensor([[2.0], [8.0]]),
+                    "predictions": torch.tensor([[1.0], [4.0]]),
+                }
+            },
+            "local_calibration": {
+                "min_samples": 1,
+                "max_samples": 1,
+                "min_fp_similarity": 0.3,
+                "min_embedding_similarity": 0.5,
+            },
+        }
+        diagnostics = applicability_diagnostics(
+            ["CCO"],
+            embeddings=np.asarray([[1.0, 0.0]], dtype=np.float32),
+            valid_indices=[0],
+            payload=payload,
+            reference_task="sol",
+        )
+        self.assertTrue(diagnostics["local_calibration_used"][0])
+        self.assertAlmostEqual(diagnostics["local_calibration_bias"][0], 1.0)
+        self.assertAlmostEqual(diagnostics["validation_max_tanimoto"][0], 1.0)
 
 
 if __name__ == "__main__":

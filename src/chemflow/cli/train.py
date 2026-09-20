@@ -70,6 +70,16 @@ def train_chemeleon(args):
     trainer.train()
 
 
+def train_chemberta(args):
+    """Fine-tune ChemBERTa for molecular-property prediction."""
+    from chemflow.deep_learning.chemberta.trainer import ChemBERTaTrainer
+
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    ChemBERTaTrainer(config_path).train()
+
+
 def add_train_parser(subparsers):
     train_parser = subparsers.add_parser(
         "train",
@@ -115,6 +125,13 @@ def add_train_parser(subparsers):
     )
     hf_graphormer_parser.add_argument("config", type=str)
     hf_graphormer_parser.set_defaults(func=train_hf_graphormer)
+
+    chemberta_parser = model_subparsers.add_parser(
+        "chemberta",
+        help="Fine-tune ChemBERTa for regression, classification, or mixed multitask prediction",
+    )
+    chemberta_parser.add_argument("config", type=str)
+    chemberta_parser.set_defaults(func=train_chemberta)
 
     # ========================================================
     # CheMeleon

@@ -31,6 +31,9 @@ hf-graphormer = [
     # Graphormer's legacy .pyx source uses constructs removed by Cython 3.
     "Cython>=0.29.36,<3",
 ]
+chemberta = [
+    "transformers>=4.46,<5",
+]
 
 # ===========================
 # CLI Entry Point

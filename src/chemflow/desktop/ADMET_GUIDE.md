@@ -67,6 +67,15 @@ The result table reports both values after conversion to `mL/min/kg`:
 
 ## Prediction uncertainty
 
+When `mc_dropout_samples` is at least 2, ChemFlow keeps dropout layers
+stochastic for repeated inference passes while all other layers remain in
+evaluation mode. Their mean and standard deviation estimate epistemic model
+instability. This requires a checkpoint trained with nonzero dropout.
+
+The held-out validation residual interval remains the coverage anchor. If the
+Gaussian MC-dropout radius is larger, ChemFlow widens that interval rather
+than reporting an overconfident bound.
+
 After bias correction, ChemFlow calculates absolute validation residuals:
 
 ```text
@@ -99,17 +108,15 @@ guaranteed.
 ## Local calibration and local uncertainty
 
 For each new molecule and endpoint, ChemFlow searches the endpoint's validation
-set for compounds with a comparable training-space profile. The profile has two
-coordinates:
+set directly for nearest neighbors in two molecular spaces:
 
 ```text
-FP similarity to the endpoint's training set
-embedding similarity to the endpoint's training set
+Morgan-fingerprint Tanimoto similarity
+fine-tuned embedding cosine similarity
 ```
 
-The two coordinates are standardized using the validation distribution.
-Validation compounds within a standardized profile radius of 1.0 are local;
-the closest 100 are retained.
+Neighbors must pass both similarity thresholds, and the closest 100 are
+retained using their combined fingerprint and embedding distance.
 
 If at least 20 comparable compounds are available, their signed prediction
 errors determine a local median bias and their locally bias-corrected residuals
@@ -216,6 +223,7 @@ calibration_confidence = 0.90
 embedding_dimensions = 128
 similarity_radius = 2
 similarity_bits = 2048
+mc_dropout_samples = 30  # use 0 for checkpoints trained without dropout
 
 [quality_control]
 ood_score_threshold = 0.95

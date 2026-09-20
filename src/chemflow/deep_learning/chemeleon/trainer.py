@@ -47,8 +47,9 @@ from chemflow.deep_learning.chemeleon.applicability import (
     APPLICABILITY_VERSION,
     DEFAULT_CALIBRATION_CONFIDENCE,
     DEFAULT_LOCAL_MAX_SAMPLES,
+    DEFAULT_LOCAL_MIN_EMBEDDING_SIMILARITY,
+    DEFAULT_LOCAL_MIN_FP_SIMILARITY,
     DEFAULT_LOCAL_MIN_SAMPLES,
-    DEFAULT_LOCAL_PROFILE_RADIUS,
     DEFAULT_OOD_CONFIDENCE,
     DEFAULT_SIMILARITY_BITS,
     DEFAULT_SIMILARITY_RADIUS,
@@ -982,10 +983,11 @@ def _build_applicability_payload(
     payload["ood_calibration"] = {}
     payload["validation_by_task"] = {}
     payload["local_calibration"] = {
-        "method": "comparable_validation_residuals",
+        "method": "fingerprint_embedding_nearest_validation_residuals",
         "min_samples": DEFAULT_LOCAL_MIN_SAMPLES,
         "max_samples": DEFAULT_LOCAL_MAX_SAMPLES,
-        "profile_radius": DEFAULT_LOCAL_PROFILE_RADIUS,
+        "min_fp_similarity": DEFAULT_LOCAL_MIN_FP_SIMILARITY,
+        "min_embedding_similarity": DEFAULT_LOCAL_MIN_EMBEDDING_SIMILARITY,
     }
     validation_matrix = np.asarray(
         [item["targets"] for item in val_records], dtype=np.float32

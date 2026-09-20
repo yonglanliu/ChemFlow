@@ -1,0 +1,44 @@
+[BaseConfig]
+workdir = "./example/chemberta_training/physchem_multitask"
+task = "regression" # regression, classification, or mixed
+
+[DatasetConfig]
+dataset_path = "./dataset/curated/physchem_multitask.csv"
+smiles_column = "SMILES"
+target_column = ["LogD_pH7_4", "Log_KSOL_ExpansionRX_mol_L"]
+name_column = "Molecule Name"
+split_type = "scaffold_balanced"
+val_fraction = 0.1
+test_fraction = 0.1
+# For an existing split, set split_column = "split".
+# For task = "mixed", add task_types in target_column order.
+# task_types = ["regression", "classification"]
+
+[ModelConfig]
+model_name = "DeepChem/ChemBERTa-77M-MLM"
+# This checkpoint uses RoBERTa. Use "auto" only for another checkpoint with
+# complete Hugging Face AutoConfig metadata.
+architecture = "roberta"
+local_files_only = false
+max_length = 512
+dropout = 0.1
+freeze_encoder = false
+
+[TrainingConfig]
+seed = 42
+device = "auto"
+devices = 1
+strategy = "auto" # use "ddp" with torchrun on multiple CUDA GPUs
+batch_size = 32
+num_workers = 0
+num_epochs = 20
+progress_bar = true
+resume = false
+applicability_only = false
+classification_threshold = 0.5
+encoder_learning_rate = 2e-5
+head_learning_rate = 1e-4
+weight_decay = 0.01
+gradient_clip = 1.0
+early_stopping_patience = 5
+task_loss_weighting = "sqrt_inverse_frequency"

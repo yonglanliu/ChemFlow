@@ -381,7 +381,19 @@ def tune_hyperparameters(
         task_type=task_type,
         seed=search_seed,
         tune_hyperparameter=True,
+        model_params=config.get("model_params"),
     )
+
+    if model_name == "SVM_RBF" and len(X_train) >= 10_000:
+        logger.warning(
+            "RBF SVM tuning is expensive for %d training rows. "
+            "This run requests %d candidates and %d folds (%d fits). "
+            "Consider model-specific n_iter/cv overrides or a tree model.",
+            len(X_train),
+            requested_n_iter,
+            cv_folds,
+            requested_n_iter * cv_folds,
+        )
 
     # --------------------------------------------------------
     # Optional preprocessing pipeline

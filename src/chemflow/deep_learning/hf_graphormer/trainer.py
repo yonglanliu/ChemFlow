@@ -48,6 +48,10 @@ from chemflow.deep_learning.task_weighting import (
 from chemflow.deep_learning.chemeleon.applicability import (
     APPLICABILITY_VERSION,
     DEFAULT_CALIBRATION_CONFIDENCE,
+    DEFAULT_LOCAL_MAX_SAMPLES,
+    DEFAULT_LOCAL_MIN_EMBEDDING_SIMILARITY,
+    DEFAULT_LOCAL_MIN_FP_SIMILARITY,
+    DEFAULT_LOCAL_MIN_SAMPLES,
     DEFAULT_OOD_CONFIDENCE,
     DEFAULT_SIMILARITY_BITS,
     DEFAULT_SIMILARITY_RADIUS,
@@ -812,6 +816,15 @@ class HuggingFaceGraphormerTrainer:
             "training_by_task": {},
             "validation_by_task": {},
             "ood_calibration": {},
+            "local_calibration": {
+                "method": "fingerprint_embedding_nearest_validation_residuals",
+                "min_samples": DEFAULT_LOCAL_MIN_SAMPLES,
+                "max_samples": DEFAULT_LOCAL_MAX_SAMPLES,
+                "min_fp_similarity": DEFAULT_LOCAL_MIN_FP_SIMILARITY,
+                "min_embedding_similarity": (
+                    DEFAULT_LOCAL_MIN_EMBEDDING_SIMILARITY
+                ),
+            },
         }
         payload["training"]["fingerprints"] = torch.from_numpy(
             packed_morgan_fingerprints(payload["training"]["smiles"])

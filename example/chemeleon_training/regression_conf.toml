@@ -53,7 +53,9 @@ verbose = true
 # The official Zenodo weights are downloaded and SHA-256 validated when
 # pretrained_path is omitted.
 freeze_epochs = 0
-dropout = 0.0
+# Nonzero dropout regularizes fine-tuning and enables MC-dropout uncertainty
+# during inference. Existing zero-dropout checkpoints must be retrained.
+dropout = 0.1
 ffn_hidden_dim = 256
 ffn_num_layers = 1
 warmup_epochs = 2

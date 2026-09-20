@@ -13,6 +13,8 @@ embedding_dimensions = 128
 calibration_confidence = 0.90
 similarity_radius = 2
 similarity_bits = 2048
+# Requires a checkpoint trained with nonzero dropout. Use 20-50 to enable.
+mc_dropout_samples = 0
 
 [quality_control]
 # Heuristic review thresholds. Tune these using held-out validation behavior.

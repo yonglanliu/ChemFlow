@@ -256,6 +256,15 @@ class RDKit2DFeaturizationTest(unittest.TestCase):
                     grid = get_default_param_grid(model_name, task_type)
                     self.assertTrue(set(grid).issubset(model.get_params()))
 
+    def test_svm_fixed_parameters_are_applied_during_tuning(self):
+        model = get_model(
+            "SVM_RBF",
+            "regression",
+            tune_hyperparameter=True,
+            model_params={"cache_size": 1024},
+        )
+        self.assertEqual(model.cache_size, 1024)
+
     def test_size_dependent_candidates_are_bounded_by_cv_fold(self):
         knn_grid = _filter_size_dependent_grid(
             {"n_neighbors": [3, 11, 31]},

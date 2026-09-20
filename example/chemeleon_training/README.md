@@ -129,6 +129,23 @@ chemflow predict chemeleon \
   --output ./prediction.csv
 ```
 
+Estimate inference-time epistemic uncertainty with Monte Carlo dropout:
+
+```bash
+chemflow predict chemeleon \
+  --input ./dataset/molecules.csv \
+  --structure-column SMILES \
+  --model-checkpoint ./path/to/best.ckpt \
+  --mc-dropout-samples 30 \
+  --output ./predictions.csv
+```
+
+This adds `mc_mean_<task>` and `mc_std_<task>` columns, and the MC mean is used
+as the raw prediction. For regression, the validation-calibrated interval is
+widened when the MC-dropout radius is larger. The checkpoint must have been
+trained with `dropout > 0`; 20-50 passes are typically practical and inference
+time grows approximately with the number of passes.
+
 Use `--task-names name1 name2 ...` to override output names. The number of
 names must equal the checkpoint's number of tasks. Regression produces raw and
 validation-calibrated values plus a validation-residual interval. Classification
@@ -150,6 +167,7 @@ chemflow predict chemeleon \
   --calibration-confidence 0.90 \
   --similarity-radius 2 \
   --similarity-bits 2048 \
+  --mc-dropout-samples 30 \
   --output ./predictions.csv
 ```
 

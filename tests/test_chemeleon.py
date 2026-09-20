@@ -45,6 +45,8 @@ class CheMeleonCliTest(unittest.TestCase):
                 "3",
                 "--similarity-bits",
                 "1024",
+                "--mc-dropout-samples",
+                "30",
                 "--output",
                 "predictions.csv",
             ]
@@ -53,6 +55,7 @@ class CheMeleonCliTest(unittest.TestCase):
         self.assertEqual(args.calibration_confidence, 0.95)
         self.assertEqual(args.similarity_radius, 3)
         self.assertEqual(args.similarity_bits, 1024)
+        self.assertEqual(args.mc_dropout_samples, 30)
 
 
 class CheMeleonConfigTest(unittest.TestCase):

@@ -23,6 +23,11 @@ interval (using up to the closest 100). When local support is insufficient, the
 desktop uses the global validation calibration and interval and adds an OOD
 warning.
 
+Set `inference.mc_dropout_samples` in the automatic deployment TOML to at
+least 2 (typically 20-50) to add MC-dropout epistemic uncertainty. This
+requires checkpoints trained with nonzero dropout and increases inference time
+approximately linearly with the number of stochastic passes.
+
 Molecules can be entered as SMILES, loaded from CSV, TSV, Parquet, SMI, TXT,
 or SDF files, or drawn with the embedded Ketcher editor. Results retain
 the input metadata and report both the model's log10 predictions and values in

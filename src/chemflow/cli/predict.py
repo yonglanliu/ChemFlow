@@ -551,6 +551,7 @@ def predict_chemeleon(args) -> None:
         calibration_confidence=args.calibration_confidence,
         similarity_radius=args.similarity_radius,
         similarity_bits=args.similarity_bits,
+        mc_dropout_samples=args.mc_dropout_samples,
     )
     task_names = (
         [name.strip() for name in args.task_names]
@@ -581,6 +582,26 @@ def predict_chemeleon(args) -> None:
     print(f"Invalid molecules: {len(predictor.invalid_indices):,}")
     print(f"Prediction columns: {prediction_frame.columns.tolist()}")
     print(f"Output: {output_path}")
+
+
+def predict_chemberta(args) -> None:
+    from chemflow.deep_learning.chemberta.predictor import ChemBERTaPredictor
+
+    input_frame = load_inference_input(
+        smiles=args.smiles, input_path=args.input,
+        structure_column=args.structure_column,
+    )
+    predictor = ChemBERTaPredictor(
+        args.model_directory, device=args.device, threshold=args.threshold,
+        mc_dropout_samples=args.mc_dropout_samples,
+    )
+    values = predictor.predict_smiles(
+        input_frame[args.structure_column].astype(str).tolist(),
+        batch_size=args.batch_size, max_length=args.max_length,
+    )
+    result = pd.concat([input_frame.reset_index(drop=True), pd.DataFrame(values)], axis=1)
+    output_path = save_prediction_frame(result, args.output)
+    print(f"ChemBERTa predictions saved to {output_path}")
 
 
 # ============================================================
@@ -745,8 +766,35 @@ def add_chemeleon_predict_parser(model_subparsers) -> None:
     parser.add_argument("--calibration-confidence", type=float, default=0.90)
     parser.add_argument("--similarity-radius", type=int, default=2)
     parser.add_argument("--similarity-bits", type=int, default=2048)
+    parser.add_argument(
+        "--mc-dropout-samples",
+        type=int,
+        default=0,
+        help=(
+            "Stochastic inference passes used to estimate epistemic uncertainty; "
+            "use 20-50 with a checkpoint trained with nonzero dropout (default: 0)."
+        ),
+    )
     parser.add_argument("--output", type=str, required=True)
     parser.set_defaults(func=predict_chemeleon)
+
+
+def add_chemberta_predict_parser(model_subparsers) -> None:
+    parser = model_subparsers.add_parser(
+        "chemberta", help="Run inference with a trained ChemFlow ChemBERTa model."
+    )
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--smiles", type=str, default=None)
+    input_group.add_argument("--input", type=str, default=None)
+    parser.add_argument("--structure-column", default="SMILES")
+    parser.add_argument("--model-directory", required=True)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--mc-dropout-samples", type=int, default=0)
+    parser.add_argument("--output", required=True)
+    parser.set_defaults(func=predict_chemberta)
 
 
 # ============================================================
@@ -800,3 +848,4 @@ def add_predict_parser(
     add_chemeleon_predict_parser(
         model_subparsers
     )
+    add_chemberta_predict_parser(model_subparsers)

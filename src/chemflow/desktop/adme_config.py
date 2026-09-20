@@ -23,6 +23,7 @@ class ADMEDeploymentConfig:
     calibration_confidence: float = 0.90
     similarity_radius: int = 2
     similarity_bits: int = 2048
+    mc_dropout_samples: int = 0
     min_tanimoto_similarity: float = 0.35
     max_embedding_distance: float = 0.35
     max_log_interval_width: float = 1.0
@@ -97,6 +98,7 @@ def load_adme_deployment_config(path: str | Path) -> ADMEDeploymentConfig:
         ),
         similarity_radius=int(inference.get("similarity_radius", 2)),
         similarity_bits=int(inference.get("similarity_bits", 2048)),
+        mc_dropout_samples=int(inference.get("mc_dropout_samples", 0)),
         min_tanimoto_similarity=float(
             quality.get("min_tanimoto_similarity", 0.35)
         ),
@@ -116,6 +118,8 @@ def load_adme_deployment_config(path: str | Path) -> ADMEDeploymentConfig:
         raise ValueError("calibration_confidence must be between 0.50 and 0.99.")
     if config.similarity_radius < 1 or config.similarity_bits < 64:
         raise ValueError("Invalid Morgan fingerprint settings.")
+    if config.mc_dropout_samples == 1 or config.mc_dropout_samples < 0:
+        raise ValueError("mc_dropout_samples must be 0 or at least 2.")
     if not 0.0 <= config.min_tanimoto_similarity <= 1.0:
         raise ValueError("min_tanimoto_similarity must be between 0 and 1.")
     if not 0.0 <= config.max_embedding_distance <= 2.0:
