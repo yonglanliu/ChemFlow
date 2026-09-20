@@ -31,6 +31,6 @@ ml_job_id="$(
 )"
 
 echo "Submitted CheMeleon array: $chemeleon_job_id (4 GPU jobs)"
-echo "Submitted ML array:        $ml_job_id (3 CPU jobs)"
+echo "Submitted ML array:        $ml_job_id (12 CPU jobs; at most 3 concurrent)"
 echo "Logs: $log_dir"
 echo "Monitor: squeue -j $chemeleon_job_id,$ml_job_id"

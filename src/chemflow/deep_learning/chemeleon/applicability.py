@@ -267,6 +267,32 @@ def fit_validation_calibration(
     return fitted
 
 
+def fit_multitask_validation_calibration(
+    task_types: Sequence[str],
+    targets: np.ndarray,
+    predictions: np.ndarray,
+    target_names: Sequence[str],
+    confidence: float,
+) -> dict[str, Any]:
+    """Fit each target with its own regression or classification calibrator."""
+    combined: dict[str, Any] = {
+        "task": "mixed" if len(set(task_types)) > 1 else str(task_types[0]),
+        "confidence": float(confidence),
+        "task_types": dict(zip(target_names, task_types)),
+        "tasks": {},
+    }
+    for index, (name, task_type) in enumerate(zip(target_names, task_types)):
+        fitted = fit_validation_calibration(
+            task_type,
+            np.asarray(targets)[:, index : index + 1],
+            np.asarray(predictions)[:, index : index + 1],
+            [name],
+            confidence,
+        )
+        combined["tasks"].update(fitted["tasks"])
+    return combined
+
+
 def apply_calibration(
     output: dict[str, np.ndarray],
     calibration: dict[str, Any] | None,

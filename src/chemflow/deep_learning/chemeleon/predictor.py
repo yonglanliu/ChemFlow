@@ -19,6 +19,7 @@ from chemflow.deep_learning.chemeleon.applicability import (
     apply_calibration,
     apply_local_calibration,
 )
+from chemflow.deep_learning.task_weighting import resolve_task_types
 
 
 def _select_device(requested: str | None = None) -> torch.device:
@@ -110,9 +111,6 @@ class CheMeleonPredictor:
         base_config = self.config.get("BaseConfig", {})
         dataset_config = self.config.get("DatasetConfig", {})
         self.task = str(base_config.get("task", "regression")).strip().lower()
-        if self.task not in {"regression", "classification"}:
-            raise ValueError(f"Unsupported CheMeleon task in checkpoint: {self.task!r}")
-
         raw_target_names = dataset_config.get("target_column", "prediction")
         self.target_names = (
             [raw_target_names]
@@ -121,6 +119,9 @@ class CheMeleonPredictor:
         )
         if not self.target_names:
             raise ValueError("The checkpoint configuration contains no target names.")
+        self.task_types = resolve_task_types(
+            self.task, self.target_names, dataset_config.get("task_types")
+        )
 
         # ChemProp's direct loader reconstructs all submodules without going
         # through Lightning's PyTorch 2.6+ weights-only checkpoint default.
@@ -202,7 +203,7 @@ class CheMeleonPredictor:
         output: dict[str, np.ndarray] = {}
         for task_index, name in enumerate(names):
             values = predictions[:, task_index]
-            if self.task == "regression":
+            if self.task_types[task_index] == "regression":
                 output[name] = values
             else:
                 output[f"prob_{name}"] = values
@@ -210,19 +211,23 @@ class CheMeleonPredictor:
                 finite = np.isfinite(values)
                 classes[finite] = (values[finite] >= self.threshold).astype(np.float32)
                 output[f"class_{name}"] = classes
-        apply_calibration(
-            output,
-            (
-                self.applicability.get("calibration")
-                if isinstance(self.applicability, dict)
-                else None
-            ),
-            self.target_names,
-            names,
-            self.task,
-            self.threshold,
-            self.calibration_confidence,
+        calibration = (
+            self.applicability.get("calibration")
+            if isinstance(self.applicability, dict)
+            else None
         )
+        for original_name, output_name, task_type in zip(
+            self.target_names, names, self.task_types
+        ):
+            apply_calibration(
+                output,
+                calibration,
+                [original_name],
+                [output_name],
+                task_type,
+                self.threshold,
+                self.calibration_confidence,
+            )
         task_partitions = (
             self.applicability.get("training_by_task", {})
             if isinstance(self.applicability, dict)
@@ -256,11 +261,15 @@ class CheMeleonPredictor:
                 similarity_radius=self.similarity_radius,
                 similarity_bits=self.similarity_bits,
             ))
-        if self.task == "regression":
+        regression_indices = [
+            index for index, value in enumerate(self.task_types)
+            if value == "regression"
+        ]
+        if regression_indices:
             apply_local_calibration(
                 output,
-                self.target_names,
-                names,
+                [self.target_names[index] for index in regression_indices],
+                [names[index] for index in regression_indices],
                 self.calibration_confidence,
             )
         return output

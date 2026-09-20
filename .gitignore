@@ -88,8 +88,9 @@ app/
 similarity_search_test/
 test/
 
-graphormer_multitask_training/
-graphormer_training/
+# Local Hugging Face Graphormer training runs (configs stay at directory root).
+example/hf_graphormer_training/*/
+
 dataset/
 # Keep the ExpansionRX downloader versioned while all dataset files remain ignored.
 !dataset/
@@ -103,6 +104,4 @@ dataset/ADMET/Biogen_ADME/*
 dataset/ADMET/ExpansionRX/*
 !dataset/ADMET/ExpansionRX/download_expansionrx.ipynb
 lstm_training/
-diffusion_training/
-graphormer_training_regression/
 train/gpt_train.sh

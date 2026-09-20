@@ -1,23 +1,17 @@
-# Multitask regression with the pretrained CheMeleon message-passing model.
+# Mixed regression and binary classification with one shared CheMeleon encoder.
 
 [BaseConfig]
-workdir = "./example/chemeleon_training/chemeleon_multitask_admet"
-task = "regression"
+workdir = "./example/chemeleon_training/chemeleon_mixed_multitask"
+task = "mixed"
 seed = 42
 
 [DatasetConfig]
-dataset_path = "./dataset/curated/Biogen_ExpansionRX_clearance_training.csv"
+# Replace this path and the target names with columns from your dataset.
+# Classification labels must be 0, 1, or empty.
+dataset_path = "./dataset/your_mixed_multitask_data.csv"
 smiles_column = "SMILES"
-target_column = [
-    "Log_HLM_CLint",
-    "Log_RLM_CLint",
-    "Log_MLM_CLint",
-]
-
-# This dataset already contains Train, Validation, and Test labels.
-# If the dataset already contains train, validation, and test labels, set the
-# split column name here.
-# split_column = "split"
+target_column = ["solubility", "active"]
+task_types = ["regression", "classification"]
 split_type = "scaffold_balanced"
 val_fraction = 0.1
 test_fraction = 0.1
@@ -39,9 +33,8 @@ early_stopping_patience = 10
 evaluate_test = true
 plot_training_history = true
 inspect_task_metrics = true
+class_balance = false
 task_loss_weighting = "sqrt_inverse_frequency"
-# Optional explicit override in target_column order:
-# task_loss_weights = [1.0, 1.0, 1.0]
 verbose = true
 
 [CheMeleonConfig]

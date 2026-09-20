@@ -632,3 +632,22 @@ test names. For regression, the remaining columns are `test_row`, `true_value`,
 probability column per class when the estimator supports `predict_proba`.
 
 Use `status.json` and `training.log` first when diagnosing a failed run.
+
+## 11. Compare molecular representations
+
+After the HPC representation array finishes, compare the four representations
+for one model with paired bootstrap confidence intervals:
+
+```bash
+python example/ml_training/compare_representations.py \
+  --root /data/liuy48/model_training/adme/clearance \
+  --model lightgbm \
+  --model-label LightGBM \
+  --n-bootstrap 2000
+```
+
+The script aligns prediction files by molecule name, SMILES, and test-row index,
+then uses the same resampled molecules for every representation. It writes a
+metric CSV and six-panel comparison figure for HLM, MLM, and RLM, plus one
+combined metrics CSV. Change `--model` to another output folder such as
+`random_forest`, `xgboost`, or `svm_rbf` to compare that model instead.

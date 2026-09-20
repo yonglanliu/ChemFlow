@@ -45,6 +45,8 @@ early_stopping = true
 early_stopping_patience = 10
 evaluate_test = true
 plot_training_history = true
+inspect_task_metrics = true
+task_loss_weighting = "uniform"
 verbose = true
 
 [CheMeleonConfig]

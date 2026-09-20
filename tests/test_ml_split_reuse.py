@@ -3,10 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+from rdkit import Chem
 
+from chemflow.machine_learning.data import DataSplitter
 from chemflow.machine_learning.train.train_runner import (
     load_or_create_split_features,
 )
@@ -73,6 +76,31 @@ class MLSplitReuseTest(unittest.TestCase):
                 exported["split"].tolist(),
                 ["train", "train", "train", "validation", "test", "test"],
             )
+
+    def test_scaffold_generation_strips_stereo_before_murcko(self):
+        splitter = DataSplitter(
+            {
+                "split_method": "scaffold",
+                "test_fraction": 0.2,
+                "valid_fraction": 0.1,
+            }
+        )
+
+        with patch(
+            "chemflow.machine_learning.data.data_split."
+            "MurckoScaffold.MurckoScaffoldSmiles",
+            return_value="C=C",
+        ) as murcko:
+            scaffold = splitter._get_scaffold("F/C=C/F")
+
+        self.assertEqual(scaffold, "C=C")
+        split_molecule = murcko.call_args.kwargs["mol"]
+        self.assertTrue(
+            all(
+                bond.GetStereo() == Chem.BondStereo.STEREONONE
+                for bond in split_molecule.GetBonds()
+            )
+        )
 
     def test_predefined_and_legacy_names_build_the_same_config(self):
         for method in ("predefined", "splitted"):

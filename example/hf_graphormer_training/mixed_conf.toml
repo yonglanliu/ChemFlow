@@ -1,0 +1,45 @@
+[BaseConfig]
+workdir = "./example/hf_graphormer_training/mixed_multitask"
+task = "mixed"
+
+[DatasetConfig]
+# Replace this path and the target names with columns from your dataset.
+# Classification labels must be 0, 1, or empty.
+dataset_path = "./dataset/your_mixed_multitask_data.csv"
+smiles_column = "SMILES"
+name_column = "Molecule Name"
+target_column = ["solubility", "active"]
+task_types = ["regression", "classification"]
+split_type = "scaffold_balanced"
+val_fraction = 0.1
+test_fraction = 0.1
+remove_hs = true
+reorder_atoms = false
+
+[ModelConfig]
+model_name = "clefourrier/graphormer-base-pcqm4mv1"
+checkpoint_path = "~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
+local_files_only = true
+max_nodes = 512
+multi_hop_max_dist = 5
+spatial_pos_max = 1024
+freeze_encoder = false
+
+[TrainingConfig]
+seed = 42
+device = "auto"
+devices = 1
+strategy = "auto"
+batch_size = 16
+num_workers = 0
+num_epochs = 30
+progress_bar = true
+resume = false
+applicability_only = false
+classification_threshold = 0.5
+task_loss_weighting = "sqrt_inverse_frequency"
+encoder_learning_rate = 1e-5
+head_learning_rate = 1e-4
+weight_decay = 0.01
+gradient_clip = 1.0
+early_stopping_patience = 8

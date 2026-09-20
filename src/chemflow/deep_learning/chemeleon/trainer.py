@@ -26,6 +26,22 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from rdkit import Chem
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    matthews_corrcoef,
+    mean_absolute_error,
+    mean_squared_error,
+    median_absolute_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.preprocessing import StandardScaler
 
 from chemflow.deep_learning.chemeleon.applicability import (
     APPLICABILITY_VERSION,
@@ -40,7 +56,7 @@ from chemflow.deep_learning.chemeleon.applicability import (
     applicability_diagnostics,
     extract_model_embeddings,
     fit_embedding_projection,
-    fit_validation_calibration,
+    fit_multitask_validation_calibration,
     fit_ood_calibration,
     packed_morgan_fingerprints,
 )
@@ -49,11 +65,15 @@ from chemflow.deep_learning.chemeleon.pretrained import (
     CHEMELEON_WEIGHTS_URL,
     ensure_pretrained_weights,
 )
-from chemflow.deep_learning.graphormer.evaluation.classification import (
-    ClassificationEvaluator,
+from chemflow.deep_learning.chemeleon.mixed_predictor import (
+    MixedTaskFFN,
+    MixedTaskMetric,
 )
-from chemflow.deep_learning.graphormer.evaluation.regression import RegressionEvaluator
 from chemflow.deep_learning.utils.train_utils import save_json, set_seed
+from chemflow.deep_learning.task_weighting import (
+    resolve_task_loss_weights,
+    resolve_task_types,
+)
 
 
 @dataclass
@@ -69,6 +89,7 @@ class DatasetConfig:
     test_dataset_path: str | None = None
     smiles_column: str = "SMILES"
     target_column: str | list[str] = "target"
+    task_types: list[str] | dict[str, str] | None = None
     split_column: str | None = None
     split_type: str = "random"
     val_fraction: float = 0.1
@@ -93,6 +114,9 @@ class TrainingConfig:
     class_balance: bool = False
     evaluate_test: bool = True
     plot_training_history: bool = True
+    inspect_task_metrics: bool = True
+    task_loss_weighting: str = "uniform"
+    task_loss_weights: list[float] | dict[str, float] | None = None
     verbose: bool = True
 
 
@@ -138,6 +162,114 @@ class FreezeMessagePassingCallback(Callback):
                 parameter.requires_grad = True
 
 
+class TrainingTaskMetricsCallback(Callback):
+    """Record per-task training and validation metrics after every epoch."""
+
+    def __init__(
+        self,
+        *,
+        train_loader,
+        val_loader,
+        train_records: list[dict],
+        val_records: list[dict],
+        target_names: list[str],
+        task: str,
+        task_types: list[str],
+        output_path: Path,
+    ) -> None:
+        super().__init__()
+        self.split_loaders = {
+            "train": train_loader,
+            "validation": val_loader,
+        }
+        self.split_targets = {
+            "train": np.asarray(
+                [item["targets"] for item in train_records], dtype=np.float32
+            ),
+            "validation": np.asarray(
+                [item["targets"] for item in val_records], dtype=np.float32
+            ),
+        }
+        self.target_names = list(target_names)
+        self.task = str(task)
+        self.task_types = list(task_types)
+        self.output_path = Path(output_path)
+        self.rows: list[dict[str, Any]] = []
+
+    def on_validation_epoch_end(self, trainer, pl_module) -> None:
+        if trainer.sanity_checking or not trainer.is_global_zero:
+            return
+        epoch = int(trainer.current_epoch) + 1
+        metric_names = (
+            ("loss", "mae", "rmse", "median_ae", "r2", "pearson", "spearman")
+            if self.task == "regression"
+            else (
+                "loss", "accuracy", "balanced_accuracy", "precision", "recall",
+                "f1", "mcc", "roc_auc", "pr_auc",
+            )
+        )
+        if self.task == "mixed":
+            metric_names = (
+                "loss", "mae", "rmse", "median_ae", "r2", "pearson", "spearman",
+                "accuracy", "balanced_accuracy", "precision", "recall", "f1", "mcc",
+                "roc_auc", "pr_auc",
+            )
+        logged: dict[str, float] = {}
+        # Replace an epoch if Lightning reruns it after resuming.
+        self.rows = [row for row in self.rows if int(row["epoch"]) != epoch]
+        for split_name, loader in self.split_loaders.items():
+            targets = self.split_targets[split_name]
+            predictions = _predict_checkpoint_predictions(pl_module, loader)
+            metrics = _evaluate(
+                self.task, predictions, targets, self.target_names, self.task_types
+            )
+            log_prefix = "train" if split_name == "train" else "val"
+            print(f"{split_name.title()} metrics by task — epoch {epoch}:")
+            for task_index, target_name in enumerate(self.target_names):
+                row: dict[str, Any] = {
+                    "epoch": epoch,
+                    "split": split_name,
+                    "task": target_name,
+                    "num_labeled": int(
+                        np.isfinite(targets[:, task_index]).sum()
+                    ),
+                }
+                for metric_name in metric_names:
+                    value = float(
+                        metrics.get(
+                            f"test_{target_name}_{metric_name}", float("nan")
+                        )
+                    )
+                    row[metric_name] = value
+                    logged[f"{log_prefix}_{target_name}_{metric_name}"] = value
+                self.rows.append(row)
+                shown = ", ".join(
+                    f"{name}={row[name]:.4f}"
+                    for name in metric_names
+                    if name != "loss" and math.isfinite(float(row[name]))
+                )
+                print(f"  {target_name} (n={row['num_labeled']}): {shown}")
+
+            overall: dict[str, Any] = {
+                "epoch": epoch,
+                "split": split_name,
+                "task": "overall_macro",
+                "num_labeled": int(np.isfinite(targets).sum()),
+            }
+            for metric_name in metric_names:
+                value = float(metrics.get(f"test_{metric_name}", float("nan")))
+                overall[metric_name] = value
+                logged[f"{log_prefix}_macro_{metric_name}"] = value
+            self.rows.append(overall)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(self.rows).sort_values(
+            ["epoch", "split", "task"]
+        ).to_csv(self.output_path, index=False)
+        if trainer.logger is not None:
+            logged["epoch"] = float(trainer.current_epoch)
+            trainer.logger.log_metrics(logged, step=trainer.global_step)
+
+
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
     value = config.get(name, {})
     if not isinstance(value, dict):
@@ -160,8 +292,7 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
     model = ModelConfig(**_section(raw, "CheMeleonConfig"))
 
     base.task = str(base.task).strip().lower()
-    if base.task not in {"regression", "classification"}:
-        raise ValueError("CheMeleon task must be 'regression' or 'classification'.")
+    resolve_task_types(base.task, _target_columns(dataset), dataset.task_types)
 
     dataset.split_type = str(dataset.split_type).strip().lower()
     allowed_splits = {
@@ -214,7 +345,7 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
             "Set transfer_encoder_only=true."
         )
     if (
-        base.task == "classification"
+        base.task in {"classification", "mixed"}
         and bool(training.class_balance)
         and len(_target_columns(dataset)) > 1
     ):
@@ -405,6 +536,7 @@ def _make_model(
     pretrained_path: Path,
     train_dataset: data.MoleculeDataset,
     val_dataset: data.MoleculeDataset,
+    task_loss_weights: np.ndarray | None = None,
 ) -> models.MPNN:
     checkpoint = torch.load(pretrained_path, map_location="cpu", weights_only=True)
     if not {"hyper_parameters", "state_dict"}.issubset(checkpoint):
@@ -421,6 +553,9 @@ def _make_model(
         )
 
     target_columns = _target_columns(config.dataset)
+    task_types = resolve_task_types(
+        config.base.task, target_columns, config.dataset.task_types
+    )
     n_tasks = len(target_columns)
     output_transform = None
     if config.base.task == "regression":
@@ -434,15 +569,17 @@ def _make_model(
             n_layers=int(config.model.ffn_num_layers),
             dropout=float(config.model.dropout),
             output_transform=output_transform,
+            task_weights=torch.as_tensor(task_loss_weights, dtype=torch.float32),
         )
         metrics = [nn.metrics.RMSE(), nn.metrics.MAE(), nn.metrics.R2Score()]
-    else:
+    elif config.base.task == "classification":
         predictor = nn.BinaryClassificationFFN(
             n_tasks=n_tasks,
             input_dim=message_passing.output_dim,
             hidden_dim=int(config.model.ffn_hidden_dim),
             n_layers=int(config.model.ffn_num_layers),
             dropout=float(config.model.dropout),
+            task_weights=torch.as_tensor(task_loss_weights, dtype=torch.float32),
         )
         metrics = [
             nn.metrics.BinaryAUROC(),
@@ -450,6 +587,26 @@ def _make_model(
             nn.metrics.BinaryAccuracy(),
             nn.metrics.BinaryF1Score(),
         ]
+    else:
+        scaler = StandardScaler().fit(train_dataset.Y)
+        for index, task_type in enumerate(task_types):
+            if task_type == "classification":
+                scaler.mean_[index] = 0.0
+                scaler.scale_[index] = 1.0
+                scaler.var_[index] = 1.0
+        train_dataset.normalize_targets(scaler)
+        val_dataset.normalize_targets(scaler)
+        output_transform = nn.UnscaleTransform.from_standard_scaler(scaler)
+        predictor = MixedTaskFFN(
+            task_types=task_types,
+            input_dim=message_passing.output_dim,
+            hidden_dim=int(config.model.ffn_hidden_dim),
+            n_layers=int(config.model.ffn_num_layers),
+            dropout=float(config.model.dropout),
+            output_transform=output_transform,
+            task_weights=torch.as_tensor(task_loss_weights, dtype=torch.float32),
+        )
+        metrics = [MixedTaskMetric(task_types)]
 
     return models.MPNN(
         message_passing=message_passing,
@@ -527,6 +684,7 @@ def _evaluate(
     predictions: np.ndarray,
     targets: np.ndarray,
     target_names: list[str] | None = None,
+    task_types: list[str] | None = None,
 ) -> dict[str, float]:
     predictions = np.asarray(predictions, dtype=np.float32)
     targets = np.asarray(targets, dtype=np.float32)
@@ -536,6 +694,7 @@ def _evaluate(
         targets = targets.reshape(-1, 1)
     if target_names is None:
         target_names = [f"task_{index}" for index in range(predictions.shape[1])]
+    task_types = task_types or [task] * len(target_names)
     if predictions.shape != targets.shape:
         raise ValueError(
             f"Prediction and target shapes differ: {predictions.shape} and {targets.shape}."
@@ -561,23 +720,66 @@ def _evaluate(
             targets[valid, task_index], dtype=torch.float32
         ).reshape(-1, 1)
 
-        if task == "regression":
+        if task_types[task_index] == "regression":
             loss = functional.mse_loss(prediction_tensor, target_tensor).item()
-            task_metrics = RegressionEvaluator().compute(
-                prediction_tensor,
-                target_tensor,
-                loss=loss,
-                prefix="test",
+            prediction_values = prediction_tensor.numpy().reshape(-1)
+            target_values = target_tensor.numpy().reshape(-1)
+            pearson = (
+                float(pearsonr(target_values, prediction_values).statistic)
+                if target_values.size > 1
+                and np.unique(target_values).size > 1
+                and np.unique(prediction_values).size > 1
+                else float("nan")
             )
+            spearman = (
+                float(spearmanr(target_values, prediction_values).statistic)
+                if target_values.size > 1
+                and np.unique(target_values).size > 1
+                and np.unique(prediction_values).size > 1
+                else float("nan")
+            )
+            task_metrics = {
+                "test_loss": float(loss),
+                "test_mae": float(mean_absolute_error(target_values, prediction_values)),
+                "test_rmse": float(mean_squared_error(target_values, prediction_values) ** 0.5),
+                "test_median_ae": float(median_absolute_error(target_values, prediction_values)),
+                "test_r2": (
+                    float(r2_score(target_values, prediction_values))
+                    if target_values.size > 1 else float("nan")
+                ),
+                "test_pearson": pearson,
+                "test_spearman": spearman,
+            }
         else:
             probabilities = prediction_tensor.clamp(1e-7, 1.0 - 1e-7)
             loss = functional.binary_cross_entropy(probabilities, target_tensor).item()
-            task_metrics = ClassificationEvaluator(loss_type="binary").compute(
-                torch.logit(probabilities),
-                target_tensor,
-                loss=loss,
-                prefix="test",
-            )
+            probability_values = probabilities.numpy().reshape(-1)
+            target_values = target_tensor.numpy().reshape(-1).astype(np.int64)
+            predicted_values = (probability_values >= 0.5).astype(np.int64)
+            has_both_classes = np.unique(target_values).size > 1
+            task_metrics = {
+                "test_loss": float(loss),
+                "test_accuracy": float(accuracy_score(target_values, predicted_values)),
+                "test_balanced_accuracy": float(
+                    balanced_accuracy_score(target_values, predicted_values)
+                ),
+                "test_precision": float(
+                    precision_score(target_values, predicted_values, zero_division=0)
+                ),
+                "test_recall": float(
+                    recall_score(target_values, predicted_values, zero_division=0)
+                ),
+                "test_f1": float(f1_score(target_values, predicted_values, zero_division=0)),
+                "test_mcc": float(matthews_corrcoef(target_values, predicted_values)),
+                "test_roc_auc": (
+                    float(roc_auc_score(target_values, probability_values))
+                    if has_both_classes else float("nan")
+                ),
+                "test_pr_auc": (
+                    float(average_precision_score(target_values, probability_values))
+                    if has_both_classes else float("nan")
+                ),
+            }
 
         for metric_name, value in task_metrics.items():
             suffix = metric_name.removeprefix("test_")
@@ -697,6 +899,7 @@ def _build_applicability_payload(
     val_records: list[dict],
     target_names: list[str],
     task: str,
+    task_types: list[str],
     seed: int,
 ) -> dict[str, Any]:
     train_embeddings = extract_model_embeddings(model, train_loader)
@@ -711,8 +914,8 @@ def _build_applicability_payload(
     val_targets = np.asarray(
         [item["targets"] for item in val_records], dtype=np.float32
     )
-    calibration = fit_validation_calibration(
-        task,
+    calibration = fit_multitask_validation_calibration(
+        task_types,
         val_targets,
         val_predictions,
         target_names,
@@ -720,6 +923,8 @@ def _build_applicability_payload(
     )
     payload = {
         "version": APPLICABILITY_VERSION,
+        "task": task,
+        "task_types": dict(zip(target_names, task_types)),
         "embedding_space": "fine_tuned_mean_mpn_pca",
         "projection": projection,
         "similarity": {
@@ -833,6 +1038,7 @@ def _save_task_metrics_csv(
     metrics: dict[str, float],
     target_names: list[str],
     targets: np.ndarray,
+    task_types: list[str] | None = None,
 ) -> None:
     metric_names = (
         ["loss", "mae", "rmse", "median_ae", "r2", "pearson", "spearman"]
@@ -849,6 +1055,12 @@ def _save_task_metrics_csv(
             "pr_auc",
         ]
     )
+    if task == "mixed":
+        metric_names = [
+            "loss", "mae", "rmse", "median_ae", "r2", "pearson", "spearman",
+            "accuracy", "balanced_accuracy", "precision", "recall", "f1", "mcc",
+            "roc_auc", "pr_auc",
+        ]
     targets = np.asarray(targets, dtype=np.float64)
     if targets.ndim == 1:
         targets = targets.reshape(-1, 1)
@@ -937,6 +1149,11 @@ class CheMeleonTrainer:
         frame = pd.read_csv(dataset_path)
         records, rejected = _valid_records(frame, self.config.dataset)
         target_columns = _target_columns(self.config.dataset)
+        task_types = resolve_task_types(
+            self.config.base.task,
+            target_columns,
+            self.config.dataset.task_types,
+        )
 
         train_records, val_records, test_records = _split_records(
             records,
@@ -968,13 +1185,28 @@ class CheMeleonTrainer:
 
         _validate_task_coverage(train_records, target_columns, "training")
         _validate_task_coverage(val_records, target_columns, "validation")
+        train_target_matrix = np.asarray(
+            [item["targets"] for item in train_records], dtype=np.float32
+        )
+        task_label_counts, task_loss_weights = resolve_task_loss_weights(
+            train_target_matrix,
+            target_columns,
+            strategy=self.config.training.task_loss_weighting,
+            configured=self.config.training.task_loss_weights,
+        )
+        print("CheMeleon task loss weighting:")
+        for target_name, count, weight in zip(
+            target_columns, task_label_counts, task_loss_weights
+        ):
+            print(f"  {target_name}: labels={int(count)}, weight={float(weight):.6f}")
 
-        if self.config.base.task == "classification":
+        if "classification" in task_types:
             labels = {
-                float(label)
+                float(item["targets"][index])
                 for item in (*records, *test_records)
-                for label in item["targets"]
-                if np.isfinite(label)
+                for index, task_type in enumerate(task_types)
+                if task_type == "classification"
+                and np.isfinite(item["targets"][index])
             }
             if not labels.issubset({0.0, 1.0}):
                 raise ValueError(
@@ -1002,6 +1234,7 @@ class CheMeleonTrainer:
             pretrained_path,
             train_dataset,
             val_dataset,
+            task_loss_weights=task_loss_weights,
         )
 
         batch_size = int(self.config.training.batch_size)
@@ -1051,6 +1284,19 @@ class CheMeleonTrainer:
             auto_insert_metric_name=False,
         )
         callbacks: list[Callback] = [checkpoint_callback]
+        if bool(self.config.training.inspect_task_metrics):
+            callbacks.append(
+                TrainingTaskMetricsCallback(
+                    train_loader=train_reference_loader,
+                    val_loader=val_loader,
+                    train_records=train_records,
+                    val_records=val_records,
+                    target_names=target_columns,
+                    task=self.config.base.task,
+                    task_types=task_types,
+                    output_path=self.workdir / "training_task_metrics.csv",
+                )
+            )
         if int(self.config.model.freeze_epochs) > 0:
             callbacks.append(
                 FreezeMessagePassingCallback(self.config.model.freeze_epochs)
@@ -1099,6 +1345,14 @@ class CheMeleonTrainer:
             "dataset_summary": {
                 "task_names": target_columns,
                 "num_tasks": len(target_columns),
+                "task_label_counts": {
+                    name: int(count)
+                    for name, count in zip(target_columns, task_label_counts)
+                },
+                "task_loss_weights": {
+                    name: float(weight)
+                    for name, weight in zip(target_columns, task_loss_weights)
+                },
                 "train_size": len(train_records),
                 "validation_size": len(val_records),
                 "test_size": len(test_records),
@@ -1170,6 +1424,7 @@ class CheMeleonTrainer:
             val_records=val_records,
             target_names=target_columns,
             task=self.config.base.task,
+            task_types=task_types,
             seed=int(self.config.base.seed),
         )
         _embed_applicability_payload(best_path, applicability)
@@ -1201,6 +1456,7 @@ class CheMeleonTrainer:
             predictions,
             targets,
             target_columns,
+            task_types,
         )
         save_json(
             {"checkpoint": best_path, **metrics},
@@ -1212,6 +1468,7 @@ class CheMeleonTrainer:
             metrics,
             target_columns,
             targets,
+            task_types,
         )
         prediction_data: dict[str, Any] = {
             "original_index": [item["original_index"] for item in test_records],
@@ -1220,7 +1477,7 @@ class CheMeleonTrainer:
         for task_index, target_name in enumerate(target_columns):
             prediction_data[f"true_{target_name}"] = targets[:, task_index]
             prediction_data[f"pred_{target_name}"] = predictions[:, task_index]
-            if self.config.base.task == "classification":
+            if task_types[task_index] == "classification":
                 prediction_data[f"class_{target_name}"] = (
                     predictions[:, task_index] >= 0.5
                 ).astype(np.int64)

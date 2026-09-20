@@ -6,6 +6,8 @@ channels:
 dependencies:
   - python=3.11
   - pip
+  # Hugging Face Graphormer's legacy preprocessing extension requires Cython <3.
+  - cython=0.29.37
 
   # Native and compiled dependencies are installed by Conda first.
   - lightgbm=4.7.0

@@ -1,5 +1,5 @@
 chemflow uncertainty bootstrap \
-    --input /Users/yonglanliu/Desktop/ChemFlow/graphormer_multitask_training/laplace_nll/test_predictions.csv \
+    --input ./test_predictions.csv \
     --task cyp3a4:target_0:pIC50_cyp3a4 \
     --task cyp2d6:target_1:pIC50_cyp2d6 \
     --task cyp2c9:target_2:pIC50_cyp2c9 \

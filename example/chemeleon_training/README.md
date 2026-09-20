@@ -1,7 +1,8 @@
 # CheMeleon training and prediction
 
-ChemFlow supports single-task and multitask regression or binary
-classification with the pretrained CheMeleon message-passing encoder.
+ChemFlow supports single-task, homogeneous multitask, and mixed
+regression/binary-classification learning with the pretrained CheMeleon
+message-passing encoder.
 
 Run commands from the repository root after activating the `chemflow`
 environment.
@@ -20,6 +21,30 @@ dataset_path = "./dataset/admet.csv"
 smiles_column = "SMILES"
 target_column = ["LogD", "LogS", "HLM"]
 split_column = "split"
+```
+
+For mixed regression and binary classification endpoints, use:
+
+```toml
+[BaseConfig]
+task = "mixed"
+
+[DatasetConfig]
+target_column = ["solubility", "active", "toxic"]
+task_types = ["regression", "classification", "classification"]
+```
+
+The ordering of `task_types` must match `target_column` (a name-to-type TOML
+table is also accepted). Regression outputs are scaled and trained with MSE;
+classification outputs use BCE-with-logits and sigmoid probabilities.
+Validation loss and early stopping combine standardized regression MSE with
+classification log loss.
+
+An editable template is provided at `mixed_conf.toml`. After replacing its
+dataset and target names, run:
+
+```bash
+chemflow train chemeleon example/chemeleon_training/mixed_conf.toml
 ```
 
 Missing labels are allowed in multitask data. A molecule is retained when at
@@ -57,6 +82,28 @@ ROC-AUC, and PR-AUC.
 CheMeleon's `best.ckpt` also contains an applicability-domain package by
 default: training and validation SMILES/targets, compact PCA-projected
 fine-tuned embeddings, validation predictions, and calibration inputs.
+
+With `inspect_task_metrics = true` (the default), every epoch evaluates and
+prints training and validation metrics separately for each endpoint.
+Regression reports MAE, RMSE, median absolute error, R², Pearson, and
+Spearman; classification reports accuracy, balanced accuracy, precision,
+recall, F1, MCC, ROC-AUC, and PR-AUC. The values are saved to
+`training_task_metrics.csv` with one row per epoch, split, and task plus an
+`overall_macro` row, and are also sent to the Lightning CSV logger. This extra
+full-dataset evaluation increases training time.
+
+For multitask datasets with unequal label counts, configure optimization loss
+weighting under `[CheMeleonTrainingConfig]`:
+
+```toml
+task_loss_weighting = "sqrt_inverse_frequency"
+```
+
+The supported policies are `uniform`, `sqrt_inverse_frequency` (recommended
+as the first imbalanced/noisy ADMET experiment), and `inverse_frequency`.
+Explicit weights may be supplied in `target_column` order with
+`task_loss_weights = [1.0, 2.0, 0.5]`. Weights are normalized to mean 1,
+printed at startup, and saved in `config.json`. Metrics remain unweighted.
 Packaging happens after gradient-based training and requires no training
 configuration. Optimizer state is not stored, so these files do not support
 optimizer-level training resume.

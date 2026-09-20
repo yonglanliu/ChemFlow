@@ -42,23 +42,17 @@ def train_gpt(args):
     trainer.train()
 
 
-def train_graphormer(args):
-    from chemflow.deep_learning.graphormer.trainer import GraphormerDDPTrainer
-    from chemflow.deep_learning.gpt.train_utils import set_seed
-
-    config_path = Path(args.config).expanduser().resolve()
-
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"Config file not found: {config_path}"
-        )
-
-    set_seed(args.seed)
-
-    trainer = GraphormerDDPTrainer(
-        config_path=config_path,
+def train_hf_graphormer(args):
+    """Train the Hugging Face Graphormer model."""
+    from chemflow.deep_learning.hf_graphormer.trainer import (
+        HuggingFaceGraphormerTrainer,
     )
 
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    trainer = HuggingFaceGraphormerTrainer(config_path)
     trainer.train()
 
 
@@ -115,25 +109,12 @@ def add_train_parser(subparsers):
     # Graphormer
     # ========================================================
 
-    graphormer_parser = model_subparsers.add_parser(
-        "graphormer",
-        help="Train Graphormer model",
+    hf_graphormer_parser = model_subparsers.add_parser(
+        "hf-graphormer",
+        help="Fine-tune Hugging Face Graphormer for regression or binary classification",
     )
-
-    graphormer_parser.add_argument(
-        "config",
-        type=str,
-    )
-
-    graphormer_parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-    )
-
-    graphormer_parser.set_defaults(
-        func=train_graphormer
-    )
+    hf_graphormer_parser.add_argument("config", type=str)
+    hf_graphormer_parser.set_defaults(func=train_hf_graphormer)
 
     # ========================================================
     # CheMeleon

@@ -26,31 +26,16 @@ ChemFlow is designed to support:
 
 ## Recent major updates
 
-### Multitask Graphormer with grouped adaptors
+### Hugging Face Graphormer
 
-ChemFlow now supports grouped multitask adaptor architectures, where related tasks share an adaptor while retaining task-specific output heads.
-
-Key features:
-
-- grouped task sharing via `task_groups`
-- configurable `num_adapters`
-- support for hard-sharing and soft-sharing multitask variants
-- task-to-adaptor mapping with explicit group assignments
-
-Example configuration:
-
-```toml
-[GraphormerConfig]
-sharing_type = "hard"
-num_adapters = 4
-task_groups = [[0, 1], [2, 3], [4, 5], [6, 7, 8]]
-```
-
-This enables task families such as assay groups to share a common adaptor while preserving independent outputs per task.
+ChemFlow uses the Hugging Face Graphormer implementation and the pretrained
+PCQM4Mv1 checkpoint for single-task and masked multitask regression. It
+supports target scaling, weighted multitask loss, checkpoint resume, DDP,
+per-task metrics, and applicability-domain calibration.
 
 ### Split-aware dataset loading
 
-The Graphormer dataset loader supports molecule-aware global splits, predefined
+The model dataset loaders support molecule-aware global splits, predefined
 split labels, and completely independent test files. Invalid molecules and the
 resolved assignments are written to `rejected_rows.csv` and `data_splits.csv`.
 
@@ -85,29 +70,8 @@ test_dataset_path = "./data/external_test.csv"
 test_fraction = 0.0
 ```
 
-Graphormer also downloads and caches the official Microsoft PCQM4M v1
-checkpoint when `GraphormerConfig.pretrained_path` is omitted. A custom URL,
-path, and SHA-256 checksum can be configured when needed.
-
-### Automatic task weighting
-
-Task weights can now be computed automatically from label availability.
-
-Supported methods:
-
-- `inverse`
-- `sqrt_inverse` or `sqr_inverse`
-- `customed`
-
-Example:
-
-```toml
-[GraphormerConfig]
-task_weight_method = "sqr_inverse"
-# task_weights = [0.09, 0.10, 0.10, 0.12, 0.11, 0.11, 0.15, 0.12, 0.10]
-```
-
-This is useful for multitask datasets with unequal data availability across tasks.
+For Graphormer configuration and HPC examples, see
+[`example/hf_graphormer_training`](example/hf_graphormer_training/README.md).
 
 ### Uncertainty evaluation and bootstrap metrics
 
@@ -147,13 +111,11 @@ This produces bootstrap confidence intervals and distribution plots for each tas
 
 ### Molecular AI
 
-- Graphormer
+- Hugging Face Graphormer
 - LSTM
 - GPT-style generation
-- diffusion-based molecular generation
 - single-task and multitask learning
 - LoRA fine-tuning
-- grouped task adaptors
 
 ### Drug discovery workflows
 
@@ -217,9 +179,7 @@ src/chemflow/
 ```
 
 Tests live in `tests/`, while one-off dataset and maintenance programs live in
-`scripts/`. New code should import modules through `chemflow.*`. A small
-compatibility package keeps historical `src.deep_learning.*` and
-`src.chemflow.*` paths loadable for older checkpoints and serialized models.
+`scripts/`. New code should import modules through `chemflow.*`.
 
 ---
 
@@ -288,43 +248,6 @@ mamba env update --name chemflow --file environment-hpc.yaml --prune
 mamba activate chemflow
 ```
 
-If the cluster loads an incompatible system C++ runtime and reports errors such
-as `GLIBCXX_* not found`, install an activation hook that gives the Conda
-environment's `libstdc++` precedence:
-
-```bash
-mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
-
-cat > "$CONDA_PREFIX/etc/conda/activate.d/chemflow.sh" <<'EOF'
-export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6${LD_PRELOAD:+:$LD_PRELOAD}"
-EOF
-```
-
-Add a matching deactivation hook so the preload is removed when leaving the
-`chemflow` environment:
-
-```bash
-mkdir -p "$CONDA_PREFIX/etc/conda/deactivate.d"
-
-cat > "$CONDA_PREFIX/etc/conda/deactivate.d/chemflow.sh" <<'EOF'
-export LD_PRELOAD="${LD_PRELOAD#"$CONDA_PREFIX/lib/libstdc++.so.6"}"
-export LD_PRELOAD="${LD_PRELOAD#:}"
-if [[ -z "$LD_PRELOAD" ]]; then
-    unset LD_PRELOAD
-fi
-EOF
-```
-
-Reactivate the environment after creating the hooks:
-
-```bash
-mamba deactivate
-mamba activate chemflow
-```
-
-Use this workaround only when the HPC runtime requires it; `LD_PRELOAD`
-affects every dynamically linked program launched from the active environment.
-
 `environment-hpc.yaml` installs the packages pinned in
 `requirements-hpc-torch.txt`, including the CUDA 12.6 builds of PyTorch and
 Torchvision. A complete system CUDA Toolkit is generally unnecessary unless
@@ -344,7 +267,7 @@ On Windows, use `where python` instead of `which python`.
 ```bash
 chemflow --help
 
-python -c "import torch, torch_geometric, chemprop, lightgbm; print(torch.__version__)"
+python -c "import torch, chemprop, lightgbm; print(torch.__version__)"
 ```
 
 On HPC, perform the GPU check from an allocated GPU compute node rather than a
@@ -393,24 +316,30 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-### Pretrained model downloads
+### Pretrained model weights
 
-The first Graphormer or CheMeleon training run downloads its official
-pretrained weights automatically. Later runs reuse the cached files:
+CheMeleon downloads its official pretrained weights automatically on the first
+run and reuses the cached file afterward:
 
 ```text
-~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt
 ~/.cache/chemflow/chemeleon/chemeleon_mp.pt
 ```
 
-Set `CHEMFLOW_CACHE_DIR` before training to use another cache location:
+Set `CHEMFLOW_CACHE_DIR` before CheMeleon training to use another cache
+location:
 
 ```bash
 export CHEMFLOW_CACHE_DIR=/path/to/model_cache
 ```
 
-You can also configure a local `pretrained_path` in the model's TOML section.
-This is useful on compute nodes without internet access.
+Hugging Face Graphormer accepts either a Hub model through `model_name` or a
+local PCQM4Mv1 checkpoint through `checkpoint_path` in `[ModelConfig]`. A local
+checkpoint is recommended on compute nodes without internet access. The
+included examples use:
+
+```text
+~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt
+```
 
 ### Hardware notes
 
@@ -429,7 +358,7 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('MPS:'
 
 ### Troubleshooting imports
 
-If Python reports a missing package such as `lightgbm` or `torch_geometric`,
+If Python reports a missing package such as `lightgbm` or `chemprop`,
 confirm that the `chemflow` environment is active and reinstall from the
 environment specification:
 
@@ -443,11 +372,16 @@ python -m pip check
 
 ## Quick start
 
-### Train a Graphormer model
+### Train Hugging Face Graphormer
 
 ```bash
-chemflow train graphormer expansionrx_mtl_training/multitask_conf.toml
+chemflow train hf-graphormer example/hf_graphormer_training/physchem_conf.toml
 ```
+
+HF Graphormer and CheMeleon support single-task, homogeneous multitask, and
+mixed regression/binary-classification training. Set `BaseConfig.task = "mixed"`
+and provide `DatasetConfig.task_types` in target-column order; see
+[the HF Graphormer tutorial](example/hf_graphormer_training/README.md).
 
 ### Fine-tune the pretrained CheMeleon model
 
@@ -514,12 +448,6 @@ test_fraction = 0.0
 The external file must contain the configured SMILES and target columns. Its
 rows are used only for final evaluation of the best validation checkpoint.
 
-### Train a standard graphormer model with a config file
-
-```bash
-graphormer_training/config.json
-```
-
 ### Generate molecules
 
 ```bash
@@ -531,18 +459,6 @@ chemflow generate gpt \
     --num_samples 128 \
     --max_new_tokens 128 \
     --temperature 0.8
-```
-
-### Predict properties
-
-```bash
-chemflow predict graphormer \
-    --input molecules.csv \
-    --task-names task_1,task_2,task_3 \
-    --model-checkpoint ${best_model_checkpoint} \
-    --batch_size 16 \
-    --num_workers 4 \
-    --output prediction_output.csv
 ```
 
 ### Run uncertainty bootstrap evaluation
@@ -562,36 +478,11 @@ chemflow uncertainty bootstrap \
 
 ---
 
-## Example configuration pattern
-
-A typical multitask configuration now looks like:
-
-```toml
-[DatasetConfig]
-dataset_path = "/path/to/dataset.csv"
-smiles_column = "SMILES"
-target_column = ["TaskA", "TaskB", "TaskC"]
-task_names = ["TaskA", "TaskB", "TaskC"]
-split_column = "split"
-
-[GraphormerConfig]
-num_tasks = 3
-loss_type = "laplace_NLL"
-task_weight_method = "sqrt_inverse"  # "sqrt_inverse" | "inverse" | "customed"
-sharing_type = "hard"
-num_adapters = 2
-task_groups = [[0, 1], [2]]
-```
-
-This is useful for assay groups, multi-endpoint prediction, and mixed task availability settings.
-
----
-
 ## Supported model families
 
 | Category | Models |
 |-----------|--------|
-| Graph | Graphormer |
+| Graph | Hugging Face Graphormer, CheMeleon |
 | Sequence | LSTM, GPT |
 | Fine-tuning | LoRA |
 | Learning | single-task and multitask learning |

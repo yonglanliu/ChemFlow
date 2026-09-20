@@ -1,0 +1,50 @@
+[BaseConfig]
+workdir = "./example/hf_graphormer_training/physchem_multitask"
+task = "regression"
+
+[DatasetConfig]
+dataset_path = "./dataset/curated/physchem_multitask.csv"
+smiles_column = "SMILES"
+target_column = [
+    "LogD_pH7_4",
+    #"Log_KSOL_pH6_8_mol_L",
+    #"Log_KSOL_pH7_4_mol_L",
+    "Log_KSOL_ExpansionRX_mol_L",
+]
+name_column = "Molecule Name"
+split_type = "scaffold_balanced"
+val_fraction = 0.1
+test_fraction = 0.1
+remove_hs = true
+reorder_atoms = false
+
+[ModelConfig]
+model_name = "clefourrier/graphormer-base-pcqm4mv1"
+checkpoint_path = "~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
+local_files_only = true
+max_nodes = 512
+multi_hop_max_dist = 5
+spatial_pos_max = 1024
+freeze_encoder = false
+
+[TrainingConfig]
+seed = 42
+device = "auto"
+devices = 1
+strategy = "auto" # Set "ddp" only when launching through torchrun.
+batch_size = 16
+num_workers = 0
+num_epochs = 30
+progress_bar = true
+resume = false
+applicability_only = false
+# Partially balance endpoints with very different label counts without giving
+# the smallest/noisiest task the full inverse-frequency amplification.
+task_loss_weighting = "sqrt_inverse_frequency"
+# Optional explicit override in target_column order, for example:
+# task_loss_weights = [1.0, 1.0, 1.0, 1.0]
+encoder_learning_rate = 1e-5
+head_learning_rate = 1e-4
+weight_decay = 0.01
+gradient_clip = 1.0
+early_stopping_patience = 8

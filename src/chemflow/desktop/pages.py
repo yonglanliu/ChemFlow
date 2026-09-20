@@ -60,7 +60,7 @@ class TrainPage(WorkflowPage):
     def __init__(self, runner: Runner, parent=None):
         card = Card("Training setup", "Select a model family and its reproducible configuration file.")
         model = QComboBox()
-        model.addItems(["chemeleon", "graphormer", "ml", "gpt"])
+        model.addItems(["chemeleon", "hf-graphormer", "ml", "gpt"])
         config = PathField("TOML, YAML, or JSON configuration")
         seed = QSpinBox()
         seed.setRange(0, 2_147_483_647)
@@ -69,7 +69,7 @@ class TrainPage(WorkflowPage):
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(14)
         grid.addWidget(field("Model family", model), 0, 0)
-        grid.addWidget(field("Random seed", seed, "Used by Graphormer and GPT."), 0, 1)
+        grid.addWidget(field("Random seed", seed, "Used by GPT."), 0, 1)
         grid.addWidget(field("Configuration", config), 1, 0, 1, 2)
         card.body.addLayout(grid)
         run = action_button("Start training")
@@ -85,7 +85,7 @@ class TrainPage(WorkflowPage):
                 raise_or_warn(self, "Choose a training configuration first.")
                 return
             args = ["train", model.currentText(), config.text()]
-            if model.currentText() in {"graphormer", "gpt"}:
+            if model.currentText() == "gpt":
                 args.extend(["--seed", str(seed.value())])
             self.launch(runner, args)
 
@@ -96,7 +96,7 @@ class PredictPage(WorkflowPage):
     def __init__(self, runner: Runner, parent=None):
         card = Card("Inference setup", "Run a saved model against one molecule or a molecular dataset.")
         model = QComboBox()
-        model.addItems(["chemeleon", "graphormer", "ml"])
+        model.addItems(["chemeleon", "ml"])
         source_type = QComboBox()
         source_type.addItems(["Dataset file", "Single SMILES"])
         source = PathField("CSV, Parquet, SMI, or TXT input")
@@ -123,7 +123,7 @@ class PredictPage(WorkflowPage):
         grid.addWidget(field("Checkpoint / model", checkpoint), 3, 0, 1, 2)
         grid.addWidget(field("Structure column", structure), 4, 0)
         grid.addWidget(field("Batch size", batch), 4, 1)
-        grid.addWidget(field("Task names", tasks, "Required for Graphormer; optional for CheMeleon."), 5, 0, 1, 2)
+        grid.addWidget(field("Task names", tasks, "Optional for CheMeleon."), 5, 0, 1, 2)
         grid.addWidget(field("Output", output), 6, 0, 1, 2)
         card.body.addLayout(grid)
         run = action_button("Run prediction")
@@ -151,9 +151,6 @@ class PredictPage(WorkflowPage):
             if name == "ml":
                 args.extend(["--model", checkpoint.text(), "--task-name", task_names[0] if task_names else "prediction"])
             else:
-                if name == "graphormer" and not task_names:
-                    raise_or_warn(self, "Graphormer requires at least one task name.")
-                    return
                 if task_names:
                     args.extend(["--task-names", *task_names])
                 args.extend(["--model-checkpoint", checkpoint.text(), "--batch-size", str(batch.value())])
