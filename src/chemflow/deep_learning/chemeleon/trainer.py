@@ -316,7 +316,7 @@ def _split_records(
         float(config.val_fraction),
         float(config.test_fraction),
     )
-    molecules = [item["mol"] for item in records]
+    molecules = _molecules_for_split(records, config.split_type)
     train_indices, val_indices, test_indices = data.make_split_indices(
         molecules,
         split=config.split_type,
@@ -331,6 +331,27 @@ def _split_records(
         [records[int(index)] for index in val_idx],
         [records[int(index)] for index in test_idx],
     )
+
+
+def _molecules_for_split(records: list[dict], split_type: str) -> list[Chem.Mol]:
+    """Return molecules safe for the requested Chemprop split operation.
+
+    Some RDKit releases can retain invalid double-bond stereo metadata after
+    constructing a Bemis-Murcko scaffold. Canonicalizing that scaffold then
+    raises ``Pre-condition Violation: bad bond stereo``. Scaffold splitting
+    does not use stereochemistry, so remove it from molecule copies supplied
+    only to the splitter. The original molecules and SMILES remain unchanged
+    for featurization, training, prediction, and saved split artifacts.
+    """
+    if str(split_type).strip().lower() != "scaffold_balanced":
+        return [item["mol"] for item in records]
+
+    split_molecules: list[Chem.Mol] = []
+    for item in records:
+        molecule = Chem.Mol(item["mol"])
+        Chem.RemoveStereochemistry(molecule)
+        split_molecules.append(molecule)
+    return split_molecules
 
 
 def _datapoints(records: list[dict]) -> list[data.MoleculeDatapoint]:
