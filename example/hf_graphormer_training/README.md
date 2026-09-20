@@ -175,7 +175,9 @@ resume = true
 Training resumes from `<workdir>/checkpoints/last.pt`, which is saved after
 every completed epoch. Set `resume_checkpoint = "/path/to/last.pt"` to use a
 different file. The checkpoint restores the model, optimizer, epoch, early
-stopping state, history, target scaling, and random-number states.
+stopping state, history, target scaling, and random-number states. It loads on
+CPU first and then moves state to the currently selected training device; a
+different GPU count skips only incompatible CUDA RNG restoration.
 
 ## Multi-GPU DDP
 

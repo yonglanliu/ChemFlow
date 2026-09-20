@@ -212,8 +212,9 @@ chemflow train gpt example/gpt_training/conf.toml
 ```
 
 The trainer restores the model, optimizer, scheduler, best validation score,
-early-stopping state, and history. Setting `resume_checkpoint` alone is not
-enough; `resume` must also be `true`.
+early-stopping state, history, and random-number state. Checkpoints load on CPU
+first and can resume on CPU, CUDA, or MPS. Setting `resume_checkpoint` alone is
+not enough; `resume` must also be `true`.
 
 ## 7. LoRA fine-tuning
 
@@ -254,7 +255,9 @@ chemflow train gpt example/gpt_training/conf_fine_tune.toml
 ```
 
 LoRA training freezes the base model and can additionally train the language
-model head and layer-normalization parameters. It writes adapter-only files:
+model head and layer-normalization parameters. It writes full-state
+`best_model.pt` and `last_model.pt` files for resume, plus compact adapter-only
+files for deployment:
 
 ```text
 <fine-tune-workdir>/checkpoints/best_adapter.pt

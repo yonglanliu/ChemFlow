@@ -42,6 +42,9 @@ inspect_task_metrics = true
 task_loss_weighting = "sqrt_inverse_frequency"
 # Optional explicit override in target_column order:
 # task_loss_weights = [1.0, 1.0, 1.0]
+# Continue from <workdir>/checkpoints/last.ckpt. A custom full-state
+# checkpoint can be supplied with resume_checkpoint = "/path/to/last.ckpt".
+resume = false
 verbose = true
 
 [CheMeleonConfig]

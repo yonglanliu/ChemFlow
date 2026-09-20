@@ -879,6 +879,22 @@ def tune_parameters_multiple_model(
             exist_ok=True,
         )
 
+        # Scikit-learn cannot continue an interrupted individual CV fit, but
+        # a multi-model run can resume by retaining each completed model's
+        # package and summary and skipping it on the next invocation.
+        model_tag = safe_name(model_name)
+        completed_summary = model_output_dir / f"{model_tag}_summary.json"
+        completed_package = model_output_dir / f"{model_tag}_model_package.pkl"
+        if bool(parent_config.get("resume", False)) and (
+            completed_summary.is_file() and completed_package.is_file()
+        ):
+            with completed_summary.open("r", encoding="utf-8") as stream:
+                all_results.append(json.load(stream))
+            logger.info("Resume: skipping completed model %s.", model_name)
+            if progress_callback is not None:
+                progress_callback()
+            continue
+
         # ----------------------------------------------------
         # Tune model
         # ----------------------------------------------------

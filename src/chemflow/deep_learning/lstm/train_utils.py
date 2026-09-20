@@ -10,17 +10,7 @@ import torch
 import torch.distributed as dist
 import matplotlib.pyplot as plt
 from chemflow.deep_learning.utils import (
-    is_dist_available_and_initialized,
-    get_world_size,
-    set_seed,
-    namespace_to_dict,
-    save_json,
-    build_scheduler,
-    step_scheduler,
-)
-
-from chemflow.deep_learning.utils import (
-    is_dist_available_and_initialized,
+    is_distributed,
     get_rank,
     get_world_size,
     is_main_process,
@@ -30,6 +20,11 @@ from chemflow.deep_learning.utils import (
     cleanup_distributed,
     unwrap_model,
     barrier,
+    set_seed,
+    namespace_to_dict,
+    save_json,
+    build_scheduler,
+    step_scheduler,
 )
 import csv
 
@@ -37,7 +32,7 @@ import csv
 # Utils
 # ============================================================
 def reduce_mean(value: float, device: torch.device) -> float:
-    if not is_dist_available_and_initialized():
+    if not is_distributed():
         return value
 
     tensor = torch.tensor(value, dtype=torch.float32, device=device)
@@ -62,7 +57,11 @@ def get_resume_path(training_config: SimpleNamespace, checkpoint_dir: Path) -> O
     resume = true                         -> resume from checkpoints/last_model.pt
     resume_from = "/path/to/last_model.pt" -> resume from explicit checkpoint
     """
-    resume_from = getattr(training_config, "resume_from", None)
+    # ``resume_checkpoint`` is the documented spelling. Keep the older
+    # ``resume_from`` key as a backwards-compatible alias.
+    resume_from = getattr(training_config, "resume_checkpoint", None)
+    if resume_from is None:
+        resume_from = getattr(training_config, "resume_from", None)
     resume = bool(getattr(training_config, "resume", False))
 
     if resume_from is not None and str(resume_from).strip().lower() not in ["", "none", "false"]:
@@ -99,30 +98,33 @@ def save_checkpoint(
 
     model_to_save = unwrap_model(model)
 
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model_to_save.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": (
-                scheduler.state_dict() if scheduler is not None else None
-            ),
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_perplexity": val_perplexity,
-            "best_val_loss": best_val_loss,
-            "best_val_perplexity": best_val_perplexity,
-            "best_epoch": best_epoch,
-            "patience_counter": patience_counter,
-            "history": history,
-            "vocab_size": getattr(model_to_save, "vocab_size", None),
-            "pad_token_id": getattr(model_to_save, "pad_token_id", None),
-            "bos_token_id": getattr(model_to_save, "bos_token_id", None),
-            "eos_token_id": getattr(model_to_save, "eos_token_id", None),
-            "config": config,
-        },
-        path,
-    )
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model_to_save.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": (
+            scheduler.state_dict() if scheduler is not None else None
+        ),
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "val_perplexity": val_perplexity,
+        "best_val_loss": best_val_loss,
+        "best_val_perplexity": best_val_perplexity,
+        "best_epoch": best_epoch,
+        "patience_counter": patience_counter,
+        "history": history,
+        "vocab_size": getattr(model_to_save, "vocab_size", None),
+        "pad_token_id": getattr(model_to_save, "pad_token_id", None),
+        "bos_token_id": getattr(model_to_save, "bos_token_id", None),
+        "eos_token_id": getattr(model_to_save, "eos_token_id", None),
+        "config": config,
+        "python_random_state": random.getstate(),
+        "numpy_random_state": np.random.get_state(),
+        "torch_random_state": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        checkpoint["cuda_random_state"] = torch.cuda.get_rng_state_all()
+    torch.save(checkpoint, path)
 
 def load_checkpoint_for_resume(
     checkpoint_path: str | Path,
@@ -136,7 +138,14 @@ def load_checkpoint_for_resume(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # CPU-first deserialization keeps checkpoints portable across CPU, CUDA,
+    # and MPS. Model loading and the explicit optimizer move below place state
+    # on the current runtime device.
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
 
     unwrap_model(model).load_state_dict(checkpoint["model_state_dict"])
 
@@ -146,6 +155,32 @@ def load_checkpoint_for_resume(
 
     if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    if not is_distributed():
+        if "python_random_state" in checkpoint:
+            random.setstate(checkpoint["python_random_state"])
+        if "numpy_random_state" in checkpoint:
+            np.random.set_state(checkpoint["numpy_random_state"])
+        if "torch_random_state" in checkpoint:
+            torch.set_rng_state(
+                checkpoint["torch_random_state"].detach().to(
+                    device="cpu", dtype=torch.uint8
+                )
+            )
+        cuda_states = checkpoint.get("cuda_random_state")
+        if torch.cuda.is_available() and cuda_states:
+            if len(cuda_states) == torch.cuda.device_count():
+                torch.cuda.set_rng_state_all(
+                    [
+                        value.detach().to(device="cpu", dtype=torch.uint8)
+                        for value in cuda_states
+                    ]
+                )
+            else:
+                main_print(
+                    "Skipping CUDA RNG restoration because the saved and "
+                    "current GPU counts differ. Training state was restored."
+                )
 
     start_epoch = int(checkpoint.get("epoch", 0)) + 1
     best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))

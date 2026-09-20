@@ -67,6 +67,24 @@ def _exception_chain_text(error: BaseException) -> str:
     return "\n".join(messages)
 
 
+def _move_optimizer_state_to_device(
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> None:
+    """Move restored optimizer tensors onto the current training device."""
+    for parameter_state in optimizer.state.values():
+        for key, value in parameter_state.items():
+            if torch.is_tensor(value):
+                parameter_state[key] = value.to(device=device)
+
+
+def _cpu_rng_state(value: Any) -> torch.Tensor:
+    """Return a device-independent RNG state accepted by PyTorch."""
+    if not torch.is_tensor(value):
+        value = torch.as_tensor(value)
+    return value.detach().to(device="cpu", dtype=torch.uint8)
+
+
 def _load_pretrained_components(
     model_name: str,
     *,
@@ -676,16 +694,45 @@ class ChemBERTaTrainer:
         last_path = Path(self.train_cfg.get("resume_checkpoint", checkpoint_dir / "last.pt")).expanduser().resolve()
         start_epoch = 1
         if bool(self.train_cfg.get("resume", False)):
-            state = torch.load(last_path, map_location=self.device, weights_only=False)
+            # Always deserialize on CPU so checkpoints remain portable between
+            # CPU, CUDA, and MPS runs. Model loading copies parameters into the
+            # already configured model device, and optimizer tensors are moved
+            # explicitly below.
+            state = torch.load(last_path, map_location="cpu", weights_only=False)
             model.load_state_dict(state["model"])
             optimizer.load_state_dict(state["optimizer"])
+            _move_optimizer_state_to_device(optimizer, self.device)
             start_epoch = int(state["epoch"]) + 1
             best_loss = float(state["best_loss"]); bad_epochs = int(state["bad_epochs"])
             history = list(state.get("history", []))
             if not self.distributed:
-                torch.set_rng_state(state.get("torch_rng", torch.get_rng_state()))
-                np.random.set_state(state.get("numpy_rng", np.random.get_state()))
-                random.setstate(state.get("python_rng", random.getstate()))
+                if "torch_rng" in state:
+                    torch.set_rng_state(_cpu_rng_state(state["torch_rng"]))
+                if "numpy_rng" in state:
+                    np.random.set_state(state["numpy_rng"])
+                if "python_rng" in state:
+                    random.setstate(state["python_rng"])
+                cuda_rng = state.get("cuda_rng")
+                if torch.cuda.is_available() and cuda_rng:
+                    # Exact CUDA RNG continuation is possible only when the
+                    # visible GPU count matches the run that saved the state.
+                    # A different backend/device count still resumes safely.
+                    if len(cuda_rng) == torch.cuda.device_count():
+                        torch.cuda.set_rng_state_all(
+                            [_cpu_rng_state(value) for value in cuda_rng]
+                        )
+                    elif self.is_main_process:
+                        print(
+                            "Skipping CUDA RNG restoration because the saved "
+                            "and current GPU counts differ.",
+                            flush=True,
+                        )
+            if self.is_main_process:
+                print(
+                    f"Resuming from {last_path} at epoch {start_epoch} on "
+                    f"{self.device}.",
+                    flush=True,
+                )
         if self.distributed:
             model = DistributedDataParallel(model, device_ids=[self.local_rank])
         for epoch in range(start_epoch, epochs + 1):
@@ -779,14 +826,17 @@ class ChemBERTaTrainer:
                     }, indent=2), encoding="utf-8")
                 else:
                     bad_epochs += 1
-                torch.save({
+                resume_state = {
                     "schema_version": 1, "epoch": epoch,
                     "model": plain_model.state_dict(), "optimizer": optimizer.state_dict(),
                     "best_loss": best_loss, "bad_epochs": bad_epochs, "history": history,
                     "means": means, "stds": stds, "task": self.task,
                     "torch_rng": torch.get_rng_state(), "numpy_rng": np.random.get_state(),
                     "python_rng": random.getstate(),
-                }, last_path)
+                }
+                if torch.cuda.is_available():
+                    resume_state["cuda_rng"] = torch.cuda.get_rng_state_all()
+                torch.save(resume_state, last_path)
                 should_stop = bad_epochs >= patience
             if self.distributed:
                 control = torch.tensor([float(should_stop)], device=self.device)

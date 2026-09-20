@@ -45,6 +45,7 @@ from chemflow.deep_learning.task_weighting import (
     resolve_task_loss_weights,
     resolve_task_types,
 )
+from chemflow.deep_learning.utils import move_optimizer_state_to_device
 from chemflow.deep_learning.chemeleon.applicability import (
     APPLICABILITY_VERSION,
     DEFAULT_CALIBRATION_CONFIDENCE,
@@ -1010,11 +1011,29 @@ class HuggingFaceGraphormerTrainer:
 
         model.load_state_dict(state["model_state_dict"], strict=True)
         optimizer.load_state_dict(state["optimizer_state_dict"])
+        move_optimizer_state_to_device(optimizer, self.device)
         random.setstate(state["python_random_state"])
         np.random.set_state(state["numpy_random_state"])
-        torch.set_rng_state(state["torch_random_state"])
+        torch.set_rng_state(
+            state["torch_random_state"].detach().to(
+                device="cpu", dtype=torch.uint8
+            )
+        )
         if torch.cuda.is_available() and "cuda_random_state" in state:
-            torch.cuda.set_rng_state_all(state["cuda_random_state"])
+            cuda_states = state["cuda_random_state"]
+            if len(cuda_states) == torch.cuda.device_count():
+                torch.cuda.set_rng_state_all(
+                    [
+                        value.detach().to(device="cpu", dtype=torch.uint8)
+                        for value in cuda_states
+                    ]
+                )
+            elif self.is_main_process:
+                print(
+                    "Skipping CUDA RNG restoration because the saved and "
+                    "current GPU counts differ. Training state was restored.",
+                    flush=True,
+                )
 
         completed_epoch = int(state["epoch"])
         history = list(state.get("history", []))

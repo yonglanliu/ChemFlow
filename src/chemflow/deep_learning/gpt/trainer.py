@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import csv
 import math
+import random
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Optional
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -664,15 +666,42 @@ class GPTDDPTrainer:
                 else:
                     patience_counter += 1
 
+                # Always save a full training-state checkpoint so both base
+                # and LoRA runs can resume optimizer-level training. Adapter
+                # files remain available as compact deployment artifacts.
+                self.save_checkpoint(
+                    path=last_path,
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    train_loss=avg_train_loss,
+                    val_loss=val_loss,
+                    val_perplexity=val_ppl,
+                    best_val_loss=best_val_loss,
+                    best_val_perplexity=best_val_perplexity,
+                    best_epoch=best_epoch,
+                    patience_counter=patience_counter,
+                    scheduler=scheduler,
+                    history=history,
+                    config=full_config,
+                )
                 if fine_tune:
                     self.save_adapter_checkpoint(
                         path=checkpoint_dir / "last_adapter.pt",
                         model=model,
                         config=full_config,
                     )
-                else:
+
+                if improved:
+                    if fine_tune:
+                        self.save_adapter_checkpoint(
+                            path=checkpoint_dir / "best_adapter.pt",
+                            model=model,
+                            config=full_config,
+                        )
+                        print(f"Saved best adapter checkpoint to {checkpoint_dir / 'best_adapter.pt'}", flush=True)
                     self.save_checkpoint(
-                        path=last_path,
+                        path=best_path,
                         model=model,
                         optimizer=optimizer,
                         epoch=epoch,
@@ -687,34 +716,7 @@ class GPTDDPTrainer:
                         history=history,
                         config=full_config,
                     )
-
-                if improved:
-                    if fine_tune:
-                        self.save_adapter_checkpoint(
-                            path=checkpoint_dir / "best_adapter.pt",
-                            model=model,
-                            config=full_config,
-                        )
-                        print(f"Saved best adapter checkpoint to {checkpoint_dir / 'best_adapter.pt'}", flush=True)
-                    else:
-                        self.save_checkpoint(
-                            path=best_path,
-                            model=model,
-                            optimizer=optimizer,
-                            epoch=epoch,
-                            train_loss=avg_train_loss,
-                            val_loss=val_loss,
-                            val_perplexity=val_ppl,
-                            best_val_loss=best_val_loss,
-                            best_val_perplexity=best_val_perplexity,
-                            best_epoch=best_epoch,
-                            patience_counter=patience_counter,
-                            scheduler=scheduler,
-                            history=history,
-                            config=full_config,
-                        )
-
-                        print(f"Saved best checkpoint to {best_path}", flush=True)
+                    print(f"Saved best checkpoint to {best_path}", flush=True)
                 else:
                     print(
                         f"No improvement: "
@@ -855,32 +857,35 @@ class GPTDDPTrainer:
 
         model_to_save = unwrap_model(model)
 
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state_dict": model_to_save.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": (
-                    scheduler.state_dict()
-                    if scheduler is not None
-                    else None
-                ),
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "val_perplexity": val_perplexity,
-                "best_val_loss": best_val_loss,
-                "best_val_perplexity": best_val_perplexity,
-                "best_epoch": best_epoch,
-                "patience_counter": patience_counter,
-                "history": history,
-                "vocab_size": getattr(model_to_save, "vocab_size", None),
-                "pad_token_id": getattr(model_to_save, "pad_token_id", None),
-                "bos_token_id": getattr(model_to_save, "bos_token_id", None),
-                "eos_token_id": getattr(model_to_save, "eos_token_id", None),
-                "config": config,
-            },
-            path,
-        )
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": model_to_save.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": (
+                scheduler.state_dict()
+                if scheduler is not None
+                else None
+            ),
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_perplexity": val_perplexity,
+            "best_val_loss": best_val_loss,
+            "best_val_perplexity": best_val_perplexity,
+            "best_epoch": best_epoch,
+            "patience_counter": patience_counter,
+            "history": history,
+            "vocab_size": getattr(model_to_save, "vocab_size", None),
+            "pad_token_id": getattr(model_to_save, "pad_token_id", None),
+            "bos_token_id": getattr(model_to_save, "bos_token_id", None),
+            "eos_token_id": getattr(model_to_save, "eos_token_id", None),
+            "config": config,
+            "python_random_state": random.getstate(),
+            "numpy_random_state": np.random.get_state(),
+            "torch_random_state": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            checkpoint["cuda_random_state"] = torch.cuda.get_rng_state_all()
+        torch.save(checkpoint, path)
 
     def save_lora_only_checkpoint(
         self,
@@ -953,7 +958,13 @@ class GPTDDPTrainer:
                 f"Resume checkpoint not found: {checkpoint_path}"
             )
 
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # CPU-first deserialization keeps checkpoints portable across CPU,
+        # CUDA, and MPS. The optimizer state is moved explicitly below.
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
 
         unwrap_model(model).load_state_dict(
             checkpoint["model_state_dict"],
@@ -972,6 +983,32 @@ class GPTDDPTrainer:
             and checkpoint.get("scheduler_state_dict") is not None
         ):
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+        if not is_distributed():
+            if "python_random_state" in checkpoint:
+                random.setstate(checkpoint["python_random_state"])
+            if "numpy_random_state" in checkpoint:
+                np.random.set_state(checkpoint["numpy_random_state"])
+            if "torch_random_state" in checkpoint:
+                torch.set_rng_state(
+                    checkpoint["torch_random_state"].detach().to(
+                        device="cpu", dtype=torch.uint8
+                    )
+                )
+            cuda_states = checkpoint.get("cuda_random_state")
+            if torch.cuda.is_available() and cuda_states:
+                if len(cuda_states) == torch.cuda.device_count():
+                    torch.cuda.set_rng_state_all(
+                        [
+                            value.detach().to(device="cpu", dtype=torch.uint8)
+                            for value in cuda_states
+                        ]
+                    )
+                else:
+                    main_print(
+                        "Skipping CUDA RNG restoration because the saved and "
+                        "current GPU counts differ. Training state was restored."
+                    )
 
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
         best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))

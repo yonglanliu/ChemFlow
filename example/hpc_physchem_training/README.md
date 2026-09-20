@@ -58,6 +58,18 @@ sbatch --gres=gpu:4 --array=0-4%1 \
 The script sets `devices=4` and `strategy="ddp"` in each generated CheMeleon
 configuration. Its batch size is also per GPU.
 
+To resume interrupted CheMeleon array tasks from each run directory's
+`checkpoints/last.ckpt`, increase the configured total epoch count if needed
+and submit with:
+
+```bash
+export CHEMELEON_RESUME=true
+sbatch example/hpc_physchem_training/chemeleon_array.slurm
+```
+
+Completed tasks will immediately stop when their checkpoint epoch already
+meets the configured `num_epochs`.
+
 The default is the single-task pH 7.4 KSOL model. To train one masked
 multitask model for LogD, KSOL pH 6.8, KSOL pH 7.4, and ExpansionRX KSOL:
 

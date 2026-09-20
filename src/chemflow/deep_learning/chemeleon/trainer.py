@@ -118,6 +118,8 @@ class TrainingConfig:
     inspect_task_metrics: bool = True
     task_loss_weighting: str = "uniform"
     task_loss_weights: list[float] | dict[str, float] | None = None
+    resume: bool = False
+    resume_checkpoint: str | None = None
     verbose: bool = True
 
 
@@ -360,6 +362,33 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
 
 def _resolved_path(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def _resolve_resume_checkpoint(
+    training: TrainingConfig,
+    checkpoint_dir: Path,
+) -> Path | None:
+    """Resolve and validate a full-state Lightning resume checkpoint."""
+    configured = str(training.resume_checkpoint or "").strip()
+    if not bool(training.resume) and not configured:
+        return None
+
+    path = (
+        _resolved_path(configured)
+        if configured
+        else (checkpoint_dir / "last.ckpt").resolve()
+    )
+    if not path.is_file():
+        raise FileNotFoundError(f"CheMeleon resume checkpoint not found: {path}")
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict) or not checkpoint.get("optimizer_states"):
+        raise ValueError(
+            f"CheMeleon checkpoint {path} contains model weights only and cannot "
+            "resume optimizer-level training. Use it as transfer_checkpoint, or "
+            "resume from a last.ckpt created by the full-state checkpoint format."
+        )
+    return path
 
 
 def _complete_batch_size(dataset_size: int, requested_batch_size: int) -> int:
@@ -1282,7 +1311,9 @@ class CheMeleonTrainer:
             mode="min",
             save_top_k=1,
             save_last=True,
-            save_weights_only=True,
+            # Full-state checkpoints preserve optimizer, scheduler, epoch,
+            # callback, scaler, and loop state for exact Lightning resume.
+            save_weights_only=False,
             auto_insert_metric_name=False,
         )
         callbacks: list[Callback] = [checkpoint_callback]
@@ -1375,6 +1406,11 @@ class CheMeleonTrainer:
             )
             save_json(resolved, self.workdir / "config.json")
 
+        resume_checkpoint = _resolve_resume_checkpoint(
+            self.config.training,
+            self.checkpoint_dir,
+        )
+
         # Torch 2.12 deprecates direct construction of ``LeafSpec`` while
         # Lightning 2.6 still uses it internally. This narrow filter removes
         # only that upstream compatibility warning.
@@ -1391,7 +1427,16 @@ class CheMeleonTrainer:
                 category=UserWarning,
                 module=r"lightning\.pytorch\.trainer\.connectors\.data_connector",
             )
-            trainer.fit(model, train_loader, val_loader)
+            trainer.fit(
+                model,
+                train_loader,
+                val_loader,
+                ckpt_path=(
+                    str(resume_checkpoint)
+                    if resume_checkpoint is not None
+                    else None
+                ),
+            )
 
         # DDP workers must not race while copying logs, evaluating the full
         # hold-out set, or writing final artifacts. The global-zero worker

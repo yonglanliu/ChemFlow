@@ -75,8 +75,10 @@ applies global or nearest-neighbor local validation calibration and reports
 fingerprint/embedding domain diagnostics when applicability artifacts exist.
 
 Resume an interrupted run with `resume = true`; the last complete epoch is
-stored at `checkpoints/last.pt`. Rebuild applicability/calibration artifacts
-without optimizing weights by setting `applicability_only = true`.
+stored at `checkpoints/last.pt`. Checkpoints deserialize on CPU before model
+and optimizer state move to the selected CPU, CUDA, or MPS device. Rebuild
+applicability/calibration artifacts without optimizing weights by setting
+`applicability_only = true`.
 
 For single-node CUDA DDP, set `device = "cuda"`, `devices` to the GPU count,
 and `strategy = "ddp"`, then launch, for example:

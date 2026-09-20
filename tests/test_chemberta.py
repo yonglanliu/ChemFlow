@@ -6,6 +6,8 @@ import torch
 from chemflow.cli.main import build_parser
 from chemflow.deep_learning.chemberta.trainer import (
     ChemBERTaTrainer,
+    _cpu_rng_state,
+    _move_optimizer_state_to_device,
     _validate_split_config,
 )
 
@@ -53,3 +55,27 @@ def test_chemberta_predefined_split_config():
         assert "requires DatasetConfig.split_column" in str(error)
     else:
         raise AssertionError("predefined split without split_column was accepted")
+
+
+def test_chemberta_resume_state_is_device_portable():
+    original_rng = torch.get_rng_state()
+    try:
+        # Old checkpoints may be mapped to another device or represented with
+        # a non-byte dtype. Resume normalises them before restoring CPU RNG.
+        restored_rng = _cpu_rng_state(original_rng.to(dtype=torch.int16))
+        assert restored_rng.device.type == "cpu"
+        assert restored_rng.dtype == torch.uint8
+        torch.set_rng_state(restored_rng)
+    finally:
+        torch.set_rng_state(original_rng)
+
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter])
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    _move_optimizer_state_to_device(optimizer, torch.device("cpu"))
+    assert all(
+        not torch.is_tensor(value) or value.device.type == "cpu"
+        for state in optimizer.state.values()
+        for value in state.values()
+    )

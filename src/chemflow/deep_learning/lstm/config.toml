@@ -61,8 +61,9 @@ gradient_clip_value = 1.0
 num_workers = 0
 plot_training_history = true
 
-# For resume job, either use resume=true, or specify a path of checkpoint to resume_from
-resume = true
+# For a resume job, use resume=true to load checkpoints/last_model.pt, or set
+# resume_checkpoint to an explicit checkpoint path.
+resume = false
 # resume_checkpoint = "/path/to/workdir/checkpoints/last_model.pt"
 
 

@@ -105,8 +105,25 @@ Explicit weights may be supplied in `target_column` order with
 `task_loss_weights = [1.0, 2.0, 0.5]`. Weights are normalized to mean 1,
 printed at startup, and saved in `config.json`. Metrics remain unweighted.
 Packaging happens after gradient-based training and requires no training
-configuration. Optimizer state is not stored, so these files do not support
-optimizer-level training resume.
+configuration.
+
+## Resume training
+
+CheMeleon saves full-state `best.ckpt` and `last.ckpt` files containing model,
+optimizer, scheduler, epoch, callback, gradient-scaler, and Lightning loop
+state. To continue the same run, retain its work directory, increase
+`num_epochs` to the desired total, and set:
+
+```toml
+[CheMeleonTrainingConfig]
+resume = true
+# Optional; defaults to <workdir>/checkpoints/last.ckpt
+# resume_checkpoint = "/path/to/checkpoints/last.ckpt"
+```
+
+Checkpoints created by older ChemFlow versions with `save_weights_only=True`
+remain valid for prediction and encoder transfer but cannot provide an exact
+optimizer-level resume.
 
 ## Prediction
 

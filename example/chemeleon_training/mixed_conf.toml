@@ -35,6 +35,7 @@ plot_training_history = true
 inspect_task_metrics = true
 class_balance = false
 task_loss_weighting = "sqrt_inverse_frequency"
+resume = false
 verbose = true
 
 [CheMeleonConfig]

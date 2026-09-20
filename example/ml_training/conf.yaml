@@ -1,6 +1,11 @@
 workdir: ./example/ml_training/HLM_Clint/ecfp4
 task_type: regression
 
+# Resume a multi-model/multi-seed workflow by skipping fits whose summary and
+# model package were already written successfully. An interrupted individual
+# scikit-learn CV fit restarts because sklearn does not checkpoint candidates.
+resume: false
+
 # ============================================================
 # Data
 # ============================================================

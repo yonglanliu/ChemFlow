@@ -234,6 +234,20 @@ def regular_training(
             / f"{model_tag}_error.json"
         )
 
+        if bool(single_seed_config.get("resume", False)) and (
+            summary_path.is_file() and package_path.is_file()
+        ):
+            with summary_path.open("r", encoding="utf-8") as stream:
+                all_results.append(json.load(stream))
+            log(
+                f"[regular][{model_name}][seed={seed}] "
+                "resume: skipping completed fit",
+                model_log_name,
+            )
+            if progress_callback is not None:
+                progress_callback()
+            continue
+
         start_time = time.time()
 
         # ====================================================

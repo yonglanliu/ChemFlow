@@ -47,6 +47,9 @@ evaluate_test = true
 plot_training_history = true
 inspect_task_metrics = true
 task_loss_weighting = "uniform"
+# Continue from <workdir>/checkpoints/last.ckpt. A custom full-state
+# checkpoint can be supplied with resume_checkpoint = "/path/to/last.ckpt".
+resume = false
 verbose = true
 
 [CheMeleonConfig]

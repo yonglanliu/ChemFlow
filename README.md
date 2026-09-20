@@ -460,6 +460,19 @@ strategy = "ddp"
 `num_nodes` and `sync_batchnorm` are also supported. Apple MPS remains a
 single-device backend and cannot use DDP.
 
+CheMeleon writes full-state `last.ckpt` checkpoints. To continue an
+interrupted run, keep the same work directory and configuration, set the new
+total epoch count, and enable:
+
+```toml
+[CheMeleonTrainingConfig]
+resume = true
+# resume_checkpoint = "/optional/custom/path/last.ckpt"
+```
+
+Older weights-only checkpoints can still be used for prediction or transfer
+learning, but not optimizer-level resume.
+
 To evaluate a completely independent CSV instead of splitting test rows from
 the training file, configure the external path and disable the internal test
 split:

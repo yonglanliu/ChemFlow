@@ -96,6 +96,7 @@ workers_per_process="$(( ${SLURM_CPUS_PER_TASK:-1} / CHEMFLOW_CHEMELEON_DEVICES 
 if (( workers_per_process < 1 )); then workers_per_process=1; fi
 export CHEMFLOW_CHEMELEON_NUM_WORKERS="${CHEMELEON_NUM_WORKERS:-$workers_per_process}"
 export CHEMFLOW_CHEMELEON_BATCH_SIZE="${CHEMELEON_BATCH_SIZE:-64}"
+export CHEMFLOW_CHEMELEON_RESUME="${CHEMELEON_RESUME:-false}"
 
 python - <<'PY'
 import os
@@ -155,6 +156,9 @@ training["strategy"] = "ddp" if devices > 1 else "auto"
 training["num_nodes"] = 1
 training["num_workers"] = int(os.environ["CHEMFLOW_CHEMELEON_NUM_WORKERS"])
 training["batch_size"] = int(os.environ["CHEMFLOW_CHEMELEON_BATCH_SIZE"])
+training["resume"] = os.environ["CHEMFLOW_CHEMELEON_RESUME"].strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 pretrained_path = os.environ.get("CHEMELEON_PRETRAINED_PATH", "").strip()
 model = config.setdefault("CheMeleonConfig", {})

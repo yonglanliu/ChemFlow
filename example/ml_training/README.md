@@ -4,6 +4,12 @@ This tutorial shows how to train and use ChemFlow's traditional machine-learning
 models for single-task regression and classification. Run all commands from the
 ChemFlow repository root.
 
+Set top-level `resume: true` to restart a multi-model or multi-seed workflow.
+ChemFlow verifies that both the completed summary and serialized model package
+exist before skipping a fit. An interrupted individual scikit-learn CV search
+restarts that model because sklearn does not expose candidate-level checkpoint
+state.
+
 ## 1. Activate ChemFlow
 
 ```bash

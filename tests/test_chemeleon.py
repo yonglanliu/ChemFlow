@@ -16,6 +16,7 @@ from chemflow.deep_learning.chemeleon.trainer import (
     _evaluate,
     _load_transfer_encoder,
     _molecules_for_split,
+    _resolve_resume_checkpoint,
     load_config,
 )
 
@@ -84,7 +85,44 @@ target_column = "activity"
         self.assertEqual(config.training.strategy, "auto")
         self.assertEqual(config.training.num_nodes, 1)
         self.assertTrue(config.training.inspect_task_metrics)
+        self.assertFalse(config.training.resume)
+        self.assertIsNone(config.training.resume_checkpoint)
         self.assertEqual(config.model.ffn_hidden_dim, 256)
+
+    def test_resume_requires_full_lightning_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            weights_only = root / "weights-only.ckpt"
+            torch.save({"state_dict": {"weight": torch.ones(1)}}, weights_only)
+
+            config_path = root / "config.toml"
+            config_path.write_text(
+                f"""
+[BaseConfig]
+workdir = "run"
+
+[DatasetConfig]
+dataset_path = "data.csv"
+
+[CheMeleonTrainingConfig]
+resume_checkpoint = {str(weights_only)!r}
+""".strip(),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            with self.assertRaisesRegex(ValueError, "model weights only"):
+                _resolve_resume_checkpoint(config.training, root)
+
+            full = root / "last.ckpt"
+            torch.save(
+                {"state_dict": {}, "optimizer_states": [{"state": {}}]},
+                full,
+            )
+            config.training.resume_checkpoint = str(full)
+            self.assertEqual(
+                _resolve_resume_checkpoint(config.training, root),
+                full.resolve(),
+            )
 
     def test_mixed_task_types_are_loaded(self):
         with tempfile.TemporaryDirectory() as directory:
