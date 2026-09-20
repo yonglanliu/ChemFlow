@@ -11,6 +11,7 @@ from chemflow.deep_learning.hf_graphormer.trainer import (
     _classification_metrics,
     _metrics,
     _normalise_split,
+    _validate_split_config,
 )
 
 
@@ -27,6 +28,23 @@ def test_hf_graphormer_split_aliases():
     assert _normalise_split("VALID") == "val"
     assert _normalise_split("testing") == "test"
     assert _normalise_split("unknown") is None
+
+
+def test_hf_graphormer_predefined_split_config():
+    config = {"split_type": "predefined", "split_column": "split"}
+    _validate_split_config(config)
+    assert config["split_type"] == "predefined"
+
+    inferred = {"split_type": "scaffold_balanced", "split_column": "partition"}
+    _validate_split_config(inferred)
+    assert inferred["split_type"] == "predefined"
+
+    try:
+        _validate_split_config({"split_type": "predefined"})
+    except ValueError as error:
+        assert "requires DatasetConfig.split_column" in str(error)
+    else:
+        raise AssertionError("predefined split without split_column was accepted")
 
 
 def test_hf_graphormer_regression_metrics():

@@ -151,6 +151,26 @@ def _select_device(requested: str) -> torch.device:
     return torch.device(name)
 
 
+def _validate_split_config(config: dict[str, Any]) -> None:
+    """Validate generated molecular splits or an existing split column."""
+    split_type = str(config.get("split_type", "scaffold_balanced")).strip().lower()
+    if config.get("split_column"):
+        split_type = "predefined"
+    allowed = {
+        "random", "random_with_repeated_smiles", "scaffold_balanced",
+        "kennard_stone", "kmeans", "predefined",
+    }
+    if split_type not in allowed:
+        raise ValueError(
+            f"Unsupported split_type {split_type!r}; expected one of {sorted(allowed)}."
+        )
+    if split_type == "predefined" and not config.get("split_column"):
+        raise ValueError(
+            "split_type='predefined' requires DatasetConfig.split_column."
+        )
+    config["split_type"] = split_type
+
+
 @dataclass
 class Record:
     index: int
@@ -206,6 +226,7 @@ class ChemBERTaTrainer:
             self.raw = tomllib.load(stream)
         self.base = self.raw.get("BaseConfig", {})
         self.data_cfg = self.raw.get("DatasetConfig", {})
+        _validate_split_config(self.data_cfg)
         self.model_cfg = self.raw.get("ModelConfig", {})
         self.train_cfg = self.raw.get("TrainingConfig", {})
         self.workdir = Path(self.base.get("workdir", "chemberta_run")).expanduser().resolve()
@@ -302,7 +323,7 @@ class ChemBERTaTrainer:
         return records
 
     def _split(self, records: list[Record]) -> dict[str, list[Record]]:
-        if self.data_cfg.get("split_column"):
+        if self.data_cfg.get("split_type") == "predefined":
             splits = {name: [r for r in records if r.split == name] for name in ("train", "val", "test")}
         else:
             external_test = [record for record in records if record.split == "test"]

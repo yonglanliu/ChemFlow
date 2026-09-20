@@ -10,7 +10,9 @@ name_column = "Molecule Name"
 split_type = "scaffold_balanced"
 val_fraction = 0.1
 test_fraction = 0.1
-# For an existing split, set split_column = "split".
+# For an existing split, use:
+# split_type = "predefined"
+# split_column = "split"
 # For task = "mixed", add task_types in target_column order.
 # task_types = ["regression", "classification"]
 

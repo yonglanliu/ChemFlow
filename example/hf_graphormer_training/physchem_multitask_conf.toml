@@ -13,6 +13,9 @@ target_column = [
 ]
 name_column = "Molecule Name"
 split_type = "scaffold_balanced"
+# To reuse saved assignments instead:
+# split_type = "predefined"
+# split_column = "split"
 val_fraction = 0.1
 test_fraction = 0.1
 remove_hs = true

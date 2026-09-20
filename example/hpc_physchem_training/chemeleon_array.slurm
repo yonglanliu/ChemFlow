@@ -69,10 +69,7 @@ fi
 case "$split_type" in
     random|random_with_repeated_smiles|scaffold_balanced|kennard_stone|kmeans) ;;
     predefined)
-        if [[ -z "$split_column" ]]; then
-            echo "CHEMELEON_SPLIT_TYPE=predefined requires PHYSCHEM_SPLIT_COLUMN." >&2
-            exit 1
-        fi
+        split_column="${split_column:-split}"
         ;;
     *)
         echo "Unsupported CHEMELEON_SPLIT_TYPE: $split_type" >&2
@@ -143,11 +140,12 @@ dataset["dataset_path"] = str(data_path)
 dataset.pop("test_dataset_path", None)
 dataset["smiles_column"] = "SMILES"
 dataset["target_column"] = targets if run_name == "multitask" else targets[0]
-dataset["split_type"] = os.environ["CHEMFLOW_CHEMELEON_SPLIT_TYPE"]
 if split_column:
     dataset["split_column"] = split_column
+    dataset["split_type"] = "predefined"
 else:
     dataset.pop("split_column", None)
+    dataset["split_type"] = os.environ["CHEMFLOW_CHEMELEON_SPLIT_TYPE"]
 
 training = config.setdefault("CheMeleonTrainingConfig", {})
 training["accelerator"] = "gpu"

@@ -104,3 +104,73 @@ training history, metrics, saved split assignments, and test predictions.
 
 The checkpoint is loaded offline, so compute nodes do not need direct access to
 Hugging Face and are unaffected by institutional HTTPS certificate interception.
+
+## Four-run Graphormer array
+
+`graphormer_array.slurm` generates and trains four configurations:
+
+1. LogD plus ExpansionRX KSOL multitask
+2. LogD single-task
+3. KSOL pH 6.8 single-task
+4. KSOL pH 7.4 single-task
+
+Submit all four, with at most four one-GPU jobs running concurrently:
+
+```bash
+sbatch example/hpc_physchem_training/graphormer_array.slurm
+```
+
+To reduce concurrent GPU use, override the array throttle, for example:
+
+```bash
+sbatch --array=0-3%2 example/hpc_physchem_training/graphormer_array.slurm
+```
+
+Set `HF_GRAPHORMER_RESUME=true` before submission to resume each run from its
+own output directory. Paths, batch size, worker count, epochs, split type, and
+checkpoint can be overridden with the environment variables documented at the
+top of the script.
+
+## Four-run ChemBERTa array
+
+Before submitting from a compute node without internet access, populate the
+shared Hugging Face cache from a login node:
+
+```bash
+hf download DeepChem/ChemBERTa-77M-MLM
+```
+
+Then submit the matching four-run ChemBERTa array:
+
+```bash
+sbatch example/hpc_physchem_training/chemberta_array.slurm
+```
+
+The task mapping is identical to the Graphormer array. To use a downloaded
+model directory instead of the Hugging Face cache:
+
+```bash
+export CHEMBERTA_MODEL_NAME=/data/liuy48/models/ChemBERTa-77M-MLM
+sbatch example/hpc_physchem_training/chemberta_array.slurm
+```
+
+Use `CHEMBERTA_RESUME=true` to resume interrupted runs and
+`CHEMBERTA_APPLICABILITY_ONLY=true` to rebuild applicability/calibration
+artifacts without further optimization. Override array concurrency with
+`sbatch --array=0-3%2 ...` when fewer GPUs should run simultaneously.
+
+For CheMeleon, Graphormer, or ChemBERTa, reuse an existing dataset `split`
+column with either of these equivalent forms:
+
+```bash
+export PHYSCHEM_SPLIT_COLUMN=split
+```
+
+```bash
+export CHEMELEON_SPLIT_TYPE=predefined       # CheMeleon
+export HF_GRAPHORMER_SPLIT_TYPE=predefined   # Graphormer
+export CHEMBERTA_SPLIT_TYPE=predefined       # ChemBERTa
+```
+
+When `predefined` is selected, the scripts default to the column name `split`
+and do not pass `predefined` to the molecular split algorithm.
