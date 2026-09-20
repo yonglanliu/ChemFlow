@@ -53,6 +53,7 @@ ml_training/
 example/ml_training/*
 !example/ml_training/conf.yaml
 !example/ml_training/README.md
+!example/ml_training/compare_representations.py
 
 # ============================================================
 # Models
