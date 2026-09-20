@@ -571,8 +571,20 @@ class ChemBERTaTrainer:
             trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
             encoder_total = sum(p.numel() for p in model.encoder.parameters())
             encoder_trainable = sum(p.numel() for p in model.encoder.parameters() if p.requires_grad)
-            print(f"ChemBERTa parameters: {total:,} total; {trainable:,} trainable; {total-trainable:,} frozen")
-            print(f"  Encoder: {encoder_trainable:,}/{encoder_total:,}; head: {sum(p.numel() for p in model.head.parameters()):,}")
+            head_total = sum(p.numel() for p in model.head.parameters())
+            head_trainable = sum(
+                p.numel() for p in model.head.parameters() if p.requires_grad
+            )
+            trainable_percent = 100.0 * trainable / max(total, 1)
+            print(
+                "ChemBERTa model summary:\n"
+                f"  Total parameters:     {total:,}\n"
+                f"  Trainable parameters: {trainable:,} ({trainable_percent:.2f}%)\n"
+                f"  Frozen parameters:    {total - trainable:,}\n"
+                f"  Encoder trainable:    {encoder_trainable:,}/{encoder_total:,}\n"
+                f"  Head trainable:       {head_trainable:,}/{head_total:,}",
+                flush=True,
+            )
         collate = self._collate(tokenizer)
         samplers = {
             name: DistributedSampler(values, num_replicas=self.world_size, rank=self.rank, shuffle=name == "train", seed=self.seed)
