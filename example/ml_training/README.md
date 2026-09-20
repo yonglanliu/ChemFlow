@@ -640,7 +640,7 @@ for one model with paired bootstrap confidence intervals:
 
 ```bash
 python example/ml_training/compare_representations.py \
-  --root /data/liuy48/model_training/adme/clearance \
+  --root "$TRAINING_DIR" \
   --model lightgbm \
   --model-label LightGBM \
   --n-bootstrap 2000

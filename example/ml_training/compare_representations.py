@@ -296,8 +296,8 @@ def parse_args():
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("/data/liuy48/model_training/adme/clearance"),
-        help="Training directory containing ml_HLM, ml_MLM, and ml_RLM.",
+        required=True,
+        help="Training directory containing the endpoint output folders.",
     )
     parser.add_argument("--model", default="lightgbm", help="Model output folder key.")
     parser.add_argument("--model-label", default="LightGBM")
