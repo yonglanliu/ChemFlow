@@ -101,6 +101,8 @@ class ModelConfig:
     pretrained_path: str | None = None
     pretrained_url: str = CHEMELEON_WEIGHTS_URL
     pretrained_sha256: str | None = CHEMELEON_WEIGHTS_SHA256
+    transfer_checkpoint: str | None = None
+    transfer_encoder_only: bool = True
     freeze_epochs: int = 0
     dropout: float = 0.0
     ffn_hidden_dim: int = 256
@@ -201,6 +203,11 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
         )
     if int(model.freeze_epochs) < 0:
         raise ValueError("freeze_epochs cannot be negative.")
+    if model.transfer_checkpoint and not bool(model.transfer_encoder_only):
+        raise ValueError(
+            "Only encoder-only CheMeleon transfer is supported. "
+            "Set transfer_encoder_only=true."
+        )
     if (
         base.task == "classification"
         and bool(training.class_balance)
@@ -402,6 +409,11 @@ def _make_model(
     parameters["dropout"] = float(config.model.dropout)
     message_passing = nn.BondMessagePassing(**parameters)
     message_passing.load_state_dict(checkpoint["state_dict"], strict=True)
+    if config.model.transfer_checkpoint:
+        _load_transfer_encoder(
+            message_passing,
+            _resolved_path(config.model.transfer_checkpoint),
+        )
 
     target_columns = _target_columns(config.dataset)
     n_tasks = len(target_columns)
@@ -445,6 +457,64 @@ def _make_model(
         max_lr=float(config.model.max_lr),
         final_lr=float(config.model.final_lr),
     )
+
+
+def _load_transfer_encoder(
+    message_passing: torch.nn.Module,
+    checkpoint_path: str | Path,
+) -> int:
+    """Load only a fine-tuned checkpoint's message-passing encoder.
+
+    Fine-tuned Lightning checkpoints contain task-specific predictor tensors,
+    target scaling statistics, and criterion weights. Those tensors cannot be
+    reused when the destination has a different number of tasks, so this
+    loader explicitly selects only ``message_passing.*`` parameters.
+    """
+    path = Path(checkpoint_path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Transfer checkpoint does not exist: {path}")
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else None
+    if not isinstance(state_dict, dict):
+        raise ValueError(
+            f"Invalid transfer checkpoint {path}: expected a Lightning state_dict."
+        )
+
+    encoder_state: dict[str, torch.Tensor] = {}
+    prefixes = (
+        "message_passing.",
+        "model.message_passing.",
+        "module.message_passing.",
+    )
+    for key, value in state_dict.items():
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                encoder_state[key.removeprefix(prefix)] = value
+                break
+
+    if not encoder_state:
+        raise ValueError(
+            f"Transfer checkpoint {path} contains no message_passing encoder weights."
+        )
+
+    expected_state = message_passing.state_dict()
+    missing = sorted(set(expected_state) - set(encoder_state))
+    unexpected = sorted(set(encoder_state) - set(expected_state))
+    incompatible_shapes = sorted(
+        key
+        for key in set(expected_state) & set(encoder_state)
+        if tuple(expected_state[key].shape) != tuple(encoder_state[key].shape)
+    )
+    if missing or unexpected or incompatible_shapes:
+        raise ValueError(
+            "Transfer encoder is incompatible with the configured CheMeleon "
+            f"architecture. Missing={missing}, unexpected={unexpected}, "
+            f"shape_mismatches={incompatible_shapes}."
+        )
+
+    message_passing.load_state_dict(encoder_state, strict=True)
+    return len(encoder_state)
 
 
 def _evaluate(
@@ -1015,6 +1085,11 @@ class CheMeleonTrainer:
             "CheMeleonConfig": {
                 **asdict(self.config.model),
                 "resolved_pretrained_path": str(pretrained_path),
+                "resolved_transfer_checkpoint": (
+                    str(_resolved_path(self.config.model.transfer_checkpoint))
+                    if self.config.model.transfer_checkpoint
+                    else None
+                ),
             },
             "dataset_summary": {
                 "task_names": target_columns,

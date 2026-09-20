@@ -524,6 +524,15 @@ class DataSplitter:
         if mol is None:
             return None
 
+        # Scaffold grouping is intentionally achiral. Remove stereochemistry
+        # before Murcko scaffold construction, not only from the resulting
+        # scaffold. In RDKit 2026.03.x, removing atoms while constructing a
+        # scaffold can otherwise leave double bonds with stereo labels but no
+        # valid stereo atoms, causing MolToSmiles to raise
+        # ``Pre-condition Violation: bad bond stereo``.
+        mol = Chem.Mol(mol)
+        Chem.RemoveStereochemistry(mol)
+
         return MurckoScaffold.MurckoScaffoldSmiles(
             mol=mol,
             includeChirality=False,
