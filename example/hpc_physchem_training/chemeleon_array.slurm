@@ -21,10 +21,12 @@ repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 # elsewhere on the HPC filesystem:
 #   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/physchem \
 #   PHYSCHEM_DATA_FILE=/data/liuy48/datasets/physchem_multitask.csv \
+#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/datasets/physchem_test.csv \
 #   sbatch chemeleon_array.slurm
 training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
 base_config="${CHEMELEON_BASE_CONFIG:-$repo_dir/example/chemeleon_training/conf.toml}"
 data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
+test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"
 split_type="${CHEMELEON_SPLIT_TYPE:-scaffold_balanced}"
 split_column="${PHYSCHEM_SPLIT_COLUMN:-}"
 generated_config_dir="$training_dir/generated_configs"
@@ -65,6 +67,10 @@ if [[ ! -f "$data_file" ]]; then
     echo "Set PHYSCHEM_DATA_FILE to its location on the HPC filesystem." >&2
     exit 1
 fi
+if [[ -n "$test_data_file" && ! -f "$test_data_file" ]]; then
+    echo "Independent test dataset not found: $test_data_file" >&2
+    exit 1
+fi
 
 case "$split_type" in
     random|random_with_repeated_smiles|scaffold_balanced|kennard_stone|kmeans) ;;
@@ -82,6 +88,7 @@ mkdir -p "$generated_config_dir" "$workdir"
 export CHEMFLOW_CHEMELEON_BASE_CONFIG="$base_config"
 export CHEMFLOW_CHEMELEON_GENERATED_CONFIG="$config_path"
 export CHEMFLOW_CHEMELEON_DATA_FILE="$data_file"
+export CHEMFLOW_CHEMELEON_TEST_DATA_FILE="$test_data_file"
 export CHEMFLOW_CHEMELEON_RUN_NAME="$run_name"
 export CHEMFLOW_CHEMELEON_TARGETS="$target_spec"
 export CHEMFLOW_CHEMELEON_WORKDIR="$workdir"
@@ -96,6 +103,7 @@ workers_per_process="$(( ${SLURM_CPUS_PER_TASK:-1} / CHEMFLOW_CHEMELEON_DEVICES 
 if (( workers_per_process < 1 )); then workers_per_process=1; fi
 export CHEMFLOW_CHEMELEON_NUM_WORKERS="${CHEMELEON_NUM_WORKERS:-$workers_per_process}"
 export CHEMFLOW_CHEMELEON_BATCH_SIZE="${CHEMELEON_BATCH_SIZE:-64}"
+export CHEMFLOW_CHEMELEON_EPOCHS="${CHEMELEON_EPOCHS:-30}"
 export CHEMFLOW_CHEMELEON_RESUME="${CHEMELEON_RESUME:-false}"
 
 python - <<'PY'
@@ -108,6 +116,8 @@ import toml
 base_path = Path(os.environ["CHEMFLOW_CHEMELEON_BASE_CONFIG"])
 output_path = Path(os.environ["CHEMFLOW_CHEMELEON_GENERATED_CONFIG"])
 data_path = Path(os.environ["CHEMFLOW_CHEMELEON_DATA_FILE"])
+test_data_value = os.environ["CHEMFLOW_CHEMELEON_TEST_DATA_FILE"].strip()
+test_data_path = Path(test_data_value) if test_data_value else None
 run_name = os.environ["CHEMFLOW_CHEMELEON_RUN_NAME"]
 workdir = Path(os.environ["CHEMFLOW_CHEMELEON_WORKDIR"])
 split_column = os.environ["CHEMFLOW_CHEMELEON_SPLIT_COLUMN"].strip()
@@ -131,6 +141,14 @@ if missing_columns:
         f"Dataset {data_path} is missing required columns: {missing_columns}. "
         f"Available columns: {sorted(available_columns)}"
     )
+if test_data_path is not None:
+    test_columns = set(pd.read_csv(test_data_path, nrows=0).columns)
+    test_missing = sorted({"SMILES", *targets} - test_columns)
+    if test_missing:
+        raise ValueError(
+            f"Independent test dataset {test_data_path} is missing required "
+            f"columns: {test_missing}. Available columns: {sorted(test_columns)}"
+        )
 
 base = config.setdefault("BaseConfig", {})
 base["workdir"] = str(workdir)
@@ -138,7 +156,11 @@ base["task"] = "regression"
 
 dataset = config.setdefault("DatasetConfig", {})
 dataset["dataset_path"] = str(data_path)
-dataset.pop("test_dataset_path", None)
+if test_data_path is not None:
+    dataset["test_dataset_path"] = str(test_data_path)
+    dataset["test_fraction"] = 0.0
+else:
+    dataset.pop("test_dataset_path", None)
 dataset["smiles_column"] = "SMILES"
 dataset["target_column"] = targets if run_name == "multitask" else targets[0]
 if split_column:
@@ -156,6 +178,7 @@ training["strategy"] = "ddp" if devices > 1 else "auto"
 training["num_nodes"] = 1
 training["num_workers"] = int(os.environ["CHEMFLOW_CHEMELEON_NUM_WORKERS"])
 training["batch_size"] = int(os.environ["CHEMFLOW_CHEMELEON_BATCH_SIZE"])
+training["num_epochs"] = int(os.environ["CHEMFLOW_CHEMELEON_EPOCHS"])
 training["resume"] = os.environ["CHEMFLOW_CHEMELEON_RESUME"].strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -186,6 +209,9 @@ echo "Run: $run_name"
 echo "Lightning devices / GPUs: $CHEMFLOW_CHEMELEON_DEVICES"
 echo "Targets: $target_spec"
 echo "Dataset: $data_file"
+if [[ -n "$test_data_file" ]]; then
+    echo "Independent test dataset: $test_data_file"
+fi
 if [[ -n "$split_column" ]]; then
     echo "Split column: $split_column"
 else
@@ -196,6 +222,11 @@ echo "Generated configuration: $config_path"
 echo "Output directory: $workdir"
 nvidia-smi || true
 
-srun chemflow train chemeleon "$config_path"
+chemflow_executable="$(command -v chemflow || true)"
+if [[ -z "$chemflow_executable" ]]; then
+    echo "chemflow was not found after activating the chemflow environment." >&2
+    exit 1
+fi
+srun "$chemflow_executable" train chemeleon "$config_path"
 
 echo "Finished: $(date --iso-8601=seconds)"

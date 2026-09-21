@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -167,6 +168,32 @@ def _select_device(requested: str) -> torch.device:
     if name == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS was requested but is unavailable.")
     return torch.device(name)
+
+
+def _tensorboard_writer(
+    workdir: Path,
+    config: dict[str, Any],
+    *,
+    purge_step: int | None = None,
+):
+    """Create a TensorBoard writer while keeping dependency errors clear."""
+    if not bool(config.get("tensorboard", True)):
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError as error:
+        raise ImportError(
+            "TensorBoard logging is enabled. Install it with "
+            "`python -m pip install tensorboard`, or set "
+            "TrainingConfig.tensorboard = false."
+        ) from error
+    configured = Path(str(config.get("tensorboard_dir", "tensorboard"))).expanduser()
+    log_dir = configured if configured.is_absolute() else workdir / configured
+    print(f"TensorBoard logs: {log_dir}", flush=True)
+    kwargs = {"log_dir": str(log_dir)}
+    if purge_step is not None:
+        kwargs["purge_step"] = int(purge_step)
+    return SummaryWriter(**kwargs)
 
 
 def _validate_split_config(config: dict[str, Any]) -> None:
@@ -599,13 +626,57 @@ class ChemBERTaTrainer:
             auto_model=self.AutoModel,
             auto_tokenizer=self.AutoTokenizer,
         )
+        model_path = Path(model_name).expanduser()
+        pretrained_audit: dict[str, Any] = {
+            "source": (
+                "local Hugging Face directory"
+                if model_path.exists()
+                else "Hugging Face Hub/cache"
+            ),
+            "model_name": model_name,
+            "resolved_path": str(model_path.resolve()) if model_path.exists() else None,
+            "architecture": str(self.model_cfg.get("architecture", "roberta")),
+            "local_files_only": local,
+            "tokenizer_class": type(tokenizer).__name__,
+            "encoder_class": type(encoder).__name__,
+            "checkpoint_loading": "passed_from_pretrained",
+            "cryptographic_checksum": "not_provided_by_configuration",
+            "prediction_head": "new_randomly_initialized_downstream_head",
+        }
         model = ChemBERTaPropertyModel(
             encoder, len(self.targets), float(self.model_cfg.get("dropout", 0.1))
         ).to(self.device)
         if bool(self.model_cfg.get("freeze_encoder", False)):
             for parameter in model.encoder.parameters():
                 parameter.requires_grad = False
+        pretrained_audit["encoder_frozen"] = bool(
+            self.model_cfg.get("freeze_encoder", False)
+        )
         if self.is_main_process:
+            print("ChemBERTa pretrained-weight audit:", flush=True)
+            print(f"  Source: {pretrained_audit['source']}", flush=True)
+            print(f"  Model: {model_name}", flush=True)
+            if pretrained_audit["resolved_path"]:
+                print(
+                    f"  Resolved path: {pretrained_audit['resolved_path']}",
+                    flush=True,
+                )
+            print(
+                f"  Architecture: {pretrained_audit['architecture']}",
+                flush=True,
+            )
+            print(
+                "  Encoder/tokenizer loading: passed (from_pretrained)",
+                flush=True,
+            )
+            print(
+                "  Prediction head: newly initialized for downstream tasks",
+                flush=True,
+            )
+            print(
+                f"  Encoder frozen: {pretrained_audit['encoder_frozen']}",
+                flush=True,
+            )
             total = sum(p.numel() for p in model.parameters())
             trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
             encoder_total = sum(p.numel() for p in model.encoder.parameters())
@@ -733,6 +804,15 @@ class ChemBERTaTrainer:
                     f"{self.device}.",
                     flush=True,
                 )
+        tensorboard_writer = (
+            _tensorboard_writer(
+                self.workdir,
+                self.train_cfg,
+                purge_step=start_epoch if start_epoch > 1 else None,
+            )
+            if self.is_main_process
+            else None
+        )
         if self.distributed:
             model = DistributedDataParallel(model, device_ids=[self.local_rank])
         for epoch in range(start_epoch, epochs + 1):
@@ -775,7 +855,13 @@ class ChemBERTaTrainer:
                 _, train_frame = self._evaluate(plain_model, reference_loaders["train"], means, stds)
                 train_loss = global_train_loss
                 train_metrics, val_metrics = self._task_metrics(train_frame), self._task_metrics(val_frame)
-                row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss}
+                row = {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "encoder_lr": encoder_lr,
+                    "head_lr": head_lr,
+                }
                 task_rows = []
                 for split_name, metrics in (("train", train_metrics), ("validation", val_metrics)):
                     for target, values in metrics.items():
@@ -804,6 +890,17 @@ class ChemBERTaTrainer:
                 if task_path.is_file():
                     previous = pd.read_csv(task_path).query("epoch != @epoch").to_dict("records")
                 pd.DataFrame(previous + task_rows).to_csv(task_path, index=False)
+                if tensorboard_writer is not None:
+                    for metric_name, value in row.items():
+                        if metric_name == "epoch" or not isinstance(
+                            value, (int, float, np.integer, np.floating)
+                        ):
+                            continue
+                        if np.isfinite(float(value)):
+                            tensorboard_writer.add_scalar(
+                                metric_name, float(value), epoch
+                            )
+                    tensorboard_writer.flush()
                 print(f"Epoch {epoch}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
                 for split_name, metrics in (("Train", train_metrics), ("Validation", val_metrics)):
                     print(f"{split_name} metrics: {metrics}")
@@ -819,6 +916,7 @@ class ChemBERTaTrainer:
                         "dropout": float(self.model_cfg.get("dropout", 0.1)),
                         "architecture": self.model_cfg.get("architecture", "roberta"),
                         "label_counts": dict(zip(self.targets, counts.tolist())),
+                        "pretrained_weight_audit": pretrained_audit,
                     }, indent=2), encoding="utf-8")
                     (best_dir / "target_scaling.json").write_text(json.dumps({
                         target: {"mean": float(mean), "std": float(std)}
@@ -857,13 +955,19 @@ class ChemBERTaTrainer:
         best_model = ChemBERTaPropertyModel(encoder, len(self.targets), float(self.model_cfg.get("dropout", 0.1))).to(self.device)
         best_model.head.load_state_dict(torch.load(best_dir / "property_head.pt", map_location=self.device, weights_only=True))
         self._build_applicability(best_model, reference_loaders["train"], reference_loaders["val"], means, stds, best_dir)
-        summary = {"task": self.task, "task_types": dict(zip(self.targets, self.task_types)), "best_val_loss": best_loss, "ddp_world_size": self.world_size, "target_scaling": {target: {"mean": float(mean), "std": float(std)} for target, mean, std in zip(self.targets, means, stds)}, "applicability_bundle": str(best_dir / "applicability.pt")}
+        summary = {"task": self.task, "task_types": dict(zip(self.targets, self.task_types)), "best_val_loss": best_loss, "ddp_world_size": self.world_size, "target_scaling": {target: {"mean": float(mean), "std": float(std)} for target, mean, std in zip(self.targets, means, stds)}, "applicability_bundle": str(best_dir / "applicability.pt"), "pretrained_weight_audit": pretrained_audit}
         if "test" in reference_loaders:
             _, predictions = self._evaluate(best_model, reference_loaders["test"], means, stds)
             predictions.to_csv(self.workdir / "test_predictions.csv", index=False)
             summary["test_metrics"] = self._task_metrics(predictions)
         (self.workdir / "metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        (self.workdir / "config.json").write_text(json.dumps(self.raw, indent=2), encoding="utf-8")
+        resolved_config = copy.deepcopy(self.raw)
+        resolved_config["pretrained_weight_audit"] = pretrained_audit
+        (self.workdir / "config.json").write_text(
+            json.dumps(resolved_config, indent=2), encoding="utf-8"
+        )
+        if tensorboard_writer is not None:
+            tensorboard_writer.close()
         print(f"Saved ChemBERTa results to {self.workdir}")
         if self.distributed:
             dist.destroy_process_group()

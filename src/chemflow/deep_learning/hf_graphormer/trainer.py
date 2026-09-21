@@ -160,6 +160,32 @@ def _select_device(requested: str) -> torch.device:
     return torch.device(name)
 
 
+def _tensorboard_writer(
+    workdir: Path,
+    config: dict[str, Any],
+    *,
+    purge_step: int | None = None,
+):
+    """Create a TensorBoard writer while keeping dependency errors clear."""
+    if not bool(config.get("tensorboard", True)):
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError as error:
+        raise ImportError(
+            "TensorBoard logging is enabled. Install it with "
+            "`python -m pip install tensorboard`, or set "
+            "TrainingConfig.tensorboard = false."
+        ) from error
+    configured = Path(str(config.get("tensorboard_dir", "tensorboard"))).expanduser()
+    log_dir = configured if configured.is_absolute() else workdir / configured
+    print(f"TensorBoard logs: {log_dir}")
+    kwargs = {"log_dir": str(log_dir)}
+    if purge_step is not None:
+        kwargs["purge_step"] = int(purge_step)
+    return SummaryWriter(**kwargs)
+
+
 def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     if len(y_true) == 0:
         return {name: float("nan") for name in ("loss", "rmse", "mae", "r2", "pearson", "spearman")}
@@ -267,6 +293,7 @@ class HuggingFaceGraphormerTrainer:
             if not dist.is_initialized():
                 dist.init_process_group(backend="nccl", init_method="env://")
         self.is_main_process = self.rank == 0
+        self.pretrained_weight_audit: dict[str, Any] = {}
         self.seed = int(self.train_cfg.get("seed", 42))
         process_seed = self.seed + self.rank
         random.seed(process_seed)
@@ -607,7 +634,7 @@ class HuggingFaceGraphormerTrainer:
                 )
             )
             try:
-                return self.GraphormerForGraphClassification.from_pretrained(
+                model = self.GraphormerForGraphClassification.from_pretrained(
                     model_name,
                     num_classes=num_tasks,
                     ignore_mismatched_sizes=num_tasks != 1,
@@ -621,6 +648,26 @@ class HuggingFaceGraphormerTrainer:
                     "your network intercepts HTTPS, set ModelConfig.checkpoint_path "
                     "to the cached graphormer-base-pcqm4mv1.pt file."
                 ) from error
+
+            model_path = Path(model_name).expanduser()
+            self.pretrained_weight_audit = {
+                "source": "local Hugging Face directory" if model_path.exists() else "Hugging Face Hub/cache",
+                "model_name": model_name,
+                "resolved_path": str(model_path.resolve()) if model_path.exists() else None,
+                "local_files_only": bool(self.model_cfg.get("local_files_only", False)),
+                "checkpoint_compatibility": "passed_from_pretrained",
+                "cryptographic_checksum": "not_configured",
+                "prediction_head": "reset_for_downstream_tasks",
+            }
+            if self.is_main_process:
+                print("Hugging Face Graphormer pretrained-weight audit:")
+                print(f"  Source: {self.pretrained_weight_audit['source']}")
+                print(f"  Model: {model_name}")
+                if self.pretrained_weight_audit["resolved_path"]:
+                    print(f"  Resolved path: {self.pretrained_weight_audit['resolved_path']}")
+                print("  Model loading: passed (from_pretrained)")
+                print("  Prediction head: reset for downstream tasks")
+            return model
 
         checkpoint_path = Path(str(checkpoint_value)).expanduser().resolve()
         if not checkpoint_path.is_file():
@@ -694,7 +741,22 @@ class HuggingFaceGraphormerTrainer:
                 f"{incompatible.unexpected_keys}."
             )
         if self.is_main_process:
-            print(f"Loaded Hugging Face Graphormer offline from {checkpoint_path}")
+            print("Hugging Face Graphormer pretrained-weight audit:")
+            print("  Source: configured local checkpoint")
+            print(f"  Resolved path: {checkpoint_path}")
+            print(f"  File size: {checkpoint_path.stat().st_size:,} bytes")
+            print("  Checkpoint compatibility: passed")
+            print("  Prediction head: reset for downstream tasks")
+        self.pretrained_weight_audit = {
+            "source": "configured local checkpoint",
+            "model_name": self.model_cfg.get("model_name"),
+            "resolved_path": str(checkpoint_path),
+            "file_size_bytes": int(checkpoint_path.stat().st_size),
+            "local_files_only": True,
+            "checkpoint_compatibility": "passed_expected_keys",
+            "cryptographic_checksum": "not_configured",
+            "prediction_head": "reset_for_downstream_tasks",
+        }
         return model
 
     def _loader(
@@ -1324,6 +1386,14 @@ class HuggingFaceGraphormerTrainer:
         if bool(self.model_cfg.get("freeze_encoder", False)):
             for parameter in model.encoder.parameters():
                 parameter.requires_grad = False
+        self.pretrained_weight_audit["encoder_frozen"] = bool(
+            self.model_cfg.get("freeze_encoder", False)
+        )
+        if self.is_main_process:
+            print(
+                "  Encoder frozen: "
+                f"{self.pretrained_weight_audit['encoder_frozen']}"
+            )
 
         if self.is_main_process:
             self._print_parameter_summary(model)
@@ -1374,6 +1444,16 @@ class HuggingFaceGraphormerTrainer:
                 np.random.seed(resumed_seed)
                 torch.manual_seed(resumed_seed)
                 torch.cuda.manual_seed(resumed_seed)
+
+        tensorboard_writer = (
+            _tensorboard_writer(
+                self.workdir,
+                self.train_cfg,
+                purge_step=start_epoch if start_epoch > 1 else None,
+            )
+            if self.is_main_process
+            else None
+        )
 
         training_model: torch.nn.Module = model
         if self.distributed:
@@ -1478,6 +1558,8 @@ class HuggingFaceGraphormerTrainer:
                     "epoch": epoch,
                     "train_loss": mean_train_loss,
                     f"val_{selection_metric_name}": val_selection_metric,
+                    "encoder_lr": encoder_lr,
+                    "head_lr": head_lr,
                 }
                 task_history = [
                     previous
@@ -1565,6 +1647,17 @@ class HuggingFaceGraphormerTrainer:
                 pd.DataFrame(task_history).sort_values(
                     ["epoch", "split", "task"]
                 ).to_csv(task_history_path, index=False)
+                if tensorboard_writer is not None:
+                    for metric_name, value in row.items():
+                        if metric_name == "epoch" or not isinstance(
+                            value, (int, float, np.integer, np.floating)
+                        ):
+                            continue
+                        if np.isfinite(float(value)):
+                            tensorboard_writer.add_scalar(
+                                metric_name, float(value), epoch
+                            )
+                    tensorboard_writer.flush()
 
                 if val_selection_metric < best_metric:
                     best_metric = val_selection_metric
@@ -1652,6 +1745,7 @@ class HuggingFaceGraphormerTrainer:
             },
             "applicability_bundle": str(best_dir / "applicability.pt"),
             "calibration_summary": str(best_dir / "calibration.json"),
+            "pretrained_weight_audit": self.pretrained_weight_audit,
         }
         if "test" in loaders:
             test_metrics, predictions = self._evaluate(
@@ -1660,7 +1754,13 @@ class HuggingFaceGraphormerTrainer:
             predictions.to_csv(self.workdir / "test_predictions.csv", index=False)
             summary["test_metrics"] = test_metrics
         (self.workdir / "metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        (self.workdir / "config.json").write_text(json.dumps(self.raw, indent=2), encoding="utf-8")
+        resolved_config = copy.deepcopy(self.raw)
+        resolved_config["pretrained_weight_audit"] = self.pretrained_weight_audit
+        (self.workdir / "config.json").write_text(
+            json.dumps(resolved_config, indent=2), encoding="utf-8"
+        )
+        if tensorboard_writer is not None:
+            tensorboard_writer.close()
         print(f"Saved Hugging Face Graphormer results to {self.workdir}")
         if self.distributed:
             dist.barrier()

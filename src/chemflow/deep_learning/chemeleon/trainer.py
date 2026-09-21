@@ -23,8 +23,13 @@ import torch
 import torch.nn.functional as functional
 from chemprop import data, featurizers, models, nn
 from lightning import pytorch as pl
-from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.callbacks import (
+    Callback,
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from rdkit import Chem
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import (
@@ -116,6 +121,8 @@ class TrainingConfig:
     evaluate_test: bool = True
     plot_training_history: bool = True
     inspect_task_metrics: bool = True
+    tensorboard: bool = True
+    tensorboard_dir: str = "tensorboard"
     task_loss_weighting: str = "uniform"
     task_loss_weights: list[float] | dict[str, float] | None = None
     resume: bool = False
@@ -268,9 +275,10 @@ class TrainingTaskMetricsCallback(Callback):
         pd.DataFrame(self.rows).sort_values(
             ["epoch", "split", "task"]
         ).to_csv(self.output_path, index=False)
-        if trainer.logger is not None:
+        if trainer.loggers:
             logged["epoch"] = float(trainer.current_epoch)
-            trainer.logger.log_metrics(logged, step=trainer.global_step)
+            for logger in trainer.loggers:
+                logger.log_metrics(logged, step=trainer.global_step)
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -714,6 +722,13 @@ def _load_transfer_encoder(
         )
 
     message_passing.load_state_dict(encoder_state, strict=True)
+    print("CheMeleon transfer-weight audit:")
+    print(f"  Checkpoint: {path}")
+    print(f"  File size: {path.stat().st_size:,} bytes")
+    print("  Loading mode: encoder only")
+    print(f"  Encoder tensors loaded: {len(encoder_state):,}")
+    print("  Encoder compatibility: passed (strict=True)")
+    print("  Task-specific prediction head: not loaded")
     return len(encoder_state)
 
 
@@ -1268,6 +1283,23 @@ class CheMeleonTrainer:
             url=self.config.model.pretrained_url,
             sha256=self.config.model.pretrained_sha256,
         )
+        pretrained_source = (
+            "configured pretrained_path"
+            if configured_path
+            else "official CheMeleon default/cache"
+        )
+        checksum = self.config.model.pretrained_sha256
+        print("CheMeleon pretrained-weight audit:")
+        print(f"  Source: {pretrained_source}")
+        print(f"  Resolved path: {pretrained_path}")
+        print(f"  File size: {pretrained_path.stat().st_size:,} bytes")
+        if checksum:
+            print(f"  SHA-256 verification: passed ({checksum})")
+        else:
+            print("  SHA-256 verification: disabled by configuration")
+        if not configured_path:
+            print(f"  Official source URL: {self.config.model.pretrained_url}")
+
         model = _make_model(
             self.config,
             pretrained_path,
@@ -1275,6 +1307,36 @@ class CheMeleonTrainer:
             val_dataset,
             task_loss_weights=task_loss_weights,
         )
+        print("  Encoder state loading: passed (strict=True)")
+        if self.config.model.transfer_checkpoint:
+            print(
+                "  Transfer encoder checkpoint: "
+                f"{_resolved_path(self.config.model.transfer_checkpoint)}"
+            )
+        else:
+            print("  Transfer encoder checkpoint: none")
+
+        pretrained_audit = {
+            "source": pretrained_source,
+            "resolved_path": str(pretrained_path),
+            "file_size_bytes": int(pretrained_path.stat().st_size),
+            "source_url": (
+                self.config.model.pretrained_url if not configured_path else None
+            ),
+            "expected_sha256": checksum,
+            "sha256_verification": "passed" if checksum else "disabled",
+            "encoder_state_loading": "passed_strict",
+            "transfer_checkpoint": (
+                str(_resolved_path(self.config.model.transfer_checkpoint))
+                if self.config.model.transfer_checkpoint
+                else None
+            ),
+            "transfer_loading": (
+                "passed_strict_encoder_only"
+                if self.config.model.transfer_checkpoint
+                else "not_requested"
+            ),
+        }
 
         batch_size = int(self.config.training.batch_size)
         workers = int(self.config.training.num_workers)
@@ -1324,7 +1386,10 @@ class CheMeleonTrainer:
             save_weights_only=False,
             auto_insert_metric_name=False,
         )
-        callbacks: list[Callback] = [checkpoint_callback]
+        callbacks: list[Callback] = [
+            checkpoint_callback,
+            LearningRateMonitor(logging_interval="step"),
+        ]
         if bool(self.config.training.inspect_task_metrics):
             callbacks.append(
                 TrainingTaskMetricsCallback(
@@ -1351,7 +1416,17 @@ class CheMeleonTrainer:
                 )
             )
 
-        logger = CSVLogger(save_dir=self.workdir, name="logs")
+        loggers: list[Any] = [CSVLogger(save_dir=self.workdir, name="logs")]
+        if bool(self.config.training.tensorboard):
+            tensorboard_dir = self.workdir / self.config.training.tensorboard_dir
+            loggers.append(
+                TensorBoardLogger(
+                    save_dir=tensorboard_dir.parent,
+                    name=tensorboard_dir.name,
+                    version="",
+                )
+            )
+            print(f"TensorBoard logs: {tensorboard_dir}")
         trainer = pl.Trainer(
             default_root_dir=self.workdir,
             max_epochs=int(self.config.training.num_epochs),
@@ -1364,7 +1439,7 @@ class CheMeleonTrainer:
             deterministic=bool(self.config.training.deterministic),
             gradient_clip_val=float(self.config.training.gradient_clip_value),
             callbacks=callbacks,
-            logger=logger,
+            logger=loggers,
             enable_progress_bar=bool(self.config.training.verbose),
             enable_model_summary=bool(self.config.training.verbose),
             log_every_n_steps=1,
@@ -1383,6 +1458,7 @@ class CheMeleonTrainer:
                     else None
                 ),
             },
+            "pretrained_weight_audit": pretrained_audit,
             "dataset_summary": {
                 "task_names": target_columns,
                 "num_tasks": len(target_columns),
@@ -1453,7 +1529,8 @@ class CheMeleonTrainer:
         if not trainer.is_global_zero:
             return None
 
-        metrics_path = Path(logger.log_dir) / "metrics.csv"
+        csv_logger = loggers[0]
+        metrics_path = Path(csv_logger.log_dir) / "metrics.csv"
         if metrics_path.is_file():
             shutil.copy2(metrics_path, self.workdir / "training_history.csv")
             shutil.copy2(metrics_path, self.checkpoint_dir / "history.csv")

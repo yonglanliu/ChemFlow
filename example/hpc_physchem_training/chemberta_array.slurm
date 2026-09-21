@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=physchem-chemberta
 #SBATCH --partition=gpu
-# One multitask model plus three single-task models.
+# One multitask model plus four single-task models.
 # Up to four tasks may run concurrently, using four GPUs in total.
-#SBATCH --array=0-3%4
+#SBATCH --array=0-4%4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -20,13 +20,15 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 
 # Override these values at submission time when needed:
-#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/adsorption/physchem \
-#   PHYSCHEM_DATA_FILE=/data/liuy48/model_training/adme/adsorption/dataset/physchem_multitask.csv \
+#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/physchem \
+#   PHYSCHEM_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_multitask.csv \
+#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_test.csv \
 #   CHEMBERTA_MODEL_NAME=/data/liuy48/models/ChemBERTa-77M-MLM \
 #   sbatch chemberta_array.slurm
-training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/adsorption/physchem}"
+training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
 base_config="${CHEMBERTA_BASE_CONFIG:-$repo_dir/example/chemberta_training/conf.toml}"
-data_file="${PHYSCHEM_DATA_FILE:-/data/liuy48/model_training/adme/adsorption/dataset/physchem_multitask.csv}"
+data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
+test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"
 model_name="${CHEMBERTA_MODEL_NAME:-DeepChem/ChemBERTa-77M-MLM}"
 split_type="${CHEMBERTA_SPLIT_TYPE:-scaffold_balanced}"
 split_column="${PHYSCHEM_SPLIT_COLUMN:-}"
@@ -37,12 +39,14 @@ run_names=(
     "LogD_pH7_4"
     "KSol_pH6_8"
     "KSol_pH7_4"
+    "KSol_ExpansionRX"
 )
 target_specs=(
-    "LogD_pH7_4,Log_KSOL_ExpansionRX_mol_L"
+    "LogD_pH7_4,Log_KSOL_pH6_8_mol_L,Log_KSOL_pH7_4_mol_L,Log_KSOL_ExpansionRX_mol_L"
     "LogD_pH7_4"
     "Log_KSOL_pH6_8_mol_L"
     "Log_KSOL_pH7_4_mol_L"
+    "Log_KSOL_ExpansionRX_mol_L"
 )
 
 array_index="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}"
@@ -63,6 +67,10 @@ for required_file in "$base_config" "$data_file"; do
         exit 1
     fi
 done
+if [[ -n "$test_data_file" && ! -f "$test_data_file" ]]; then
+    echo "Independent test dataset not found: $test_data_file" >&2
+    exit 1
+fi
 if [[ "$model_name" == /* && ! -d "$model_name" ]]; then
     echo "Local ChemBERTa model directory not found: $model_name" >&2
     exit 1
@@ -84,6 +92,7 @@ mkdir -p "$generated_config_dir" "$workdir"
 export CHEMFLOW_CHEMBERTA_BASE_CONFIG="$base_config"
 export CHEMFLOW_CHEMBERTA_GENERATED_CONFIG="$config_path"
 export CHEMFLOW_CHEMBERTA_DATA_FILE="$data_file"
+export CHEMFLOW_CHEMBERTA_TEST_DATA_FILE="$test_data_file"
 export CHEMFLOW_CHEMBERTA_MODEL_NAME="$model_name"
 export CHEMFLOW_CHEMBERTA_RUN_NAME="$run_name"
 export CHEMFLOW_CHEMBERTA_TARGETS="$target_spec"
@@ -106,6 +115,8 @@ import toml
 base_path = Path(os.environ["CHEMFLOW_CHEMBERTA_BASE_CONFIG"])
 output_path = Path(os.environ["CHEMFLOW_CHEMBERTA_GENERATED_CONFIG"])
 data_path = Path(os.environ["CHEMFLOW_CHEMBERTA_DATA_FILE"])
+test_data_value = os.environ["CHEMFLOW_CHEMBERTA_TEST_DATA_FILE"].strip()
+test_data_path = Path(test_data_value) if test_data_value else None
 run_name = os.environ["CHEMFLOW_CHEMBERTA_RUN_NAME"]
 workdir = Path(os.environ["CHEMFLOW_CHEMBERTA_WORKDIR"])
 split_column = os.environ["CHEMFLOW_CHEMBERTA_SPLIT_COLUMN"].strip()
@@ -129,6 +140,14 @@ if missing_columns:
         f"Dataset {data_path} is missing required columns: {missing_columns}. "
         f"Available columns: {sorted(available_columns)}"
     )
+if test_data_path is not None:
+    test_columns = set(pd.read_csv(test_data_path, nrows=0).columns)
+    test_missing = sorted({"SMILES", *targets} - test_columns)
+    if test_missing:
+        raise ValueError(
+            f"Independent test dataset {test_data_path} is missing required "
+            f"columns: {test_missing}. Available columns: {sorted(test_columns)}"
+        )
 
 base = config.setdefault("BaseConfig", {})
 base["workdir"] = str(workdir)
@@ -136,7 +155,11 @@ base["task"] = "regression"
 
 dataset = config.setdefault("DatasetConfig", {})
 dataset["dataset_path"] = str(data_path)
-dataset.pop("test_dataset_path", None)
+if test_data_path is not None:
+    dataset["test_dataset_path"] = str(test_data_path)
+    dataset["test_fraction"] = 0.0
+else:
+    dataset.pop("test_dataset_path", None)
 dataset["smiles_column"] = "SMILES"
 dataset["target_column"] = targets if run_name == "multitask" else targets[0]
 if split_column:
@@ -188,6 +211,9 @@ echo "Slurm job: ${SLURM_JOB_ID}; array task: ${SLURM_ARRAY_TASK_ID}"
 echo "Run: $run_name"
 echo "Targets: $target_spec"
 echo "Dataset: $data_file"
+if [[ -n "$test_data_file" ]]; then
+    echo "Independent test dataset: $test_data_file"
+fi
 echo "ChemBERTa model: $model_name"
 if [[ -n "$split_column" ]]; then
     echo "Split column: $split_column"
@@ -215,6 +241,11 @@ if not torch.cuda.is_available():
 PY
 nvidia-smi
 
-srun chemflow train chemberta "$config_path"
+chemflow_executable="$(command -v chemflow || true)"
+if [[ -z "$chemflow_executable" ]]; then
+    echo "chemflow was not found after activating the chemflow environment." >&2
+    exit 1
+fi
+srun "$chemflow_executable" train chemberta "$config_path"
 
 echo "Finished: $(date --iso-8601=seconds)"

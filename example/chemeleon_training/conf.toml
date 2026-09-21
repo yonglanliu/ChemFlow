@@ -40,11 +40,13 @@ precision = "32-true"           # Common options: "32-true", "16-mixed", "bf16-m
 deterministic = true
 gradient_clip_value = 1.0
 early_stopping = true
-early_stopping_patience = 10
+early_stopping_patience = 6
 class_balance = false           # Classification only.
 evaluate_test = true
 plot_training_history = true
 inspect_task_metrics = true
+tensorboard = true
+tensorboard_dir = "tensorboard"
 
 task_loss_weighting = "sqrt_inverse_frequency" # Options: "uniform", "sqrt_inverse_frequency", "inverse_frequency".
 # Explicit weights override the policy; use target_column order:
@@ -67,11 +69,11 @@ verbose = true
 # transfer_checkpoint = "/path/to/public_pretraining/best.ckpt"
 transfer_encoder_only = true
 
-freeze_epochs = 0              # Temporarily freeze message passing if > 0.
+freeze_epochs = 3              # Fit the new head before unfreezing the encoder.
 dropout = 0.1                  # Required for MC-dropout inference uncertainty.
 ffn_hidden_dim = 256
 ffn_num_layers = 1
 warmup_epochs = 2
-init_lr = 1e-4
-max_lr = 1e-3
-final_lr = 1e-4
+init_lr = 1e-5                 # Conservative pretrained-encoder fine-tuning.
+max_lr = 2e-4
+final_lr = 1e-5

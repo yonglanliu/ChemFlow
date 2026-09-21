@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=physchem-graphormer
 #SBATCH --partition=gpu
-# One multitask model plus three single-task models.
+# One multitask model plus four single-task models.
 # Up to four tasks may run concurrently, using four GPUs in total.
-#SBATCH --array=0-3%4
+#SBATCH --array=0-4%4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -20,13 +20,13 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 
 # These locations can be overridden at submission time, for example:
-#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/adsorption/physchem \
-#   PHYSCHEM_DATA_FILE=/data/liuy48/model_training/adme/adsorption/dataset/physchem_multitask.csv \
-#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/model_training/adme/absorption/dataset/expansionrx_test.csv \
+#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/physchem \
+#   PHYSCHEM_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_multitask.csv \
+#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_test.csv \
 #   sbatch graphormer_array.slurm
-training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/adsorption/physchem}"
+training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
 base_config="${HF_GRAPHORMER_BASE_CONFIG:-$repo_dir/example/hf_graphormer_training/conf.toml}"
-data_file="${PHYSCHEM_DATA_FILE:-/data/liuy48/model_training/adme/adsorption/dataset/physchem_multitask.csv}"
+data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
 test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"
 checkpoint="${HF_GRAPHORMER_CHECKPOINT:-$HOME/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt}"
 split_type="${HF_GRAPHORMER_SPLIT_TYPE:-scaffold_balanced}"
@@ -38,12 +38,14 @@ run_names=(
     "LogD_pH7_4"
     "KSol_pH6_8"
     "KSol_pH7_4"
+    "KSol_ExpansionRX"
 )
 target_specs=(
-    "LogD_pH7_4,Log_KSOL_ExpansionRX_mol_L"
+    "LogD_pH7_4,Log_KSOL_pH6_8_mol_L,Log_KSOL_pH7_4_mol_L,Log_KSOL_ExpansionRX_mol_L"
     "LogD_pH7_4"
     "Log_KSOL_pH6_8_mol_L"
     "Log_KSOL_pH7_4_mol_L"
+    "Log_KSOL_ExpansionRX_mol_L"
 )
 
 array_index="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}"
@@ -223,6 +225,11 @@ if not torch.cuda.is_available():
 PY
 nvidia-smi
 
-srun chemflow train hf-graphormer "$config_path"
+chemflow_executable="$(command -v chemflow || true)"
+if [[ -z "$chemflow_executable" ]]; then
+    echo "chemflow was not found after activating the chemflow environment." >&2
+    exit 1
+fi
+srun "$chemflow_executable" train hf-graphormer "$config_path"
 
 echo "Finished: $(date --iso-8601=seconds)"

@@ -1,5 +1,30 @@
 # Physchem training on Slurm
 
+Submit `.slurm` files with `sbatch`; do not run them with `source`. Sourcing a
+job file makes Bash ignore every `#SBATCH` directive and does not define
+`SLURM_ARRAY_TASK_ID`.
+
+## TensorBoard
+
+CheMeleon, Graphormer, and ChemBERTa write TensorBoard events to the
+`tensorboard` directory inside each run directory while retaining their CSV
+histories. Start TensorBoard on the HPC host with, for example:
+
+```bash
+tensorboard --logdir /data/liuy48/model_training/adme/physchem \
+  --host 127.0.0.1 --port 6006
+```
+
+Then forward the port from the local computer:
+
+```bash
+ssh -L 6006:127.0.0.1:6006 USER@HPC_LOGIN_HOST
+```
+
+Open `http://127.0.0.1:6006`. Set `tensorboard = false` in the model's
+`TrainingConfig` to disable event logging, or change `tensorboard_dir` to use a
+different run-relative location.
+
 ## Hugging Face Graphormer KSOL reference
 
 The normal HPC `chemflow` environment includes the compatible Hugging Face
@@ -117,16 +142,17 @@ training history, metrics, saved split assignments, and test predictions.
 The checkpoint is loaded offline, so compute nodes do not need direct access to
 Hugging Face and are unaffected by institutional HTTPS certificate interception.
 
-## Four-run Graphormer array
+## Five-run Graphormer array
 
-`graphormer_array.slurm` generates and trains four configurations:
+`graphormer_array.slurm` generates and trains five configurations:
 
-1. LogD plus ExpansionRX KSOL multitask
+1. LogD, KSOL pH 6.8, KSOL pH 7.4, and ExpansionRX KSOL multitask
 2. LogD single-task
 3. KSOL pH 6.8 single-task
 4. KSOL pH 7.4 single-task
+5. ExpansionRX KSOL single-task
 
-Submit all four, with at most four one-GPU jobs running concurrently:
+Submit all five, with at most four one-GPU jobs running concurrently:
 
 ```bash
 sbatch example/hpc_physchem_training/graphormer_array.slurm
@@ -135,7 +161,7 @@ sbatch example/hpc_physchem_training/graphormer_array.slurm
 To reduce concurrent GPU use, override the array throttle, for example:
 
 ```bash
-sbatch --array=0-3%2 example/hpc_physchem_training/graphormer_array.slurm
+sbatch --array=0-4%2 example/hpc_physchem_training/graphormer_array.slurm
 ```
 
 Set `HF_GRAPHORMER_RESUME=true` before submission to resume each run from its
@@ -143,7 +169,7 @@ own output directory. Paths, batch size, worker count, epochs, split type, and
 checkpoint can be overridden with the environment variables documented at the
 top of the script.
 
-## Four-run ChemBERTa array
+## Five-run ChemBERTa array
 
 Before submitting from a compute node without internet access, populate the
 shared Hugging Face cache from a login node:
@@ -152,7 +178,7 @@ shared Hugging Face cache from a login node:
 hf download DeepChem/ChemBERTa-77M-MLM
 ```
 
-Then submit the matching four-run ChemBERTa array:
+Then submit the matching five-run ChemBERTa array:
 
 ```bash
 sbatch example/hpc_physchem_training/chemberta_array.slurm
@@ -169,7 +195,7 @@ sbatch example/hpc_physchem_training/chemberta_array.slurm
 Use `CHEMBERTA_RESUME=true` to resume interrupted runs and
 `CHEMBERTA_APPLICABILITY_ONLY=true` to rebuild applicability/calibration
 artifacts without further optimization. Override array concurrency with
-`sbatch --array=0-3%2 ...` when fewer GPUs should run simultaneously.
+`sbatch --array=0-4%2 ...` when fewer GPUs should run simultaneously.
 
 For CheMeleon, Graphormer, or ChemBERTa, reuse an existing dataset `split`
 column with either of these equivalent forms:
@@ -187,17 +213,18 @@ export CHEMBERTA_SPLIT_TYPE=predefined       # ChemBERTa
 When `predefined` is selected, the scripts default to the column name `split`
 and do not pass `predefined` to the molecular split algorithm.
 
-Graphormer can instead evaluate a physically separate test CSV. The training
-file is split into training and validation only, and the external file is used
-only for final testing:
+CheMeleon, Graphormer, and ChemBERTa can evaluate a physically separate test
+CSV. The training file is split into training and validation only, and the
+external file is used only for final testing:
 
 ```bash
 export PHYSCHEM_DATA_FILE=/path/to/training.csv
 export PHYSCHEM_TEST_DATA_FILE=/path/to/independent_test.csv
-export HF_GRAPHORMER_SPLIT_TYPE=scaffold_balanced
-sbatch example/hpc_physchem_training/graphormer_array.slurm
+sbatch example/hpc_physchem_training/chemeleon_array.slurm
+# or: sbatch example/hpc_physchem_training/graphormer_array.slurm
+# or: sbatch example/hpc_physchem_training/chemberta_array.slurm
 ```
 
-The generated Graphormer configuration sets `test_fraction = 0.0` whenever
+The generated configuration sets `test_fraction = 0.0` whenever
 `PHYSCHEM_TEST_DATA_FILE` is present. Both files must contain `SMILES` and every
 target required by the selected array task.

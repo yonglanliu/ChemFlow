@@ -47,6 +47,8 @@ batch_size = 16                 # Per-process batch size under DDP.
 num_workers = 0
 num_epochs = 30
 progress_bar = true
+tensorboard = true
+tensorboard_dir = "tensorboard"
 
 # Exact continuation from a full ChemFlow checkpoint:
 resume = false
