@@ -17,6 +17,7 @@ from chemflow.deep_learning.chemeleon.trainer import (
     _load_transfer_encoder,
     _molecules_for_split,
     _resolve_resume_checkpoint,
+    _save_split_manifest,
     load_config,
 )
 
@@ -60,6 +61,23 @@ class CheMeleonCliTest(unittest.TestCase):
 
 
 class CheMeleonConfigTest(unittest.TestCase):
+    def test_split_manifest_uses_uppercase_smiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = {
+                "original_index": 7,
+                "smiles": "CCO",
+                "targets": np.asarray([1.5], dtype=np.float32),
+            }
+            _save_split_manifest(
+                Path(directory), [record], [], [], ["activity"]
+            )
+            header = (Path(directory) / "data_splits.csv").read_text(
+                encoding="utf-8"
+            ).splitlines()[0]
+
+        self.assertIn("SMILES", header.split(","))
+        self.assertNotIn("smiles", header.split(","))
+
     def test_minimal_config_uses_expected_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"

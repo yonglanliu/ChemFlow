@@ -17,13 +17,14 @@ preprocessor does not compile with Cython 3.
 Run the pH 7.4 kinetic-solubility example:
 
 ```bash
-chemflow train hf-graphormer example/hf_graphormer_training/physchem_conf.toml
+chemflow train hf-graphormer example/hf_graphormer_training/conf.toml
 ```
 
-Run masked multitask regression for LogD and the three solubility targets:
+The same annotated file supports masked multitask regression after changing
+`target_column` to a TOML list:
 
 ```bash
-chemflow train hf-graphormer example/hf_graphormer_training/physchem_multitask_conf.toml
+chemflow train hf-graphormer example/hf_graphormer_training/conf.toml
 ```
 
 For binary single-task or masked multitask classification, set:
@@ -39,10 +40,10 @@ target_column = "active" # or ["endpoint_a", "endpoint_b"]
 classification_threshold = 0.5
 ```
 
-Then run the provided template after setting its dataset and target columns:
+Then run the same configuration after setting its dataset and target columns:
 
 ```bash
-chemflow train hf-graphormer example/hf_graphormer_training/classification_conf.toml
+chemflow train hf-graphormer example/hf_graphormer_training/conf.toml
 ```
 
 Classification labels must be `0`, `1`, or missing. Every training endpoint
@@ -71,11 +72,10 @@ Mixed-task early stopping minimizes the macro mean of standardized regression
 MSE and classification log loss, preventing a regression endpoint's physical
 units from dominating model selection.
 
-After replacing its placeholder dataset and target names, run the included
-template with:
+After replacing its dataset and target names, run:
 
 ```bash
-chemflow train hf-graphormer example/hf_graphormer_training/mixed_conf.toml
+chemflow train hf-graphormer example/hf_graphormer_training/conf.toml
 ```
 
 For multitask training, `target_column` is a TOML list. A molecule is retained
@@ -95,6 +95,22 @@ not contact Hugging Face. Remove `checkpoint_path` and set
 For a fair comparison, use the `data_splits.csv` produced by the existing run
 as `dataset_path` and set `split_column = "split"`. The input must also contain
 the configured SMILES and target columns.
+
+Alternatively, keep an independent test set in a physically separate CSV:
+
+```toml
+[DatasetConfig]
+dataset_path = "/path/to/training.csv"
+test_dataset_path = "/path/to/independent_test.csv"
+split_type = "scaffold_balanced"
+val_fraction = 0.1
+test_fraction = 0.0
+```
+
+The external file must contain the configured SMILES and target columns. It is
+assigned only to the test split and is excluded from generated training and
+validation splits, target scaling, early stopping, and calibration. Do not also
+place `test` rows in a predefined training file when `test_dataset_path` is set.
 
 Outputs include `data_splits.csv`, `training_history.csv`, `metrics.json`,
 `training_task_metrics.csv`, `test_predictions.csv`, and a reloadable
@@ -188,7 +204,7 @@ Launching four GPUs manually looks like:
 ```bash
 torchrun --standalone --nproc_per_node=4 \
   "$(command -v chemflow)" train hf-graphormer \
-  example/hf_graphormer_training/physchem_multitask_conf.toml
+  example/hf_graphormer_training/conf.toml
 ```
 
 Use matching training settings:

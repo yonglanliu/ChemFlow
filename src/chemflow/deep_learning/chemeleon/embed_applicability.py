@@ -30,7 +30,7 @@ def _manifest_records(
     selected = frame.loc[frame["split"].astype(str).str.lower() == split].copy()
     records: list[dict] = []
     for row_index, row in selected.iterrows():
-        smiles = str(row["smiles"]).strip()
+        smiles = str(row["SMILES"]).strip()
         molecule = Chem.MolFromSmiles(smiles) if smiles else None
         targets = pd.to_numeric(row[target_names], errors="coerce").to_numpy(
             dtype=np.float32
@@ -69,7 +69,11 @@ def embed_applicability(
         checkpoint_path, device="cpu", applicability_domain=False
     )
     frame = pd.read_csv(split_manifest_path)
-    required = {"smiles", "split", *predictor.target_names}
+    # New manifests consistently use the conventional uppercase SMILES name.
+    # Accept and normalize older ChemFlow manifests for backward compatibility.
+    if "SMILES" not in frame.columns and "smiles" in frame.columns:
+        frame = frame.rename(columns={"smiles": "SMILES"})
+    required = {"SMILES", "split", *predictor.target_names}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise KeyError(f"Split manifest is missing columns: {missing}")

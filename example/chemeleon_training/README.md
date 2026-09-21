@@ -40,11 +40,11 @@ classification outputs use BCE-with-logits and sigmoid probabilities.
 Validation loss and early stopping combine standardized regression MSE with
 classification log loss.
 
-An editable template is provided at `mixed_conf.toml`. After replacing its
-dataset and target names, run:
+All modes use the single annotated `conf.toml`. For mixed learning, replace its
+dataset and target names, select `task = "mixed"`, and run:
 
 ```bash
-chemflow train chemeleon example/chemeleon_training/mixed_conf.toml
+chemflow train chemeleon example/chemeleon_training/conf.toml
 ```
 
 Missing labels are allowed in multitask data. A molecule is retained when at
@@ -54,16 +54,10 @@ splits. Binary classification targets must be `0`, `1`, or missing.
 
 ## Training
 
-Single-task regression:
+Single-task, multitask, classification, and mixed training all use:
 
 ```bash
-chemflow train chemeleon example/chemeleon_training/regression_conf.toml
-```
-
-Multitask regression:
-
-```bash
-chemflow train chemeleon example/chemeleon_training/multitask_conf.toml
+chemflow train chemeleon example/chemeleon_training/conf.toml
 ```
 
 Training writes `best.ckpt` and `last.ckpt` under the configured

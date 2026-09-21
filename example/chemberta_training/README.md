@@ -13,7 +13,7 @@ pip install -e '.[chemberta]'
 Train:
 
 ```bash
-chemflow train chemberta example/chemberta_training/physchem_conf.toml
+chemflow train chemberta example/chemberta_training/conf.toml
 ```
 
 The run writes `data_splits.csv`, `rejected_rows.csv`,
@@ -85,7 +85,7 @@ and `strategy = "ddp"`, then launch, for example:
 
 ```bash
 torchrun --standalone --nproc_per_node=4 "$(command -v chemflow)" \
-  train chemberta example/chemberta_training/physchem_conf.toml
+  train chemberta example/chemberta_training/conf.toml
 ```
 
 The configured batch size is per GPU. Rank 0 performs validation,

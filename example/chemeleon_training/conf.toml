@@ -1,0 +1,77 @@
+# Complete CheMeleon training template.
+# Keep one active value per option; uncomment an alternative only after
+# commenting out the currently active value.
+
+[BaseConfig]
+workdir = "./example/chemeleon_training/run"
+task = "regression"             # Options: "regression", "classification", "mixed".
+seed = 42
+
+[DatasetConfig]
+dataset_path = "./dataset/curated/Biogen_ExpansionRX_clearance_training.csv"
+# Use a physically separate final test set only with test_fraction = 0.0.
+# test_dataset_path = "/path/to/independent_test.csv"
+smiles_column = "SMILES"
+
+# A string selects single-task learning:
+# target_column = "Log_HLM_CLint"
+# A list selects homogeneous or mixed multitask learning:
+target_column = ["Log_HLM_CLint", "Log_RLM_CLint", "Log_MLM_CLint"]
+# Required only when task = "mixed"; order must match target_column:
+# task_types = ["regression", "classification", "classification"]
+
+split_type = "scaffold_balanced" # Options: "random", "random_with_repeated_smiles", "scaffold_balanced", "kennard_stone", "kmeans", "predefined".
+val_fraction = 0.1
+test_fraction = 0.1
+# To reuse labels in dataset_path, replace split_type with "predefined":
+# split_type = "predefined"
+# split_column = "split"
+
+[CheMeleonTrainingConfig]
+batch_size = 64                 # Per-device batch size under DDP.
+num_workers = 0                 # Increase on Linux/HPC after testing I/O.
+num_epochs = 30
+accelerator = "auto"            # Options: "cpu", "gpu", "mps", "auto".
+devices = 1                     # Example DDP value: 4.
+strategy = "auto"               # Options: "auto", "ddp".
+num_nodes = 1
+sync_batchnorm = false          # Usually useful only with multi-GPU DDP.
+precision = "32-true"           # Common options: "32-true", "16-mixed", "bf16-mixed".
+deterministic = true
+gradient_clip_value = 1.0
+early_stopping = true
+early_stopping_patience = 10
+class_balance = false           # Classification only.
+evaluate_test = true
+plot_training_history = true
+inspect_task_metrics = true
+
+task_loss_weighting = "sqrt_inverse_frequency" # Options: "uniform", "sqrt_inverse_frequency", "inverse_frequency".
+# Explicit weights override the policy; use target_column order:
+# task_loss_weights = [1.0, 1.0, 1.0]
+
+# Exact continuation of the same run and optimizer state:
+resume = false
+# resume_checkpoint = "/path/to/checkpoints/last.ckpt"
+verbose = true
+
+[CheMeleonConfig]
+# Leave pretrained_path unset to download and verify the official weights.
+# pretrained_path = "/path/to/chemeleon_pretrained.pt"
+# pretrained_url and pretrained_sha256 normally use ChemFlow's verified defaults.
+# pretrained_url = "https://example.org/chemeleon.pt"
+# pretrained_sha256 = "expected_sha256"
+
+# For sequential transfer, initialize only the encoder from a previously
+# fine-tuned full checkpoint. This is different from resume.
+# transfer_checkpoint = "/path/to/public_pretraining/best.ckpt"
+transfer_encoder_only = true
+
+freeze_epochs = 0              # Temporarily freeze message passing if > 0.
+dropout = 0.1                  # Required for MC-dropout inference uncertainty.
+ffn_hidden_dim = 256
+ffn_num_layers = 1
+warmup_epochs = 2
+init_lr = 1e-4
+max_lr = 1e-3
+final_lr = 1e-4

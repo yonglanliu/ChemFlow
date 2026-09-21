@@ -416,7 +416,15 @@ def _target_columns(config: DatasetConfig) -> list[str]:
 
 def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dict], list[dict]]:
     target_columns = _target_columns(config)
-    required = [config.smiles_column, *target_columns]
+    smiles_column = config.smiles_column
+    if (
+        smiles_column == "SMILES"
+        and smiles_column not in frame.columns
+        and "smiles" in frame.columns
+    ):
+        # Backward compatibility for data_splits.csv written by older releases.
+        smiles_column = "smiles"
+    required = [smiles_column, *target_columns]
     if config.split_column:
         required.append(config.split_column)
     missing = [column for column in required if column not in frame.columns]
@@ -426,7 +434,7 @@ def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dic
     records: list[dict] = []
     rejected: list[dict] = []
     for row_index, row in frame.iterrows():
-        smiles = str(row[config.smiles_column]).strip()
+        smiles = str(row[smiles_column]).strip()
         targets = pd.to_numeric(row[target_columns], errors="coerce").to_numpy(
             dtype=np.float32
         )
@@ -549,7 +557,7 @@ def _save_split_manifest(
         rows.extend(
             {
                 "original_index": item["original_index"],
-                "smiles": item["smiles"],
+                "SMILES": item["smiles"],
                 **{
                     target_name: float(item["targets"][task_index])
                     for task_index, target_name in enumerate(target_columns)

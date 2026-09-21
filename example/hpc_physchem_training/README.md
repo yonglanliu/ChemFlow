@@ -186,3 +186,18 @@ export CHEMBERTA_SPLIT_TYPE=predefined       # ChemBERTa
 
 When `predefined` is selected, the scripts default to the column name `split`
 and do not pass `predefined` to the molecular split algorithm.
+
+Graphormer can instead evaluate a physically separate test CSV. The training
+file is split into training and validation only, and the external file is used
+only for final testing:
+
+```bash
+export PHYSCHEM_DATA_FILE=/path/to/training.csv
+export PHYSCHEM_TEST_DATA_FILE=/path/to/independent_test.csv
+export HF_GRAPHORMER_SPLIT_TYPE=scaffold_balanced
+sbatch example/hpc_physchem_training/graphormer_array.slurm
+```
+
+The generated Graphormer configuration sets `test_fraction = 0.0` whenever
+`PHYSCHEM_TEST_DATA_FILE` is present. Both files must contain `SMILES` and every
+target required by the selected array task.

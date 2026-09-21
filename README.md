@@ -395,7 +395,7 @@ python -m pip check
 ### Train Hugging Face Graphormer
 
 ```bash
-chemflow train hf-graphormer example/hf_graphormer_training/physchem_conf.toml
+chemflow train hf-graphormer example/hf_graphormer_training/conf.toml
 ```
 
 HF Graphormer and CheMeleon support single-task, homogeneous multitask, and
@@ -407,25 +407,23 @@ and provide `DatasetConfig.task_types` in target-column order; see
 
 ```bash
 pip install -e '.[chemberta]'
-chemflow train chemberta example/chemberta_training/physchem_conf.toml
+chemflow train chemberta example/chemberta_training/conf.toml
 ```
 
 See [the ChemBERTa tutorial](example/chemberta_training/README.md).
 
 ### Fine-tune the pretrained CheMeleon model
 
-Copy and edit `example/chemeleon_training/regression_conf.toml`, then run:
+Copy and edit `example/chemeleon_training/conf.toml`, then run:
 
 ```bash
-chemflow train chemeleon example/chemeleon_training/regression_conf.toml
+chemflow train chemeleon example/chemeleon_training/conf.toml
 ```
 
-For multitask training, set `target_column` to a TOML list or use the included
-example:
-
-```bash
-chemflow train chemeleon example/chemeleon_training/multitask_conf.toml
-```
+For multitask training, set `target_column` to a TOML list in the same file.
+The comments in each model's single `conf.toml` explain how to select
+single-task, multitask, classification, mixed-task, external-test, and DDP
+operation.
 
 Missing multitask labels are masked automatically. Run prediction with the
 task names stored in the checkpoint:

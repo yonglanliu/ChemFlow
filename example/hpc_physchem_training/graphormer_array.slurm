@@ -22,10 +22,12 @@ repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 # These locations can be overridden at submission time, for example:
 #   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/adsorption/physchem \
 #   PHYSCHEM_DATA_FILE=/data/liuy48/model_training/adme/adsorption/dataset/physchem_multitask.csv \
+#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/model_training/adme/absorption/dataset/expansionrx_test.csv \
 #   sbatch graphormer_array.slurm
 training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/adsorption/physchem}"
-base_config="${HF_GRAPHORMER_BASE_CONFIG:-$repo_dir/example/hf_graphormer_training/physchem_multitask_conf.toml}"
+base_config="${HF_GRAPHORMER_BASE_CONFIG:-$repo_dir/example/hf_graphormer_training/conf.toml}"
 data_file="${PHYSCHEM_DATA_FILE:-/data/liuy48/model_training/adme/adsorption/dataset/physchem_multitask.csv}"
+test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"
 checkpoint="${HF_GRAPHORMER_CHECKPOINT:-$HOME/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt}"
 split_type="${HF_GRAPHORMER_SPLIT_TYPE:-scaffold_balanced}"
 split_column="${PHYSCHEM_SPLIT_COLUMN:-}"
@@ -62,6 +64,10 @@ for required_file in "$base_config" "$data_file" "$checkpoint"; do
         exit 1
     fi
 done
+if [[ -n "$test_data_file" && ! -f "$test_data_file" ]]; then
+    echo "External test dataset not found: $test_data_file" >&2
+    exit 1
+fi
 
 case "$split_type" in
     random|random_with_repeated_smiles|scaffold_balanced|kennard_stone|kmeans) ;;
@@ -79,6 +85,7 @@ mkdir -p "$generated_config_dir" "$workdir"
 export CHEMFLOW_HF_BASE_CONFIG="$base_config"
 export CHEMFLOW_HF_GENERATED_CONFIG="$config_path"
 export CHEMFLOW_HF_DATA_FILE="$data_file"
+export CHEMFLOW_HF_TEST_DATA_FILE="$test_data_file"
 export CHEMFLOW_HF_CHECKPOINT="$checkpoint"
 export CHEMFLOW_HF_RUN_NAME="$run_name"
 export CHEMFLOW_HF_TARGETS="$target_spec"
@@ -101,6 +108,7 @@ import toml
 base_path = Path(os.environ["CHEMFLOW_HF_BASE_CONFIG"])
 output_path = Path(os.environ["CHEMFLOW_HF_GENERATED_CONFIG"])
 data_path = Path(os.environ["CHEMFLOW_HF_DATA_FILE"])
+test_data_file = os.environ["CHEMFLOW_HF_TEST_DATA_FILE"].strip()
 checkpoint_path = Path(os.environ["CHEMFLOW_HF_CHECKPOINT"]).expanduser()
 run_name = os.environ["CHEMFLOW_HF_RUN_NAME"]
 workdir = Path(os.environ["CHEMFLOW_HF_WORKDIR"])
@@ -125,6 +133,15 @@ if missing_columns:
         f"Dataset {data_path} is missing required columns: {missing_columns}. "
         f"Available columns: {sorted(available_columns)}"
     )
+if test_data_file:
+    test_columns = set(pd.read_csv(test_data_file, nrows=0).columns)
+    missing_test_columns = sorted({"SMILES", *targets} - test_columns)
+    if missing_test_columns:
+        raise ValueError(
+            f"External test dataset {test_data_file} is missing required "
+            f"columns: {missing_test_columns}. Available columns: "
+            f"{sorted(test_columns)}"
+        )
 
 base = config.setdefault("BaseConfig", {})
 base["workdir"] = str(workdir)
@@ -132,7 +149,11 @@ base["task"] = "regression"
 
 dataset = config.setdefault("DatasetConfig", {})
 dataset["dataset_path"] = str(data_path)
-dataset.pop("test_dataset_path", None)
+if test_data_file:
+    dataset["test_dataset_path"] = test_data_file
+    dataset["test_fraction"] = 0.0
+else:
+    dataset.pop("test_dataset_path", None)
 dataset["smiles_column"] = "SMILES"
 dataset["target_column"] = targets if run_name == "multitask" else targets[0]
 if split_column:
@@ -179,6 +200,9 @@ echo "Slurm job: ${SLURM_JOB_ID}; array task: ${SLURM_ARRAY_TASK_ID}"
 echo "Run: $run_name"
 echo "Targets: $target_spec"
 echo "Dataset: $data_file"
+if [[ -n "$test_data_file" ]]; then
+    echo "External test dataset: $test_data_file"
+fi
 echo "Checkpoint: $checkpoint"
 if [[ -n "$split_column" ]]; then
     echo "Split column: $split_column"

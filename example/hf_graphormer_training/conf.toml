@@ -1,0 +1,65 @@
+# Complete Hugging Face Graphormer training template.
+# Keep one active value per option; uncomment an alternative only after
+# commenting out the currently active value.
+
+[BaseConfig]
+workdir = "./example/hf_graphormer_training/run"
+task = "regression"             # Options: "regression", "classification", "mixed".
+
+[DatasetConfig]
+dataset_path = "./dataset/curated/physchem_multitask.csv"
+# Independent final test CSV: uncomment and set test_fraction = 0.0.
+# test_dataset_path = "/path/to/independent_test.csv"
+smiles_column = "SMILES"
+
+# String = single task; list = homogeneous or mixed multitask.
+# target_column = "LogD_pH7_4"
+target_column = ["LogD_pH7_4", "Log_KSOL_ExpansionRX_mol_L"]
+# Required only for task = "mixed"; classification labels must be 0/1/missing.
+# task_types = ["regression", "classification"]
+
+split_type = "scaffold_balanced" # Options: "random", "random_with_repeated_smiles", "scaffold_balanced", "kennard_stone", "kmeans", "predefined".
+val_fraction = 0.1
+test_fraction = 0.1
+# Existing assignments instead of a generated split:
+# split_type = "predefined"
+# split_column = "split"
+remove_hs = true
+reorder_atoms = false
+
+[ModelConfig]
+model_name = "clefourrier/graphormer-base-pcqm4mv1"
+# The local state dictionary avoids Hugging Face access on offline HPC nodes.
+# Remove checkpoint_path to load model_name directly from the Hub/cache.
+checkpoint_path = "~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
+local_files_only = true
+max_nodes = 512
+multi_hop_max_dist = 5
+spatial_pos_max = 1024
+freeze_encoder = false          # true trains only the new prediction head.
+
+[TrainingConfig]
+seed = 42
+device = "auto"                 # Options: "cpu", "cuda", "mps", "auto".
+devices = 1                     # Informational unless launched by torchrun.
+strategy = "auto"               # Options: "auto", "ddp".
+batch_size = 16                 # Per-process batch size under DDP.
+num_workers = 0
+num_epochs = 30
+progress_bar = true
+
+# Exact continuation from a full ChemFlow checkpoint:
+resume = false
+# resume_checkpoint = "/path/to/checkpoints/last.pt"
+# Rebuild applicability/calibration artifacts without optimization:
+applicability_only = false
+
+classification_threshold = 0.5 # Used by classification targets only.
+task_loss_weighting = "sqrt_inverse_frequency" # Options: "uniform", "sqrt_inverse_frequency", "inverse_frequency".
+# Explicit weights override the policy in target_column order:
+# task_loss_weights = [1.0, 1.0]
+encoder_learning_rate = 1e-5
+head_learning_rate = 1e-4
+weight_decay = 0.01
+gradient_clip = 1.0
+early_stopping_patience = 8

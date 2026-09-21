@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
+import pytest
 import torch
 
 from chemflow.cli.main import build_parser
@@ -45,6 +47,90 @@ def test_hf_graphormer_predefined_split_config():
         assert "requires DatasetConfig.split_column" in str(error)
     else:
         raise AssertionError("predefined split without split_column was accepted")
+
+
+def test_hf_graphormer_external_test_requires_zero_internal_test_fraction():
+    with pytest.raises(ValueError, match="requires test_fraction = 0.0"):
+        _validate_split_config(
+            {
+                "split_type": "scaffold_balanced",
+                "test_dataset_path": "external.csv",
+                "test_fraction": 0.1,
+            }
+        )
+
+
+def test_hf_graphormer_loads_external_test_dataset(tmp_path):
+    training_path = tmp_path / "training.csv"
+    test_path = tmp_path / "test.csv"
+    pd.DataFrame(
+        {
+            "SMILES": ["CC", "CCC"],
+            "activity": [1.0, 2.0],
+            "split": ["train", "val"],
+        }
+    ).to_csv(training_path, index=False)
+    pd.DataFrame(
+        {"SMILES": ["CCCC"], "activity": [3.0]}
+    ).to_csv(test_path, index=False)
+
+    trainer = object.__new__(HuggingFaceGraphormerTrainer)
+    trainer.data_cfg = {
+        "dataset_path": str(training_path),
+        "test_dataset_path": str(test_path),
+        "smiles_column": "SMILES",
+        "target_column": "activity",
+        "split_type": "predefined",
+        "split_column": "split",
+        "test_fraction": 0.0,
+    }
+    trainer.task_types = ["regression"]
+    trainer.is_main_process = True
+    trainer.workdir = tmp_path
+
+    records = trainer._load_records()
+    splits = trainer._split_records(records)
+
+    assert [record.smiles for record in splits["train"]] == ["CC"]
+    assert [record.smiles for record in splits["val"]] == ["CCC"]
+    assert [record.smiles for record in splits["test"]] == ["CCCC"]
+    saved = pd.read_csv(tmp_path / "data_splits.csv")
+    assert saved["split"].value_counts().to_dict() == {
+        "train": 1,
+        "val": 1,
+        "test": 1,
+    }
+
+
+def test_hf_graphormer_rejects_two_test_sources(tmp_path):
+    training_path = tmp_path / "training.csv"
+    test_path = tmp_path / "test.csv"
+    pd.DataFrame(
+        {
+            "SMILES": ["CC", "CCC", "CCCC"],
+            "activity": [1.0, 2.0, 3.0],
+            "split": ["train", "val", "test"],
+        }
+    ).to_csv(training_path, index=False)
+    pd.DataFrame(
+        {"SMILES": ["CCCCC"], "activity": [4.0]}
+    ).to_csv(test_path, index=False)
+
+    trainer = object.__new__(HuggingFaceGraphormerTrainer)
+    trainer.data_cfg = {
+        "dataset_path": str(training_path),
+        "test_dataset_path": str(test_path),
+        "smiles_column": "SMILES",
+        "target_column": "activity",
+        "split_type": "predefined",
+        "split_column": "split",
+        "test_fraction": 0.0,
+    }
+    trainer.task_types = ["regression"]
+    trainer.is_main_process = False
+
+    with pytest.raises(ValueError, match="Use only one test source"):
+        trainer._load_records()
 
 
 def test_hf_graphormer_regression_metrics():

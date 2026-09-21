@@ -25,7 +25,7 @@ repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 #   CHEMBERTA_MODEL_NAME=/data/liuy48/models/ChemBERTa-77M-MLM \
 #   sbatch chemberta_array.slurm
 training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/adsorption/physchem}"
-base_config="${CHEMBERTA_BASE_CONFIG:-$repo_dir/example/chemberta_training/physchem_conf.toml}"
+base_config="${CHEMBERTA_BASE_CONFIG:-$repo_dir/example/chemberta_training/conf.toml}"
 data_file="${PHYSCHEM_DATA_FILE:-/data/liuy48/model_training/adme/adsorption/dataset/physchem_multitask.csv}"
 model_name="${CHEMBERTA_MODEL_NAME:-DeepChem/ChemBERTa-77M-MLM}"
 split_type="${CHEMBERTA_SPLIT_TYPE:-scaffold_balanced}"

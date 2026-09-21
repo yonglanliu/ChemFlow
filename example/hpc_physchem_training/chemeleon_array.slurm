@@ -23,7 +23,7 @@ repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 #   PHYSCHEM_DATA_FILE=/data/liuy48/datasets/physchem_multitask.csv \
 #   sbatch chemeleon_array.slurm
 training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
-base_config="${CHEMELEON_BASE_CONFIG:-$repo_dir/example/chemeleon_training/multitask_conf.toml}"
+base_config="${CHEMELEON_BASE_CONFIG:-$repo_dir/example/chemeleon_training/conf.toml}"
 data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
 split_type="${CHEMELEON_SPLIT_TYPE:-scaffold_balanced}"
 split_column="${PHYSCHEM_SPLIT_COLUMN:-}"

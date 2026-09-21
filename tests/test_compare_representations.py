@@ -11,6 +11,7 @@ from example.ml_training.compare_representations import (
     METRICS,
     REPRESENTATIONS,
     add_holm_adjustment,
+    align_representations,
     plot_combined_summary,
     plot_pairwise_heatmaps,
     summarize_paired_differences,
@@ -18,6 +19,56 @@ from example.ml_training.compare_representations import (
 
 
 class RepresentationComparisonTest(unittest.TestCase):
+    def test_alignment_does_not_combine_stable_smiles_with_changed_row_ids(self):
+        frames = {
+            "a": pd.DataFrame(
+                {
+                    "SMILES": ["CC", "CCC"],
+                    "test_row": [1, 2],
+                    "true_value": [1.0, 2.0],
+                    "predicted_value": [1.1, 2.1],
+                }
+            ),
+            "b": pd.DataFrame(
+                {
+                    "SMILES": ["CC", "CCC"],
+                    "test_row": [101, 102],
+                    "true_value": [1.0, 2.0],
+                    "predicted_value": [0.9, 1.9],
+                }
+            ),
+        }
+
+        aligned = align_representations(frames)
+
+        self.assertEqual(list(aligned["SMILES"]), ["CC", "CCC"])
+        self.assertEqual(len(aligned), 2)
+
+    def test_alignment_rejects_reused_names_with_different_targets(self):
+        frames = {
+            "a": pd.DataFrame(
+                {
+                    "Molecule Name": ["0", "1"],
+                    "SMILES": ["CC", "CCC"],
+                    "true_value": [1.0, 2.0],
+                    "predicted_value": [1.1, 2.1],
+                }
+            ),
+            "b": pd.DataFrame(
+                {
+                    "Molecule Name": ["0", "1"],
+                    "SMILES": ["CCC", "CC"],
+                    "true_value": [2.0, 1.0],
+                    "predicted_value": [1.9, 0.9],
+                }
+            ),
+        }
+
+        aligned = align_representations(frames)
+
+        self.assertEqual(list(aligned["SMILES"]), ["CC", "CCC"])
+        self.assertEqual(list(aligned["true__b"]), [1.0, 2.0])
+
     def test_paired_improvement_respects_metric_direction(self):
         labels = OrderedDict((("a", "A"), ("b", "B")))
         points = {

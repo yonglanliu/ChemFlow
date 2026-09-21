@@ -135,6 +135,12 @@ def _validate_split_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "split_type='predefined' requires DatasetConfig.split_column."
         )
+    if config.get("test_dataset_path") and float(
+        config.get("test_fraction", 0.0)
+    ) != 0.0:
+        raise ValueError(
+            "DatasetConfig.test_dataset_path requires test_fraction = 0.0."
+        )
     config["split_type"] = split_type
 
 
@@ -303,13 +309,28 @@ class HuggingFaceGraphormerTrainer:
             targets = pd.to_numeric(row[target_columns], errors="coerce").to_numpy(dtype=float)
             split = _normalise_split(row[split_column]) if split_column else None
             if not smiles or Chem.MolFromSmiles(smiles) is None:
-                rejected.append({"index": index, "smiles": smiles, "reason": "invalid_smiles"})
+                rejected.append({
+                    "dataset": "training",
+                    "index": index,
+                    "smiles": smiles,
+                    "reason": "invalid_smiles",
+                })
                 continue
             if not np.isfinite(targets).any():
-                rejected.append({"index": index, "smiles": smiles, "reason": "all_targets_missing"})
+                rejected.append({
+                    "dataset": "training",
+                    "index": index,
+                    "smiles": smiles,
+                    "reason": "all_targets_missing",
+                })
                 continue
             if split_column and split is None:
-                rejected.append({"index": index, "smiles": smiles, "reason": "invalid_split"})
+                rejected.append({
+                    "dataset": "training",
+                    "index": index,
+                    "smiles": smiles,
+                    "reason": "invalid_split",
+                })
                 continue
             name = str(row[name_column]) if name_column and name_column in frame.columns else str(index)
             records.append(
@@ -322,8 +343,81 @@ class HuggingFaceGraphormerTrainer:
                 )
             )
 
+        external_test_path = self.data_cfg.get("test_dataset_path")
+        if external_test_path:
+            if any(record.split == "test" for record in records):
+                raise ValueError(
+                    "The training dataset contains test rows while "
+                    "test_dataset_path is also configured. Use only one test source."
+                )
+            resolved_test_path = Path(external_test_path).expanduser().resolve()
+            if not resolved_test_path.is_file():
+                raise FileNotFoundError(
+                    f"Test dataset does not exist: {resolved_test_path}"
+                )
+            test_frame = pd.read_csv(resolved_test_path)
+            missing_test = sorted(
+                {smiles_column, *target_columns} - set(test_frame.columns)
+            )
+            if missing_test:
+                raise KeyError(
+                    "External test dataset is missing required columns: "
+                    f"{missing_test}"
+                )
+            offset = len(frame)
+            external_count = 0
+            for position, row in test_frame.iterrows():
+                smiles = (
+                    ""
+                    if pd.isna(row[smiles_column])
+                    else str(row[smiles_column]).strip()
+                )
+                targets = pd.to_numeric(
+                    row[target_columns], errors="coerce"
+                ).to_numpy(dtype=float)
+                if not smiles or Chem.MolFromSmiles(smiles) is None:
+                    rejected.append({
+                        "dataset": "external_test",
+                        "index": position,
+                        "smiles": smiles,
+                        "reason": "invalid_smiles",
+                    })
+                    continue
+                if not np.isfinite(targets).any():
+                    rejected.append({
+                        "dataset": "external_test",
+                        "index": position,
+                        "smiles": smiles,
+                        "reason": "all_targets_missing",
+                    })
+                    continue
+                name = (
+                    str(row[name_column])
+                    if name_column
+                    and name_column in test_frame.columns
+                    and pd.notna(row[name_column])
+                    else f"test:{position}"
+                )
+                records.append(
+                    Record(
+                        original_index=offset + int(position),
+                        name=name,
+                        smiles=smiles,
+                        targets=targets,
+                        split="test",
+                    )
+                )
+                external_count += 1
+            if external_count == 0:
+                raise ValueError(
+                    "No valid labeled records remain in the external test dataset."
+                )
+
         if self.is_main_process:
-            pd.DataFrame(rejected, columns=["index", "smiles", "reason"]).to_csv(
+            pd.DataFrame(
+                rejected,
+                columns=["dataset", "index", "smiles", "reason"],
+            ).to_csv(
                 self.workdir / "rejected_rows.csv", index=False
             )
         if not records:
@@ -350,19 +444,27 @@ class HuggingFaceGraphormerTrainer:
             # same seed and strategy can be reused by both Graphormer backends.
             from chemprop import data as chemprop_data
 
+            external_test = [record for record in records if record.split == "test"]
+            split_pool = [record for record in records if record.split != "test"]
             val_fraction = float(self.data_cfg.get("val_fraction", 0.1))
-            test_fraction = float(self.data_cfg.get("test_fraction", 0.1))
+            test_fraction = (
+                0.0
+                if external_test
+                else float(self.data_cfg.get("test_fraction", 0.1))
+            )
             split_type = str(self.data_cfg.get("split_type", "scaffold_balanced"))
             indices = chemprop_data.make_split_indices(
-                [Chem.MolFromSmiles(r.smiles) for r in records],
+                [Chem.MolFromSmiles(r.smiles) for r in split_pool],
                 split=split_type,
                 sizes=(1.0 - val_fraction - test_fraction, val_fraction, test_fraction),
                 seed=self.seed,
             )
             splits = {
-                name: [records[int(i)] for i in values[0]]
+                name: [split_pool[int(i)] for i in values[0]]
                 for name, values in zip(("train", "val", "test"), indices)
             }
+            if external_test:
+                splits["test"] = external_test
         if not splits["train"] or not splits["val"]:
             raise ValueError("Training and validation splits must be non-empty.")
         target_columns = self._target_columns()
@@ -537,10 +639,12 @@ class HuggingFaceGraphormerTrainer:
             num_out_degree=512,
             num_spatial=512,
             num_edge_dis=128,
-            multi_hop_max_dist=5,
-            spatial_pos_max=1024,
+            multi_hop_max_dist=int(
+                self.model_cfg.get("multi_hop_max_dist", 5)
+            ),
+            spatial_pos_max=int(self.model_cfg.get("spatial_pos_max", 1024)),
             edge_type="multi_hop",
-            max_nodes=512,
+            max_nodes=int(self.model_cfg.get("max_nodes", 512)),
             num_hidden_layers=12,
             embedding_dim=768,
             ffn_embedding_dim=768,

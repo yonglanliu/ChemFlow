@@ -88,14 +88,76 @@ def load_prediction_file(path):
 def align_representations(frames):
     """Inner-align representations so every metric uses the same compounds."""
     first_frame = next(iter(frames.values()))
-    preferred_keys = ["Molecule Name", "SMILES", "test_row"]
-    keys = [
-        column
-        for column in preferred_keys
-        if all(column in frame.columns for frame in frames.values())
-    ]
+    # A structure is the most reliable cross-run identity. Molecule names and
+    # row numbers are useful fallbacks, but some training exports regenerate
+    # them after filtering or splitting.
+    preferred_keys = ["SMILES", "Molecule Name", "test_row"]
+    keys = []
+    key_overlap = 0
+    rejected_keys = []
+    for column in preferred_keys:
+        if not all(column in frame.columns for frame in frames.values()):
+            continue
+        # Use one stable identifier rather than a composite of every metadata
+        # column. In particular, test_row can be regenerated after a feature
+        # set drops invalid molecules and therefore must not invalidate an
+        # otherwise valid Molecule Name or SMILES match.
+        if any(frame[column].isna().any() for frame in frames.values()):
+            continue
+        if any(frame[column].duplicated().any() for frame in frames.values()):
+            continue
+        common_values = set(first_frame[column])
+        for frame in frames.values():
+            common_values.intersection_update(frame[column])
+        overlap = len(common_values)
+        if overlap == 0:
+            rejected_keys.append(f"{column}: no overlap")
+            continue
+
+        # An identifier is trustworthy only when the observed target agrees
+        # for every matched molecule. This detects regenerated sequential names
+        # or row IDs that happen to overlap numerically across different splits.
+        reference = first_frame[[column, "true_value"]].rename(
+            columns={"true_value": "true__reference"}
+        )
+        truth_matches = True
+        for frame in frames.values():
+            candidate = reference.merge(
+                frame[[column, "true_value"]].rename(
+                    columns={"true_value": "true__candidate"}
+                ),
+                on=column,
+                how="inner",
+                validate="one_to_one",
+            )
+            if not np.allclose(
+                candidate["true__reference"].to_numpy(dtype=float),
+                candidate["true__candidate"].to_numpy(dtype=float),
+                equal_nan=True,
+            ):
+                truth_matches = False
+                break
+        if not truth_matches:
+            rejected_keys.append(f"{column}: matched targets differ")
+            continue
+        if overlap > key_overlap:
+            keys = [column]
+            key_overlap = overlap
+
     if not keys:
         lengths = {name: len(frame) for name, frame in frames.items()}
+        common_identifiers = [
+            column
+            for column in preferred_keys
+            if all(column in frame.columns for frame in frames.values())
+        ]
+        if common_identifiers:
+            raise ValueError(
+                "No unique, non-missing molecule identifier has common values "
+                "across representations. This usually means the models used "
+                f"different test splits. Checked: {common_identifiers}; sizes: "
+                f"{lengths}; rejected: {rejected_keys}"
+            )
         if len(set(lengths.values())) != 1:
             raise ValueError(
                 "Prediction files have different row counts and no common molecule "
@@ -107,6 +169,8 @@ def align_representations(frames):
             for name, frame in frames.items()
         }
         first_frame = next(iter(frames.values()))
+    else:
+        print(f"Aligning representations by {keys[0]} ({key_overlap} common rows).")
 
     if any(frame.duplicated(keys).any() for frame in frames.values()):
         raise ValueError(f"Molecule identifier columns are not unique: {keys}")

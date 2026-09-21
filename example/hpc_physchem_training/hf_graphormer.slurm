@@ -16,11 +16,11 @@ training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
 mode="${HF_GRAPHORMER_MODE:-single}"
 case "$mode" in
     single)
-        default_config="$repo_dir/example/hf_graphormer_training/physchem_conf.toml"
+        default_config="$repo_dir/example/hf_graphormer_training/conf.toml"
         default_run_name="hf_graphormer_KSol_pH7_4"
         ;;
     multitask)
-        default_config="$repo_dir/example/hf_graphormer_training/physchem_multitask_conf.toml"
+        default_config="$repo_dir/example/hf_graphormer_training/conf.toml"
         default_run_name="hf_graphormer_physchem_multitask"
         ;;
     *)
@@ -30,6 +30,7 @@ case "$mode" in
 esac
 base_config="${HF_GRAPHORMER_BASE_CONFIG:-$default_config}"
 data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
+test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"
 checkpoint="${HF_GRAPHORMER_CHECKPOINT:-$HOME/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt}"
 workdir="${HF_GRAPHORMER_WORKDIR:-$training_dir/$default_run_name}"
 config_path="$training_dir/generated_configs/${default_run_name}_conf.toml"
@@ -40,12 +41,17 @@ for required_file in "$base_config" "$data_file" "$checkpoint"; do
         exit 1
     fi
 done
+if [[ -n "$test_data_file" && ! -f "$test_data_file" ]]; then
+    echo "External test dataset not found: $test_data_file" >&2
+    exit 1
+fi
 
 mkdir -p "$(dirname -- "$config_path")" "$workdir"
 
 export CHEMFLOW_HF_BASE_CONFIG="$base_config"
 export CHEMFLOW_HF_CONFIG="$config_path"
 export CHEMFLOW_HF_DATA_FILE="$data_file"
+export CHEMFLOW_HF_TEST_DATA_FILE="$test_data_file"
 export CHEMFLOW_HF_CHECKPOINT="$checkpoint"
 export CHEMFLOW_HF_WORKDIR="$workdir"
 export CHEMFLOW_HF_BATCH_SIZE="${HF_GRAPHORMER_BATCH_SIZE:-8}"
@@ -76,6 +82,12 @@ config.setdefault("BaseConfig", {})["workdir"] = os.environ["CHEMFLOW_HF_WORKDIR
 
 dataset = config.setdefault("DatasetConfig", {})
 dataset["dataset_path"] = os.environ["CHEMFLOW_HF_DATA_FILE"]
+test_data_file = os.environ["CHEMFLOW_HF_TEST_DATA_FILE"].strip()
+if test_data_file:
+    dataset["test_dataset_path"] = test_data_file
+    dataset["test_fraction"] = 0.0
+else:
+    dataset.pop("test_dataset_path", None)
 if os.environ["CHEMFLOW_HF_MODE"] == "single":
     dataset["target_column"] = "Log_KSOL_pH7_4_mol_L"
 else:
@@ -86,7 +98,6 @@ else:
         "Log_KSOL_ExpansionRX_mol_L",
     ]
 dataset["smiles_column"] = "SMILES"
-dataset["name_column"] = "Molecule Name"
 
 model = config.setdefault("ModelConfig", {})
 model["checkpoint_path"] = os.environ["CHEMFLOW_HF_CHECKPOINT"]
@@ -128,6 +139,9 @@ echo "Environment: chemflow"
 echo "Training mode: $mode"
 echo "DDP processes / GPUs: $CHEMFLOW_HF_DEVICES"
 echo "Dataset: $data_file"
+if [[ -n "$test_data_file" ]]; then
+    echo "External test dataset: $test_data_file"
+fi
 echo "Checkpoint: $checkpoint"
 echo "Generated configuration: $config_path"
 echo "Output directory: $workdir"
