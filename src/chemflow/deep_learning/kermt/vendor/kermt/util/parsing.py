@@ -241,8 +241,26 @@ def add_finetune_args(parser: ArgumentParser):
                         help='Final learning rate')
     parser.add_argument('--no_features_scaling', action='store_true', default=False,
                         help='Turn off scaling of features')
-    parser.add_argument('--early_stop_epoch', type=int, default=1000, help='If val loss did not drop in '
-                                                                           'this epochs, stop running')
+    parser.add_argument(
+        '--early_stopping_patience', '--early_stop_epoch',
+        dest='early_stopping_patience', type=int, default=0,
+        help=(
+            'Stop after this many consecutive epochs without a meaningful '
+            'validation improvement. Zero disables early stopping. '
+            '--early_stop_epoch is retained as a compatibility alias.'
+        ),
+    )
+    parser.add_argument(
+        '--early_stopping_min_delta', type=float, default=0.0,
+        help='Minimum validation improvement required to reset patience.',
+    )
+    parser.add_argument(
+        '--early_stopping_monitor', choices=['metric', 'loss'], default='metric',
+        help=(
+            'Validation quantity monitored for early stopping. metric follows '
+            '--metric and its minimize/maximize direction; loss is minimized.'
+        ),
+    )
 
     # Model arguments
     parser.add_argument('--ensemble_size', type=int, default=1,

@@ -434,6 +434,27 @@ class KERMTTrainer:
         )
         if encoder_lr_multiplier < 0.0:
             raise ValueError("TrainingConfig.encoder_lr_multiplier cannot be negative.")
+        early_stopping_patience = int(
+            self.training_cfg.get("early_stopping_patience", 0)
+        )
+        early_stopping_min_delta = float(
+            self.training_cfg.get("early_stopping_min_delta", 0.0)
+        )
+        early_stopping_monitor = str(
+            self.training_cfg.get("early_stopping_monitor", "metric")
+        ).strip().lower()
+        if early_stopping_patience < 0:
+            raise ValueError(
+                "TrainingConfig.early_stopping_patience cannot be negative."
+            )
+        if early_stopping_min_delta < 0.0:
+            raise ValueError(
+                "TrainingConfig.early_stopping_min_delta cannot be negative."
+            )
+        if early_stopping_monitor not in {"metric", "loss"}:
+            raise ValueError(
+                "TrainingConfig.early_stopping_monitor must be 'metric' or 'loss'."
+            )
         fine_tune_coefficient = 0.0 if freeze_encoder else encoder_lr_multiplier
         command = [
             python_executable,
@@ -460,6 +481,9 @@ class KERMTTrainer:
             "--final_lr", str(float(self.training_cfg.get("final_lr", 2e-5))),
             "--warmup_epochs", str(int(self.training_cfg.get("warmup_epochs", 2))),
             "--weight_decay", str(float(self.training_cfg.get("weight_decay", 0.0))),
+            "--early_stopping_patience", str(early_stopping_patience),
+            "--early_stopping_min_delta", str(early_stopping_min_delta),
+            "--early_stopping_monitor", early_stopping_monitor,
             "--fine_tune_coff", str(fine_tune_coefficient),
             "--dropout", str(float(self.model_cfg.get("dropout", 0.0))),
             "--batch_size", str(int(self.training_cfg.get("batch_size", 32))),

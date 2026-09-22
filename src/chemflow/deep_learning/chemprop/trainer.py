@@ -14,8 +14,11 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from rdkit import Chem
+from scipy.stats import kendalltau, pearsonr, spearmanr
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
 _SPLIT_ALIASES = {
@@ -35,6 +38,34 @@ _GENERATED_SPLITS = {
     "kmeans",
 }
 _REGRESSION_METRICS = {"mse", "mae", "rmse", "r2"}
+
+
+def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
+    """Calculate independent-test metrics on finite, paired observations."""
+    truth = np.asarray(y_true, dtype=float)
+    prediction = np.asarray(y_pred, dtype=float)
+    finite = np.isfinite(truth) & np.isfinite(prediction)
+    truth = truth[finite]
+    prediction = prediction[finite]
+    if truth.size < 2:
+        return {
+            "n": int(truth.size),
+            "rmse": None,
+            "mae": None,
+            "r2": None,
+            "pearson": None,
+            "spearman": None,
+            "kendall": None,
+        }
+    return {
+        "n": int(truth.size),
+        "rmse": float(np.sqrt(mean_squared_error(truth, prediction))),
+        "mae": float(mean_absolute_error(truth, prediction)),
+        "r2": float(r2_score(truth, prediction)),
+        "pearson": float(pearsonr(truth, prediction).statistic),
+        "spearman": float(spearmanr(truth, prediction).statistic),
+        "kendall": float(kendalltau(truth, prediction).statistic),
+    }
 
 
 def _targets(value: Any) -> list[str]:
@@ -185,6 +216,18 @@ class ChempropTrainer:
             raise ValueError(
                 "TrainingConfig.num_epochs must be greater than warmup_epochs."
             )
+        self.early_stopping_patience = int(
+            self.training_cfg.get("early_stopping_patience", 20)
+        )
+        if self.early_stopping_patience < 1:
+            raise ValueError(
+                "TrainingConfig.early_stopping_patience must be at least 1."
+            )
+        self.tracking_metric = str(
+            self.training_cfg.get("tracking_metric", "val_loss")
+        ).strip()
+        if not self.tracking_metric:
+            raise ValueError("TrainingConfig.tracking_metric cannot be empty.")
 
     def _resolve_resume_checkpoints(self) -> list[Path]:
         """Resolve checkpoints for Chemprop's weights-only continuation mode."""
@@ -427,11 +470,12 @@ class ChempropTrainer:
             "--batch-size": int(training.get("batch_size", 64)),
             "--num-workers": int(training.get("num_workers", 0)),
             "--epochs": int(training.get("num_epochs", 100)),
-            "--patience": int(training.get("early_stopping_patience", 20)),
+            "--patience": self.early_stopping_patience,
             "--warmup-epochs": int(training.get("warmup_epochs", 2)),
             "--init-lr": float(training.get("init_lr", 1e-4)),
             "--max-lr": float(training.get("max_lr", 1e-3)),
             "--final-lr": float(training.get("final_lr", 1e-4)),
+            "--grad-clip": float(training.get("gradient_clip_val", 0.0)),
             "--ensemble-size": int(training.get("ensemble_size", 1)),
             "--num-replicates": int(training.get("num_replicates", 1)),
             "--data-seed": int(training.get("seed", 42)),
@@ -442,9 +486,7 @@ class ChempropTrainer:
         for option, value in scalar_options.items():
             command.extend([option, str(value)])
         command.extend(["--metrics", *self.metrics])
-        command.extend(
-            ["--tracking-metric", str(training.get("tracking_metric", "val_loss"))]
-        )
+        command.extend(["--tracking-metric", self.tracking_metric])
         command.append("--show-individual-scores")
         if bool(training.get("save_data_splits", True)):
             version = self._chemprop_version()
@@ -455,6 +497,165 @@ class ChempropTrainer:
             )
         command.extend(self.extra_args)
         return command
+
+    def _best_model_paths(self) -> list[Path]:
+        """Return the validation-selected model from every ensemble member."""
+        ensemble_size = int(self.training_cfg.get("ensemble_size", 1))
+        paths = [
+            self.workdir / f"model_{index}" / "best.pt"
+            for index in range(ensemble_size)
+        ]
+        missing = [path for path in paths if not path.is_file()]
+        if missing:
+            formatted = "\n  ".join(str(path) for path in missing)
+            raise FileNotFoundError("Chemprop best model(s) not found:\n  " + formatted)
+        return paths
+
+    def _export_training_history(self) -> Path | None:
+        """Export TensorBoard or CSV scalar logs as one epoch-level CSV."""
+        histories: list[pd.DataFrame] = []
+        ensemble_size = int(self.training_cfg.get("ensemble_size", 1))
+        for model_index in range(ensemble_size):
+            log_root = self.workdir / f"model_{model_index}" / "trainer_logs"
+            csv_paths = sorted(log_root.glob("version_*/metrics.csv"))
+            if csv_paths:
+                csv_path = max(csv_paths, key=lambda path: path.stat().st_mtime_ns)
+                frame = pd.read_csv(csv_path)
+            else:
+                event_paths = sorted(log_root.glob("version_*/events.out.tfevents.*"))
+                if not event_paths:
+                    continue
+                try:
+                    from tensorboard.backend.event_processing.event_accumulator import (
+                        EventAccumulator,
+                    )
+                except ImportError:
+                    print(
+                        "Chemprop history export skipped: tensorboard is not installed.",
+                        flush=True,
+                    )
+                    return None
+                event_path = max(event_paths, key=lambda path: path.stat().st_mtime_ns)
+                accumulator = EventAccumulator(str(event_path))
+                accumulator.Reload()
+                scalar_tags = accumulator.Tags().get("scalars", [])
+                series = []
+                for tag in scalar_tags:
+                    values = accumulator.Scalars(tag)
+                    series.append(
+                        pd.DataFrame(
+                            {
+                                "step": [item.step for item in values],
+                                tag: [item.value for item in values],
+                            }
+                        ).drop_duplicates("step", keep="last")
+                    )
+                if not series:
+                    continue
+                frame = series[0]
+                for values in series[1:]:
+                    frame = frame.merge(values, on="step", how="outer")
+            if "step" in frame:
+                frame = frame.sort_values("step").groupby("step", as_index=False).first()
+                frame.insert(0, "epoch", frame["step"].astype(int) + 1)
+            frame.insert(0, "model", model_index)
+            histories.append(frame)
+        if not histories:
+            return None
+        output = self.workdir / "training_history.csv"
+        pd.concat(histories, ignore_index=True).to_csv(output, index=False)
+        return output
+
+    def _evaluate_best_models(
+        self,
+        executable: str,
+        process_environment: dict[str, str],
+    ) -> tuple[Path, Path]:
+        """Evaluate the independent test set using best validation models."""
+        test_path = self.workdir / "prepared_data" / "test.csv"
+        truth = pd.read_csv(test_path)
+        prediction_input = self.workdir / "prepared_data" / "test_smiles.csv"
+        truth[[self.smiles_column]].to_csv(prediction_input, index=False)
+        raw_output = self.workdir / "best_model_predictions.csv"
+        best_models = self._best_model_paths()
+        command = [
+            executable,
+            "predict",
+            "--test-path",
+            str(prediction_input),
+            "--preds-path",
+            str(raw_output),
+            "--smiles-columns",
+            self.smiles_column,
+            "--model-paths",
+            *(str(path) for path in best_models),
+            "--num-workers",
+            str(int(self.training_cfg.get("num_workers", 0))),
+            "--batch-size",
+            str(int(self.training_cfg.get("batch_size", 64))),
+            "--accelerator",
+            str(self.training_cfg.get("accelerator", "auto")),
+            "--devices",
+            str(self.training_cfg.get("devices", "auto")),
+        ]
+        subprocess.run(
+            command,
+            cwd=self.workdir,
+            env=process_environment,
+            check=True,
+        )
+        predicted = pd.read_csv(raw_output)
+        if len(predicted) != len(truth):
+            raise ValueError(
+                "Best-model prediction row count does not match the test dataset: "
+                f"{len(predicted)} != {len(truth)}."
+            )
+
+        results = pd.DataFrame({self.smiles_column: truth[self.smiles_column]})
+        metric_summary: dict[str, Any] = {}
+        for target in self.targets:
+            if target not in predicted:
+                raise ValueError(
+                    f"Chemprop prediction output is missing target {target!r}; "
+                    f"available columns: {list(predicted.columns)}"
+                )
+            true_values = pd.to_numeric(truth[target], errors="coerce")
+            predicted_values = pd.to_numeric(predicted[target], errors="coerce")
+            results[f"{target}_true"] = true_values
+            results[f"{target}_prediction"] = predicted_values
+            results[f"{target}_error"] = predicted_values - true_values
+            metric_summary[target] = _regression_metrics(true_values, predicted_values)
+
+        official_output = self.workdir / "model_0" / "test_predictions.csv"
+        if official_output.is_file():
+            shutil.copy2(
+                official_output,
+                self.workdir / "final_model_test_predictions.csv",
+            )
+        prediction_path = self.workdir / "test_predictions.csv"
+        metrics_path = self.workdir / "test_metrics.json"
+        results.to_csv(prediction_path, index=False)
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "selection": "best_validation_checkpoint",
+                    "models": [str(path) for path in best_models],
+                    "targets": metric_summary,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print("Independent test metrics — best validation checkpoint", flush=True)
+        for target, metrics in metric_summary.items():
+            values = "  ".join(
+                f"{name}={metrics[name]:.4f}"
+                for name in ("rmse", "mae", "r2", "pearson", "spearman", "kendall")
+                if metrics[name] is not None
+            )
+            print(f"  {target} (n={metrics['n']}): {values}", flush=True)
+        return prediction_path, metrics_path
 
     @staticmethod
     def _chemprop_version() -> str:
@@ -505,6 +706,13 @@ class ChempropTrainer:
             "command": command,
             "command_text": shlex.join(command),
             "compatibility_environment": compatibility_environment,
+            "early_stopping": {
+                "implementation": "Chemprop v2 native Lightning callback",
+                "monitor": self.tracking_metric,
+                "patience": self.early_stopping_patience,
+                "min_delta": 0.0,
+                "state_restored_on_resume": False,
+            },
             "resume": {
                 "enabled": self.resume,
                 "mode": "weights_only" if self.resume else None,
@@ -530,6 +738,12 @@ class ChempropTrainer:
         print(f"  Split: {self.split_type}", flush=True)
         print(f"  Output: {self.workdir}", flush=True)
         print(f"  Manifest: {manifest_path}", flush=True)
+        print(
+            "  Early stopping: enabled "
+            f"(monitor={self.tracking_metric}, "
+            f"patience={self.early_stopping_patience}, min_delta=0)",
+            flush=True,
+        )
         if resume_checkpoints:
             print("  Resume: enabled (weights-only continuation)", flush=True)
             for index, path in enumerate(resume_checkpoints):
@@ -542,6 +756,10 @@ class ChempropTrainer:
             )
             print(
                 "  Epochs: num_epochs is the number of additional epochs",
+                flush=True,
+            )
+            print(
+                "  Early-stopping state: reset; a new patience window starts",
                 flush=True,
             )
         else:
@@ -569,3 +787,11 @@ class ChempropTrainer:
             env=process_environment,
             check=True,
         )
+        history_path = self._export_training_history()
+        if history_path is not None:
+            print(f"Chemprop epoch history: {history_path}", flush=True)
+        prediction_path, metrics_path = self._evaluate_best_models(
+            command[0], process_environment
+        )
+        print(f"Chemprop best-model test predictions: {prediction_path}", flush=True)
+        print(f"Chemprop best-model test metrics: {metrics_path}", flush=True)

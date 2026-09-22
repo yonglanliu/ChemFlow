@@ -7,7 +7,10 @@ import pandas as pd
 import pytest
 
 from chemflow.cli.main import build_parser
-from chemflow.deep_learning.chemprop.trainer import ChempropTrainer
+from chemflow.deep_learning.chemprop.trainer import (
+    ChempropTrainer,
+    _regression_metrics,
+)
 
 
 TARGETS = ["HLM", "RLM", "MLM"]
@@ -99,6 +102,71 @@ def test_predefined_split_prepares_three_files_and_command(tmp_path: Path):
     assert command[command.index("--splits-column") + 1] == "split"
     assert command[command.index("--message-hidden-dim") + 1] == "128"
     assert command[command.index("--depth") + 1] == "4"
+    assert command[command.index("--grad-clip") + 1] == "0.0"
+    assert command[command.index("--patience") + 1] == "20"
+    assert command[command.index("--tracking-metric") + 1] == "val_loss"
+
+
+def test_regression_metrics_ignore_missing_labels():
+    metrics = _regression_metrics(
+        [1.0, 2.0, float("nan"), 4.0],
+        [1.0, 3.0, 100.0, 5.0],
+    )
+
+    assert metrics["n"] == 3
+    assert metrics["mae"] == pytest.approx(2 / 3)
+    assert metrics["rmse"] == pytest.approx((2 / 3) ** 0.5)
+    assert metrics["pearson"] is not None
+    assert metrics["spearman"] is not None
+    assert metrics["kendall"] is not None
+
+
+def test_best_model_paths_require_every_ensemble_member(tmp_path: Path):
+    dataset, test_dataset = _datasets(tmp_path)
+    config = tmp_path / "conf.toml"
+    _write_config(config, dataset, test_dataset)
+    trainer = ChempropTrainer(config)
+
+    with pytest.raises(FileNotFoundError, match="best model"):
+        trainer._best_model_paths()
+
+    best = tmp_path / "run/model_0/best.pt"
+    best.parent.mkdir(parents=True)
+    best.write_bytes(b"best model")
+    assert trainer._best_model_paths() == [best]
+
+
+def test_best_checkpoint_is_used_for_test_metrics(tmp_path: Path, monkeypatch):
+    dataset, test_dataset = _datasets(tmp_path)
+    config = tmp_path / "conf.toml"
+    _write_config(config, dataset, test_dataset)
+    trainer = ChempropTrainer(config)
+    trainer.prepare_data()
+
+    model_dir = tmp_path / "run/model_0"
+    model_dir.mkdir(parents=True)
+    (model_dir / "best.pt").write_bytes(b"best model")
+    (model_dir / "test_predictions.csv").write_text("old,output\n1,2\n")
+
+    def fake_run(command, **_kwargs):
+        output = Path(command[command.index("--preds-path") + 1])
+        pd.DataFrame(
+            {
+                "SMILES": ["CCO", "CCN"],
+                "HLM": [2.0, 3.0],
+                "RLM": [2.1, 3.1],
+                "MLM": [2.2, 3.2],
+            }
+        ).to_csv(output, index=False)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    predictions, metrics = trainer._evaluate_best_models("chemprop", {})
+
+    summary = json.loads(metrics.read_text())
+    assert summary["selection"] == "best_validation_checkpoint"
+    assert summary["targets"]["HLM"]["rmse"] == pytest.approx(0.0)
+    assert predictions.is_file()
+    assert (tmp_path / "run/final_model_test_predictions.csv").is_file()
 
 
 def test_split_export_flag_tracks_chemprop_version(tmp_path: Path, monkeypatch):
@@ -130,6 +198,29 @@ def test_dry_run_writes_reproducibility_manifest(tmp_path: Path):
     assert manifest["data_audit"]["rows"] == 4
     assert Path(manifest["command"][0]).name == "chemprop"
     assert manifest["command"][1] == "train"
+    assert manifest["early_stopping"] == {
+        "implementation": "Chemprop v2 native Lightning callback",
+        "monitor": "val_loss",
+        "patience": 20,
+        "min_delta": 0.0,
+        "state_restored_on_resume": False,
+    }
+
+
+def test_early_stopping_patience_must_be_positive(tmp_path: Path):
+    dataset, test_dataset = _datasets(tmp_path)
+    config = tmp_path / "conf.toml"
+    _write_config(config, dataset, test_dataset)
+    config.write_text(
+        config.read_text().replace(
+            "[TrainingConfig]\n",
+            "[TrainingConfig]\nearly_stopping_patience = 0\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="early_stopping_patience"):
+        ChempropTrainer(config)
 
 
 def test_predefined_split_rejects_unknown_labels(tmp_path: Path):

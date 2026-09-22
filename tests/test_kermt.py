@@ -158,6 +158,51 @@ def test_kermt_resume_audit_reports_epoch_and_parameter_counts():
     assert "Frozen parameters after resume: 2" in output
 
 
+def test_kermt_early_stopping_minimizes_with_min_delta():
+    from chemflow.deep_learning.kermt.vendor.task.train import (
+        _update_early_stopping,
+    )
+
+    best, bad_epochs, improved = _update_early_stopping(
+        0.50, float("inf"), 0, min_delta=0.01, minimize=True
+    )
+    assert (best, bad_epochs, improved) == pytest.approx((0.50, 0, True))
+
+    best, bad_epochs, improved = _update_early_stopping(
+        0.495, best, bad_epochs, min_delta=0.01, minimize=True
+    )
+    assert best == pytest.approx(0.50)
+    assert bad_epochs == 1
+    assert improved is False
+
+    best, bad_epochs, improved = _update_early_stopping(
+        0.48, best, bad_epochs, min_delta=0.01, minimize=True
+    )
+    assert best == pytest.approx(0.48)
+    assert bad_epochs == 0
+    assert improved is True
+
+
+def test_kermt_early_stopping_maximizes_and_counts_nan():
+    from chemflow.deep_learning.kermt.vendor.task.train import (
+        _update_early_stopping,
+    )
+
+    best, bad_epochs, improved = _update_early_stopping(
+        0.60, -float("inf"), 0, min_delta=0.02, minimize=False
+    )
+    assert best == pytest.approx(0.60)
+    assert bad_epochs == 0
+    assert improved is True
+
+    best, bad_epochs, improved = _update_early_stopping(
+        float("nan"), best, bad_epochs, min_delta=0.02, minimize=False
+    )
+    assert best == pytest.approx(0.60)
+    assert bad_epochs == 1
+    assert improved is False
+
+
 def test_kermt_pretrained_artifacts_download_to_cache(tmp_path, monkeypatch):
     calls = []
 
@@ -237,6 +282,8 @@ dry_run = true
     assert "chemflow.deep_learning.kermt.vendor.main" in manifest["command"]
     coefficient_index = manifest["command"].index("--fine_tune_coff")
     assert manifest["command"][coefficient_index + 1] == "0.0"
+    patience_index = manifest["command"].index("--early_stopping_patience")
+    assert manifest["command"][patience_index + 1] == "0"
     assert manifest["backend"] == "vendored NVIDIA-BioNeMo/KERMT"
     assert manifest["checkpoint_sha256"]
 

@@ -22,14 +22,14 @@ test_fraction = 0.0 # Must be 0.0 when test_dataset_path is supplied.
 
 [ChempropConfig]
 # Plain Chemprop baseline: randomly initialized D-MPNN, not CheMeleon weights.
-message_hidden_dim = 300
-depth = 3
-dropout = 0.0
+message_hidden_dim = 2048
+depth = 6
+dropout = 0.1
 activation = "RELU" # Common options: "RELU", "GELU", "SILU", "TANH".
 aggregation = "norm" # Options: "norm", "mean", "sum".
 aggregation_norm = 100.0
-ffn_hidden_dim = 300
-ffn_num_layers = 1
+ffn_hidden_dim = 512
+ffn_num_layers = 2
 batch_norm = false
 # Leave empty for the molecular-graph-only baseline.
 molecule_featurizers = [] # Options include "morgan_binary", "morgan_count", "rdkit_2d", "v1_rdkit_2d", "v1_rdkit_2d_normalized".
@@ -45,19 +45,20 @@ resume = false
 # resume_checkpoint = "./run/model_0/checkpoints/last.ckpt"
 accelerator = "auto" # Options: "auto", "cpu", "gpu", "mps".
 devices = "auto" # Examples: "auto", "1", "0,1".
-batch_size = 64
+batch_size = 256
 num_workers = 0
 num_epochs = 100 # With resume=true, this is the number of additional epochs.
-early_stopping_patience = 20
-warmup_epochs = 2
-init_lr = 1e-4
+early_stopping_patience = 10 # Native Chemprop early stopping; a resumed weights-only run starts a new window.
+warmup_epochs = 5
+init_lr = 1e-6
 max_lr = 1e-3
 final_lr = 1e-4
+gradient_clip_val = 1.0
 ensemble_size = 1
 num_replicates = 1
 metrics = ["rmse", "mae", "r2"] # Official Chemprop regression metrics.
-tracking_metric = "val_loss"
+tracking_metric = "val_loss" # Used for best.pt checkpointing and early stopping.
 save_data_splits = true # Saves SMILES splits in Chemprop 2.2 and full split CSVs in 2.3+.
 executable = "chemprop"
-extra_args = []
+extra_args = ["-v"]
 dry_run = false # true validates inputs and records the command without training.

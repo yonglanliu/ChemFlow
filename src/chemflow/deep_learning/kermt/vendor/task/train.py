@@ -196,6 +196,34 @@ def _log_resume_audit(model, checkpoint_path: str, start_epoch: int, info) -> No
     info(f"  Frozen parameters after resume: {frozen:,}")
 
 
+def _update_early_stopping(
+    value: float,
+    best_value: float,
+    bad_epochs: int,
+    *,
+    min_delta: float,
+    minimize: bool,
+) -> tuple[float, int, bool]:
+    """Update an early-stopping state from one validation observation."""
+    if not np.isfinite(value):
+        return best_value, bad_epochs + 1, False
+    improved = (
+        value < best_value - min_delta
+        if minimize
+        else value > best_value + min_delta
+    )
+    if improved:
+        return float(value), 0, True
+    return best_value, bad_epochs + 1, False
+
+
+def _mean_finite(values, fallback: float) -> float:
+    """Return the finite mean of a scalar/dictionary checkpoint value."""
+    candidates = values.values() if isinstance(values, dict) else [values]
+    finite = [float(value) for value in candidates if np.isfinite(value)]
+    return float(np.mean(finite)) if finite else fallback
+
+
 
 def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
           shared_dict, args: Namespace, n_iter: int = 0,
@@ -626,6 +654,52 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                 "Restored validation-selection state from the resume checkpoint "
                 f"(best epoch: {best_epoch})."
             )
+        early_stopping_patience = int(
+            getattr(args, "early_stopping_patience", 0)
+        )
+        early_stopping_min_delta = float(
+            getattr(args, "early_stopping_min_delta", 0.0)
+        )
+        early_stopping_monitor = str(
+            getattr(args, "early_stopping_monitor", "metric")
+        )
+        early_stopping_minimize = (
+            True if early_stopping_monitor == "loss" else bool(args.minimize_score)
+        )
+        early_stopping_state = saved_training_state.get("early_stopping", {})
+        if (
+            early_stopping_state
+            and early_stopping_state.get("monitor") == early_stopping_monitor
+        ):
+            early_stopping_best = float(early_stopping_state["best_value"])
+            early_stopping_bad_epochs = int(
+                early_stopping_state.get("bad_epochs", 0)
+            )
+            info(
+                "Restored early-stopping state: "
+                f"best={early_stopping_best:.6f}, "
+                f"epochs_without_improvement={early_stopping_bad_epochs}."
+            )
+        else:
+            fallback = float("inf") if early_stopping_minimize else -float("inf")
+            previous_best = (
+                min_val_loss if early_stopping_monitor == "loss" else best_score
+            )
+            early_stopping_best = _mean_finite(previous_best, fallback)
+            early_stopping_bad_epochs = 0
+        if early_stopping_patience > 0:
+            monitored_name = (
+                "mean validation loss"
+                if early_stopping_monitor == "loss"
+                else f"mean validation {args.metric}"
+            )
+            info(
+                f"Early stopping enabled: monitor={monitored_name}, "
+                f"patience={early_stopping_patience}, "
+                f"min_delta={early_stopping_min_delta:g}."
+            )
+        else:
+            info("Early stopping disabled (patience=0).")
         for epoch in range(start_epoch, args.epochs):
             s_time = time.time()
             # Reshuffle the sharded train data differently each epoch (DDP).
@@ -678,6 +752,26 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             v_time = time.time() - s_time
             # Average validation score
             avg_val_score = np.nanmean(val_scores)
+            early_stopping_value = float(
+                avg_val_loss
+                if early_stopping_monitor == "loss"
+                else avg_val_score
+            )
+            (
+                early_stopping_best,
+                early_stopping_bad_epochs,
+                _,
+            ) = _update_early_stopping(
+                early_stopping_value,
+                early_stopping_best,
+                early_stopping_bad_epochs,
+                min_delta=early_stopping_min_delta,
+                minimize=early_stopping_minimize,
+            )
+            should_stop = (
+                early_stopping_patience > 0
+                and early_stopping_bad_epochs >= early_stopping_patience
+            )
             # Logged after lr step
             if isinstance(scheduler, ExponentialLR):
                 scheduler.step()
@@ -749,6 +843,9 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                     "train_time_seconds": float(t_time),
                     "validation_time_seconds": float(v_time),
                     "train_evaluation_time_seconds": float(train_eval_time),
+                    "early_stopping_value": early_stopping_value,
+                    "early_stopping_best": early_stopping_best,
+                    "epochs_without_improvement": early_stopping_bad_epochs,
                 }
                 for task_name, val_score in zip(args.task_names, val_scores):
                     epoch_row[f"val_{task_name}_{args.metric}"] = float(val_score)
@@ -789,6 +886,11 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                 writer.add_scalar('loss/train', train_loss, epoch)
                 writer.add_scalar('loss/val', avg_val_loss, epoch)
                 writer.add_scalar(f'{args.metric}_val', avg_val_score, epoch)
+                writer.add_scalar(
+                    'early_stopping/epochs_without_improvement',
+                    early_stopping_bad_epochs,
+                    epoch,
+                )
 
             # Always update min_val_loss as it is needed for HPO
             if args.task_wise_checkpoint:
@@ -852,11 +954,33 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                         "best_epoch": best_epoch,
                         "min_val_loss": min_val_loss,
                         "n_iter": n_iter,
+                        "early_stopping": {
+                            "monitor": early_stopping_monitor,
+                            "best_value": early_stopping_best,
+                            "bad_epochs": early_stopping_bad_epochs,
+                            "patience": early_stopping_patience,
+                            "min_delta": early_stopping_min_delta,
+                        },
                     },
                 )
-            # TODO: Reimplement this
-            # if epoch - best_epoch > args.early_stop_epoch:
-            #     break
+            if early_stopping_patience > 0 and is_main:
+                print(
+                    "Early stopping status: "
+                    f"value={early_stopping_value:.6f}, "
+                    f"best={early_stopping_best:.6f}, "
+                    "epochs_without_improvement="
+                    f"{early_stopping_bad_epochs}/{early_stopping_patience}",
+                    flush=True,
+                )
+            if should_stop:
+                if is_main:
+                    info(
+                        f"Early stopping triggered after epoch {epoch + 1}: "
+                        f"no improvement greater than {early_stopping_min_delta:g} "
+                        f"for {early_stopping_patience} consecutive epochs. "
+                        "The best-validation model.pt is retained."
+                    )
+                break
 
         # Test-set evaluation + result writing happen on rank 0 only. All ranks
         # synchronize first; non-zero ranks then skip to the next ensemble member

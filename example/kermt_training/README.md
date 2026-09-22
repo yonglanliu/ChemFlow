@@ -67,6 +67,18 @@ features_generator = "rdkit_2d_normalized"
 Set `TrainingConfig.dry_run = true` to validate paths, prepare the splits, and
 inspect the command without starting GPU training.
 
+KERMT early stopping is configured with:
+
+```toml
+early_stopping_patience = 10
+early_stopping_min_delta = 0.001
+early_stopping_monitor = "metric" # or "loss"
+```
+
+The counter and best monitored value are stored in `last_checkpoint.pt`, so a
+resumed run continues the same patience window. `model.pt` remains the checkpoint
+with the best validation score and is used for final test evaluation.
+
 The vendored source is derived from NVIDIA-BioNeMo/KERMT commit
 `8828743036675d1b6d5f4586ef7bcfea70233d59`. Its license and attribution
 notices are included with the package.

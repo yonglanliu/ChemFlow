@@ -14,8 +14,39 @@ select the desired design with `DatasetConfig.split_column`.
 Change `target_column` to a single column for a single-task baseline.
 
 Chemprop automatically masks missing endpoint values during multitask
-training. TensorBoard events, checkpoints, test predictions, reproducible
-split records, and `chemprop_launch_manifest.json` are written below `workdir`.
+training. The example uses a regularized, higher-capacity D-MPNN configuration
+for ADME fine-tuning; treat it as a starting point and compare it with a
+single-task and a smaller-capacity control.
+
+After fitting, ChemFlow explicitly predicts with every ensemble member's
+validation-selected `best.pt`. This avoids Chemprop 2.2's single-GPU behavior
+of evaluating the final in-memory epoch. The following artifacts are written
+directly below `workdir`:
+
+- `test_predictions.csv`: standardized truth and best-model predictions.
+- `test_metrics.json`: RMSE, MAE, R2, Pearson, Spearman, and Kendall by task.
+- `training_history.csv`: epoch-level scalars exported from Lightning logs.
+- `final_model_test_predictions.csv`: Chemprop's original final-epoch output,
+  retained for auditing when available.
+- `chemprop_launch_manifest.json`: resolved command and reproducibility audit.
+
+TensorBoard events, checkpoints, and split records remain under each
+`model_*` directory.
+
+## Early stopping
+
+ChemFlow forwards `early_stopping_patience` to Chemprop v2's native Lightning
+early-stopping callback. `tracking_metric` controls both early stopping and
+selection of `best.pt`:
+
+```toml
+early_stopping_patience = 10
+tracking_metric = "val_loss"
+```
+
+Chemprop's public CLI uses a fixed `min_delta = 0`; every strict improvement
+resets patience. The resolved monitor and patience are printed at launch and
+recorded in `chemprop_launch_manifest.json`.
 
 ## Continue a run
 
@@ -25,7 +56,9 @@ path (or a list of paths for an ensemble). Chemprop v2's public CLI performs a
 weights-only continuation: model weights are restored, while optimizer,
 scheduler, and epoch-counter state start fresh. Therefore, `num_epochs` is the
 number of additional epochs. The selected checkpoint paths and SHA-256 hashes
-are recorded in the launch manifest and printed before training.
+are recorded in the launch manifest and printed before training. The native
+early-stopping callback state is also reset, so continuation starts a new
+patience window.
 
 This is a randomly initialized Chemprop D-MPNN baseline. It deliberately does
 not pass `--from-foundation CHEMELEON`; runs initialized from CheMeleon weights
