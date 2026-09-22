@@ -2,6 +2,7 @@ name: chemflow
 
 channels:
   - conda-forge
+  - nvidia
 
 dependencies:
   - python=3.11
@@ -23,6 +24,15 @@ dependencies:
   - scipy=1.17.1
   - statsmodels=0.14.6
   - xgboost=3.2.0
+
+  # KERMT runtime dependencies. cuik_molmaker is NVIDIA/Linux-specific and
+  # therefore belongs in the HPC environment rather than environment.yaml.
+  - cuik_molmaker>=0.3
+  - descriptastorus=2.7.0.4
+  - optuna
+  - pytest
+  - wandb
+  - setuptools>=80.0.0,<82.0.0
 
   # Pip installs the remaining pinned packages and this local project.
   - pip:

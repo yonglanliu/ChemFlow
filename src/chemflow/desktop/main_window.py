@@ -22,10 +22,10 @@ from chemflow.desktop.pages import (
     GeneratePage,
     PredictPage,
     SearchPage,
-    TrainPage,
     UncertaintyPage,
 )
 from chemflow.desktop.adme_page import ADMEDeploymentPage
+from chemflow.desktop.training_center import TrainingCenterPage
 from chemflow.desktop.widgets.forms import Card
 from chemflow.desktop.widgets.process_console import ProcessConsole
 
@@ -50,7 +50,7 @@ class MainWindow(QMainWindow):
         dashboard.navigate.connect(self.select_page)
         for page in [
             dashboard,
-            TrainPage(runner),
+            TrainingCenterPage(),
             PredictPage(runner),
             ADMEDeploymentPage(),
             SearchPage(runner),
@@ -61,21 +61,22 @@ class MainWindow(QMainWindow):
 
         self.console = ProcessConsole()
         self.console.state_changed.connect(self._task_state_changed)
-        console_card = Card("Activity console", "Live output from the current ChemFlow process.")
-        console_card.body.addWidget(self.console)
-        console_card.setMinimumHeight(205)
+        self.console_card = Card("Activity console", "Live output from the current ChemFlow process.")
+        self.console_card.body.addWidget(self.console)
+        self.console_card.setMinimumHeight(205)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self.pages)
-        splitter.addWidget(console_card)
+        splitter.addWidget(self.console_card)
         splitter.setSizes([650, 250])
         splitter.setCollapsible(0, False)
         content_layout.addWidget(splitter)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
+        self.pages.currentChanged.connect(self._page_changed)
         self.statusBar().showMessage("Ready · local ChemFlow environment")
 
     def _sidebar(self) -> QWidget:
@@ -140,3 +141,7 @@ class MainWindow(QMainWindow):
     def _task_state_changed(self, running: bool) -> None:
         if not running:
             self.statusBar().showMessage("Ready · task finished", 5000)
+
+    def _page_changed(self, index: int) -> None:
+        """The training center owns its job output; other pages use the shared console."""
+        self.console_card.setVisible(index != 1)

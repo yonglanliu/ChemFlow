@@ -89,6 +89,9 @@ app/
 similarity_search_test/
 test/
 
+# Standalone third-party model checkouts are installed locally, not vendored.
+external/KERMT/
+
 # Local Hugging Face Graphormer training runs (configs stay at directory root).
 example/hf_graphormer_training/*/
 

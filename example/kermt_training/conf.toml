@@ -1,0 +1,56 @@
+# ChemFlow configuration for the vendored NVIDIA/Merck KERMT backend.
+
+[BaseConfig]
+workdir = "./run"
+task = "regression" # Current KERMT adapter option: "regression".
+
+[DatasetConfig]
+dataset_path = "../../dataset/curated/physchem_multitask.csv"
+# test_dataset_path = "/path/to/independent_test.csv"
+smiles_column = "SMILES"
+target_column = ["LogD_pH7_4", "Log_KSOL_ExpansionRX_mol_L"]
+split_type = "scaffold_balanced" # Options: "random", "random_with_repeated_smiles", "scaffold_balanced", "predefined".
+val_fraction = 0.1
+test_fraction = 0.1 # Set to 0.0 when test_dataset_path is used.
+# split_column = "split" # Required with split_type = "predefined".
+
+[KERMTConfig]
+# Leave checkpoint_path empty to download the pinned official NVIDIA release
+# into ~/.cache/chemflow/kermt/NV-KERMT-70M-v2 on first use.
+checkpoint_path = ""
+# cache_dir = "~/.cache/chemflow/kermt/NV-KERMT-70M-v2"
+model_repo_id = "nvidia/NV-KERMT-70M-v2"
+local_files_only = false # Set true on offline nodes after populating the cache.
+# Leave blank to use the same Python interpreter that runs ChemFlow.
+python_executable = ""
+ffn_hidden_size = 700
+ffn_num_layers = 3
+bond_drop_rate = 0.1
+dist_coff = 0.15
+dropout = 0.0
+self_attention = true
+freeze_encoder = false # true freezes KERMT and trains only the prediction head/readout.
+no_features_scaling = true
+# NVIDIA HPC: true + "rdkit_2d_normalized_cuik_molmaker".
+# macOS/CPU: false + "rdkit_2d_normalized".
+use_cuikmolmaker_featurization = false
+features_generator = "rdkit_2d_normalized"
+rdkit2d_normalization_type = "fast" # Options: "fast", "standard".
+
+[TrainingConfig]
+seed = 42
+batch_size = 32
+num_epochs = 100
+ensemble_size = 1
+num_folds = 1
+metric = "mae" # Options: "mae", "rmse", "mse", "r2".
+warmup_epochs = 2
+init_lr = 1e-5
+max_lr = 1e-4
+final_lr = 2e-5
+weight_decay = 0.0
+encoder_lr_multiplier = 1.0 # Advanced: multiplier relative to init_lr when not frozen.
+resume = false # true restores model, optimizer, scheduler, and epoch.
+# resume_checkpoint = "/path/to/last_checkpoint.pt" # Blank uses this run's checkpoint(s).
+extra_args = []
+dry_run = false

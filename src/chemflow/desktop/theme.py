@@ -30,7 +30,7 @@ def stylesheet() -> str:
         background: {COLORS['accent']}; color: #06141c; border-radius: 12px;
         font-size: 17px; font-weight: 800; min-width: 42px; min-height: 42px;
     }}
-    QPushButton#HelpButton {{
+    QPushButton#HelpButton, QToolButton#HelpButton {{
         background: #10283a; color: {COLORS['accent']};
         border: 1px solid #24566a; border-radius: 17px;
         padding: 0; font-size: 17px; font-weight: 800;

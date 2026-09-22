@@ -3,7 +3,7 @@
 ChemFlow Studio is an optional native desktop interface for the existing
 ChemFlow command-line workflows. It provides visual forms for training,
 prediction, similarity search, GPT generation, and uncertainty evaluation,
-plus a live process console and an interactive PyOpenGL molecular scene.
+plus a live process console and an interactive native molecular scene.
 
 The **ADME clearance** workspace deploys two CheMeleon checkpoints as one
 inference product:
@@ -44,8 +44,8 @@ python -m pip install -e ".[desktop]"
 chemflow-install-ketcher
 ```
 
-PySide6 and PyOpenGL are optional dependencies; installing standard ChemFlow
-without the `desktop` extra does not install Qt.
+PySide6 is an optional dependency; installing standard ChemFlow without the
+`desktop` extra does not install Qt.
 
 The second command installs the Apache-2.0 Ketcher standalone editor in the
 user cache. Ketcher runs locally inside Qt WebEngine, so drawn structures do
@@ -68,6 +68,47 @@ python -m chemflow.desktop.app
 The activity console executes workflows using the currently active Python
 interpreter, so launch the desktop from the environment containing ChemFlow and
 all model dependencies.
+
+## Training center
+
+The **Train** workspace supports conventional ML, Graphormer, CheMeleon,
+ChemBERTa, KERMT, GPT, and LSTM experiments. A configuration can be launched in the
+desktop's local Python environment or submitted to a Slurm cluster through
+SSH. The HPC form records the login host, remote ChemFlow checkout, remote
+configuration, Conda environment, partition, GPU/CPU/memory request, and wall
+time. It never stores a password or private key; SSH uses the user's existing
+agent and SSH configuration.
+
+The job monitor keeps the most recent 100 jobs, displays local PIDs or Slurm
+job IDs, streams local output, polls remote `squeue`/`sacct` state every 15
+seconds, and can terminate a local process or call `scancel` for a selected
+Slurm job. Remote configurations and datasets must already be present on the
+HPC filesystem. The desktop submits the equivalent of:
+
+```bash
+chemflow train MODEL /remote/path/to/config
+```
+
+The SSH host should normally be a login node, not a transient compute node.
+Public-key authentication is recommended so monitoring does not repeatedly
+prompt for a password.
+
+Each model offers two configuration modes:
+
+- **Existing configuration** runs an advanced TOML, JSON, or YAML file without
+  changing it.
+- **Build configuration** displays the model's canonical configuration as
+  typed controls grouped by section. Choice fields constrain valid values,
+  numeric fields enforce ranges, and every parameter has a `?` explanation.
+
+The parameter schemas and defaults live in
+`chemflow.desktop.training_parameters`, so desktop forms and generated files
+are versioned with the source code. Generated Graphormer, CheMeleon,
+ChemBERTa, KERMT, GPT, and LSTM configurations use TOML; conventional ML uses JSON.
+For local execution, the generated file is passed directly to ChemFlow. For
+Slurm execution, it is saved locally, uploaded over SCP to the configured
+remote path, and then submitted. The existing-file mode assumes the specified
+remote configuration already exists on the cluster.
 
 ## Standalone ADMET Desktop
 

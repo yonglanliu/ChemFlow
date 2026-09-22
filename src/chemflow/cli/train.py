@@ -80,6 +80,26 @@ def train_chemberta(args):
     ChemBERTaTrainer(config_path).train()
 
 
+def train_kermt(args):
+    """Fine-tune ChemFlow's vendored KERMT backend."""
+    from chemflow.deep_learning.kermt.trainer import KERMTTrainer
+
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    KERMTTrainer(config_path).train()
+
+
+def train_lstm(args):
+    """Train or fine-tune the SMILES LSTM generator."""
+    from chemflow.deep_learning.lstm.train_ddp import train
+
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    train(config_path=config_path)
+
+
 def add_train_parser(subparsers):
     train_parser = subparsers.add_parser(
         "train",
@@ -133,6 +153,13 @@ def add_train_parser(subparsers):
     chemberta_parser.add_argument("config", type=str)
     chemberta_parser.set_defaults(func=train_chemberta)
 
+    kermt_parser = model_subparsers.add_parser(
+        "kermt",
+        help="Fine-tune the vendored NVIDIA/Merck KERMT backend",
+    )
+    kermt_parser.add_argument("config", type=str)
+    kermt_parser.set_defaults(func=train_kermt)
+
     # ========================================================
     # CheMeleon
     # ========================================================
@@ -150,6 +177,17 @@ def add_train_parser(subparsers):
     chemeleon_parser.set_defaults(
         func=train_chemeleon
     )
+
+    # ========================================================
+    # LSTM
+    # ========================================================
+
+    lstm_parser = model_subparsers.add_parser(
+        "lstm",
+        help="Train or fine-tune the SMILES LSTM generator",
+    )
+    lstm_parser.add_argument("config", type=str)
+    lstm_parser.set_defaults(func=train_lstm)
 
     # ========================================================
     # Classical ML

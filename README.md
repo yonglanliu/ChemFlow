@@ -145,7 +145,7 @@ This produces bootstrap confidence intervals and distribution plots for each tas
 - checkpointing
 - CLI-based workflows
 - Streamlit UI
-- optional native Qt and PyOpenGL desktop workspace
+- optional native Qt desktop workspace
 - multi-GPU and single-GPU support
 
 ### Native desktop workspace
@@ -168,8 +168,10 @@ admet-desktop
 Ketcher is installed as an offline chemical structure editor for the desktop;
 drawn molecules stay on the local computer.
 
-The desktop combines training, prediction, similarity search, molecular
-generation, and uncertainty evaluation with a live task console. See the
+The desktop combines local and Slurm/HPC training, a persistent job monitor,
+prediction, similarity search, molecular generation, and uncertainty
+evaluation. The training center supports conventional ML, Graphormer,
+CheMeleon, ChemBERTa, GPT, and LSTM. See the
 [desktop guide](src/chemflow/desktop/README.md) for details.
 
 ---
@@ -411,6 +413,21 @@ chemflow train chemberta example/chemberta_training/conf.toml
 ```
 
 See [the ChemBERTa tutorial](example/chemberta_training/README.md).
+
+### Fine-tune KERMT
+
+ChemFlow vendors NVIDIA/Merck's KERMT architecture and fine-tuning runtime.
+By default, the pinned official checkpoint and vocabularies are downloaded
+from `nvidia/NV-KERMT-70M-v2` into the ChemFlow cache on first use:
+
+```bash
+chemflow train kermt example/kermt_training/conf.toml
+```
+
+ChemFlow prepares separate train/validation/test CSV files and records the
+exact vendored command and pretrained-weight SHA256. NVIDIA HPC can use
+`cuik_molmaker`; macOS uses the included RDKit fallback. See
+[the KERMT guide](example/kermt_training/README.md).
 
 ### Fine-tune the pretrained CheMeleon model
 

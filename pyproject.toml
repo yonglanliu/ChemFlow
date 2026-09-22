@@ -25,7 +25,6 @@ dependencies = [
 [project.optional-dependencies]
 desktop = [
     "PySide6>=6.8,<7",
-    "PyOpenGL>=3.1.7,<4",
 ]
 hf-graphormer = [
     "transformers==4.50.3",
@@ -38,6 +37,13 @@ chemberta = [
 data-curation = [
     "openpyxl>=3.1,<4",
     "xlrd>=2,<3",
+]
+kermt = [
+    "descriptastorus==2.7.0.4",
+    "huggingface_hub>=0.36,<1",
+    "optuna>=4",
+    "protobuf>=5.29.6",
+    "wandb>=0.20",
 ]
 
 # ===========================
@@ -58,6 +64,8 @@ include = ["chemflow*", "src*"]
 "chemflow.config" = ["*.toml", "*.yaml"]
 "chemflow.deep_learning.gpt.config" = ["*.toml"]
 "chemflow.deep_learning.lstm" = ["*.toml"]
+"chemflow.deep_learning.kermt.vendor" = ["LICENSE", "UPSTREAM.md"]
+"chemflow.deep_learning.kermt.vendor.kermt.data" = ["smiles_regex.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

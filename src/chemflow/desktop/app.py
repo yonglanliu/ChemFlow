@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from chemflow.desktop.main_window import MainWindow
@@ -30,13 +30,6 @@ def _dark_palette() -> QPalette:
 
 
 def main() -> int:
-    surface = QSurfaceFormat()
-    surface.setVersion(3, 3)
-    surface.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
-    surface.setDepthBufferSize(24)
-    surface.setSamples(4)
-    QSurfaceFormat.setDefaultFormat(surface)
-
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("ChemFlow Studio")
     app.setOrganizationName("ChemFlow")
