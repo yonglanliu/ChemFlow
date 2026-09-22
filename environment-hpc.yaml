@@ -28,7 +28,7 @@ dependencies:
   # KERMT runtime dependencies. cuik_molmaker is NVIDIA/Linux-specific and
   # therefore belongs in the HPC environment rather than environment.yaml.
   - cuik_molmaker>=0.3
-  - descriptastorus=2.7.0.4
+  - "descriptastorus>=2.7.0.5,<3"
   - optuna
   - pytest
   - wandb
