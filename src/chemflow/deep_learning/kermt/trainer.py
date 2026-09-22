@@ -273,10 +273,21 @@ class KERMTTrainer:
         missing = [column for column in required if column not in frame.columns]
         if missing:
             raise ValueError(f"{source} is missing required columns: {missing}")
-        selected = frame[required].copy()
-        selected = selected.loc[selected[self.smiles_column].notna()].copy()
+        valid_smiles = (
+            frame[self.smiles_column].notna()
+            & frame[self.smiles_column].astype(str).str.strip().ne("")
+        )
+        has_selected_label = frame[self.targets].notna().any(axis=1)
+        selected = frame.loc[valid_smiles & has_selected_label, required].copy()
+        missing_all_targets = int((valid_smiles & ~has_selected_label).sum())
+        if missing_all_targets:
+            print(
+                f"Excluded {missing_all_targets:,} rows from {source} because all "
+                f"selected targets are missing: {', '.join(self.targets)}",
+                flush=True,
+            )
         selected[self.smiles_column] = selected[self.smiles_column].astype(str).str.strip()
-        selected = selected.loc[selected[self.smiles_column] != ""].reset_index(drop=True)
+        selected = selected.reset_index(drop=True)
         selected = selected.rename(columns={self.smiles_column: "smiles"})
         return selected
 
@@ -296,6 +307,7 @@ class KERMTTrainer:
             usable = frame.loc[
                 frame[self.smiles_column].notna()
                 & frame[self.smiles_column].astype(str).str.strip().ne("")
+                & frame[self.targets].notna().any(axis=1)
             ].copy()
             labels = usable[column].map(
                 lambda value: _SPLIT_ALIASES.get(str(value).strip().lower())
@@ -362,6 +374,14 @@ class KERMTTrainer:
         pd.concat(manifest_frames, ignore_index=True).rename(
             columns={"smiles": "SMILES"}
         ).to_csv(self.workdir / "data_splits.csv", index=False)
+        print(
+            "Prepared KERMT splits: "
+            + ", ".join(
+                f"{name}={len(split_frames[name]):,}"
+                for name in ("train", "val", "test")
+            ),
+            flush=True,
+        )
         return paths
 
     def build_command(self, paths: dict[str, Path]) -> list[str]:

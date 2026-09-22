@@ -152,9 +152,9 @@ def test_kermt_prepares_external_test_and_command(tmp_path):
     test = tmp_path / "test.csv"
     pd.DataFrame(
         {
-            "SMILES": ["CC", "CCC", "CCCC", "CCO"],
-            "HLM": [1.0, 2.0, 3.0, 4.0],
-            "split": ["train", "train", "val", "val"],
+            "SMILES": ["CC", "CCC", "CCCC", "CCO", "CCN"],
+            "HLM": [1.0, 2.0, 3.0, 4.0, None],
+            "split": ["train", "train", "val", "val", "train"],
         }
     ).to_csv(training, index=False)
     pd.DataFrame({"SMILES": ["CCN"], "HLM": [5.0]}).to_csv(test, index=False)
@@ -190,6 +190,8 @@ dry_run = true
 
     prepared = pd.read_csv(tmp_path / "run" / "prepared_data" / "train.csv")
     assert list(prepared.columns) == ["smiles", "HLM"]
+    assert len(prepared) == 2
+    assert prepared["HLM"].notna().all()
     assert len(pd.read_csv(tmp_path / "run" / "prepared_data" / "test.csv")) == 1
     manifest = json.loads(
         (tmp_path / "run" / "kermt_run_manifest.json").read_text(encoding="utf-8")
