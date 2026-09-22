@@ -294,6 +294,7 @@ class HuggingFaceGraphormerTrainer:
                 dist.init_process_group(backend="nccl", init_method="env://")
         self.is_main_process = self.rank == 0
         self.pretrained_weight_audit: dict[str, Any] = {}
+        self._preserve_loaded_head = False
         self.seed = int(self.train_cfg.get("seed", 42))
         process_seed = self.seed + self.rank
         random.seed(process_seed)
@@ -625,6 +626,71 @@ class HuggingFaceGraphormerTrainer:
         not trusted by Python Requests.  ChemFlow's cached checkpoint is the
         same state dictionary published in the Hugging Face repository.
         """
+        transfer_value = self.model_cfg.get("transfer_checkpoint")
+        if transfer_value:
+            transfer_path = Path(str(transfer_value)).expanduser().resolve()
+            if not transfer_path.is_dir():
+                raise FileNotFoundError(
+                    "Graphormer transfer_checkpoint must be a Hugging Face "
+                    f"best_model directory: {transfer_path}"
+                )
+
+            encoder_only = bool(
+                self.model_cfg.get("transfer_encoder_only", False)
+            )
+            model = self.GraphormerForGraphClassification.from_pretrained(
+                transfer_path,
+                num_classes=num_tasks,
+                ignore_mismatched_sizes=encoder_only,
+                local_files_only=True,
+            )
+            saved_targets = list(
+                getattr(model.config, "chemflow_target_names", []) or []
+            )
+            requested_targets = self._target_columns()
+            if not encoder_only:
+                if int(model.config.num_classes) != num_tasks:
+                    raise ValueError(
+                        "Full Graphormer transfer requires the same number of "
+                        "targets. Use transfer_encoder_only=true when changing "
+                        "the prediction head."
+                    )
+                if saved_targets and saved_targets != requested_targets:
+                    raise ValueError(
+                        "Full Graphormer transfer requires identical targets in "
+                        f"the same order. Saved: {saved_targets}; requested: "
+                        f"{requested_targets}. Use transfer_encoder_only=true "
+                        "when changing targets."
+                    )
+                self._preserve_loaded_head = True
+
+            transfer_mode = "encoder_only" if encoder_only else "full_model"
+            self.pretrained_weight_audit = {
+                "source": "ChemFlow downstream Graphormer checkpoint",
+                "resolved_path": str(transfer_path),
+                "local_files_only": True,
+                "checkpoint_compatibility": "passed_from_pretrained",
+                "transfer_mode": transfer_mode,
+                "saved_targets": saved_targets,
+                "requested_targets": requested_targets,
+                "prediction_head": (
+                    "reset_for_new_tasks"
+                    if encoder_only
+                    else "restored_from_transfer_checkpoint"
+                ),
+            }
+            if self.is_main_process:
+                print("Hugging Face Graphormer transfer-weight audit:")
+                print(f"  Source: {transfer_path}")
+                print(f"  Transfer mode: {transfer_mode}")
+                print(f"  Saved targets: {saved_targets or 'not recorded'}")
+                print(f"  Requested targets: {requested_targets}")
+                print(
+                    "  Prediction head: "
+                    f"{self.pretrained_weight_audit['prediction_head']}"
+                )
+            return model
+
         checkpoint_value = self.model_cfg.get("checkpoint_path")
         if not checkpoint_value:
             model_name = str(
@@ -1130,9 +1196,15 @@ class HuggingFaceGraphormerTrainer:
         if torch.cuda.is_available():
             state["cuda_random_state"] = torch.cuda.get_rng_state_all()
 
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        torch.save(state, temporary)
-        temporary.replace(path)
+        # A process-specific temporary filename prevents concurrent or stale
+        # writers from moving another process's temporary checkpoint. The
+        # final os.replace remains atomic on the destination filesystem.
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            torch.save(state, temporary)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _restore_resume_checkpoint(
         self,
@@ -1368,7 +1440,8 @@ class HuggingFaceGraphormerTrainer:
         train_metrics_loader = self._loader(datasets["train"], shuffle=False)
 
         model = self._load_model(len(target_columns))
-        self._reset_head(model)
+        if not self._preserve_loaded_head:
+            self._reset_head(model)
         model.config.problem_type = (
             "multi_label_classification"
             if "classification" in self.task_types

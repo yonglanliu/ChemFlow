@@ -37,6 +37,10 @@ max_nodes = 512
 multi_hop_max_dist = 5
 spatial_pos_max = 1024
 freeze_encoder = false          # true trains only the new prediction head.
+# Sequential transfer from a prior ChemFlow Graphormer best_model directory.
+# Full transfer is appropriate only when the target list is unchanged.
+# transfer_checkpoint = "/path/to/public3_run/best_model"
+# transfer_encoder_only = false # true resets the head for changed/multitask targets.
 
 [TrainingConfig]
 seed = 42
