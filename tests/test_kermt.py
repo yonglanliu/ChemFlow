@@ -4,6 +4,7 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -59,6 +60,40 @@ def test_kermt_cpu_training_does_not_select_cuda(monkeypatch):
         train_module.run_training(Namespace(cuda=False, gpu=0))
 
 
+def test_kermt_epoch_history_replaces_resumed_epoch(tmp_path):
+    from chemflow.deep_learning.kermt.vendor.task.train import _write_epoch_history
+
+    path = tmp_path / "training_history.csv"
+    _write_epoch_history(path, {"epoch": 1, "train_loss": 0.8})
+    _write_epoch_history(path, {"epoch": 2, "train_loss": 0.7})
+    _write_epoch_history(path, {"epoch": 2, "train_loss": 0.6})
+
+    history = pd.read_csv(path)
+    assert history["epoch"].tolist() == [1, 2]
+    assert history["train_loss"].tolist() == pytest.approx([0.8, 0.6])
+
+
+def test_kermt_regression_metrics_are_reported_by_task():
+    from chemflow.deep_learning.kermt.vendor.task.train import (
+        _regression_metrics_by_task,
+    )
+
+    metrics = _regression_metrics_by_task(
+        preds=[[1.0, 2.0], [2.0, 4.0], [3.0, 6.0]],
+        targets=[[1.0, 2.0], [2.0, None], [4.0, 6.0]],
+        task_names=["Papp", "ER"],
+    )
+
+    assert metrics["Papp"]["n"] == 3
+    assert metrics["Papp"]["mae"] == pytest.approx(1.0 / 3.0)
+    assert metrics["Papp"]["rmse"] == pytest.approx(np.sqrt(1.0 / 3.0))
+    assert metrics["ER"]["n"] == 2
+    assert metrics["ER"]["r2"] == pytest.approx(1.0)
+    assert metrics["ER"]["pearson"] == pytest.approx(1.0)
+    assert metrics["ER"]["spearman"] == pytest.approx(1.0)
+    assert metrics["ER"]["kendall"] == pytest.approx(1.0)
+
+
 def test_kermt_model_audit_reports_loaded_checkpoint_and_frozen_encoder():
     from chemflow.deep_learning.kermt.vendor.task.train import _log_model_audit
 
@@ -80,12 +115,13 @@ def test_kermt_model_audit_reports_loaded_checkpoint_and_frozen_encoder():
         messages.append,
     )
     output = "\n".join(messages)
-    assert "Checkpoint loaded successfully: yes" in output
-    assert "Checkpoint: /cache/kermt.pt" in output
-    assert "Total parameters:     11" in output
-    assert "Trainable parameters: 3 (27.2727%)" in output
-    assert "Frozen parameters:    8" in output
-    assert "Encoder trainable:    0/8 (frozen: yes)" in output
+    assert "| Item                           | Value" in output
+    assert "| Checkpoint loaded successfully | yes" in output
+    assert "| Checkpoint                     | /cache/kermt.pt" in output
+    assert "| Total parameters               | 11" in output
+    assert "| Trainable parameters           | 3 (27.2727%)" in output
+    assert "| Frozen parameters              | 8" in output
+    assert "| Encoder trainable              | 0/8 (frozen: yes)" in output
 
 
 def test_kermt_resume_checkpoint_resolves_current_fold_and_model(tmp_path):
@@ -203,3 +239,52 @@ dry_run = true
     assert manifest["command"][coefficient_index + 1] == "0.0"
     assert manifest["backend"] == "vendored NVIDIA-BioNeMo/KERMT"
     assert manifest["checkpoint_sha256"]
+
+
+@pytest.mark.parametrize("split_type", ["kennard_stone", "kmeans"])
+def test_kermt_supports_descriptor_and_cluster_splits(
+    tmp_path, monkeypatch, split_type
+):
+    training = tmp_path / "training.csv"
+    pd.DataFrame(
+        {
+            "SMILES": ["CC", "CCC", "CCCC", "CCO", "CCN", "CCCl"],
+            "HLM": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    ).to_csv(training, index=False)
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'''[BaseConfig]
+workdir = "{tmp_path / 'run'}"
+task = "regression"
+[DatasetConfig]
+dataset_path = "{training}"
+smiles_column = "SMILES"
+target_column = "HLM"
+split_type = "{split_type}"
+val_fraction = 0.2
+test_fraction = 0.2
+[KERMTConfig]
+[TrainingConfig]
+seed = 42
+''',
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_split(molecules, *, split, sizes, seed):
+        calls.append((len(molecules), split, sizes, seed))
+        return ([np.array([0, 1, 2, 3])], [np.array([4])], [np.array([5])])
+
+    monkeypatch.setattr("chemprop.data.make_split_indices", fake_split)
+    paths = KERMTTrainer(config).prepare_data()
+
+    assert len(calls) == 1
+    assert calls[0][0] == 6
+    assert calls[0][1] == split_type
+    assert calls[0][2] == pytest.approx((0.6, 0.2, 0.2))
+    assert calls[0][3] == 42
+    assert len(pd.read_csv(paths["train"])) == 4
+    assert len(pd.read_csv(paths["val"])) == 1
+    assert len(pd.read_csv(paths["test"])) == 1

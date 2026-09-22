@@ -65,6 +65,23 @@ from chemflow.deep_learning.chemeleon.applicability import (
 )
 
 
+def _print_log_table(title: str, rows: list[tuple[str, object]]) -> None:
+    """Print a fixed-width table that remains readable in Slurm logs."""
+    headers = ("Item", "Value")
+    rendered = [(str(label), str(value)) for label, value in rows]
+    label_width = max(len(headers[0]), *(len(label) for label, _ in rendered))
+    value_width = max(len(headers[1]), *(len(value) for _, value in rendered))
+    border = f"+-{'-' * label_width}-+-{'-' * value_width}-+"
+
+    print(title)
+    print(border)
+    print(f"| {headers[0]:<{label_width}} | {headers[1]:<{value_width}} |")
+    print(border)
+    for label, value in rendered:
+        print(f"| {label:<{label_width}} | {value:<{value_width}} |")
+    print(border)
+
+
 def _graphormer_imports():
     try:
         from transformers import (
@@ -578,18 +595,46 @@ class HuggingFaceGraphormerTrainer:
         frozen = total - trainable
         ratio = 100.0 * trainable / total if total else 0.0
 
-        print("Hugging Face Graphormer parameter summary:")
-        print(f"  Total parameters:       {total:,}")
-        print(f"  Trainable parameters:   {trainable:,} ({ratio:.2f}%)")
-        print(f"  Frozen parameters:      {frozen:,}")
-        print(
-            "  Encoder:                "
-            f"{encoder_trainable:,} / {encoder_total:,} trainable"
+        audit = self.pretrained_weight_audit
+        checkpoint = (
+            audit.get("resolved_path")
+            or audit.get("model_name")
+            or "Hugging Face Hub/cache"
         )
-        print(
-            "  Prediction head:        "
-            f"{head_trainable:,} / {head_total:,} trainable"
-        )
+        rows: list[tuple[str, object]] = [
+            ("Checkpoint loaded successfully", "yes"),
+            ("Source", audit.get("source", "unknown")),
+            ("Checkpoint/model", checkpoint),
+            (
+                "Checkpoint compatibility",
+                audit.get("checkpoint_compatibility", "passed"),
+            ),
+            ("Prediction head", audit.get("prediction_head", "unknown")),
+            ("Total parameters", f"{total:,}"),
+            ("Trainable parameters", f"{trainable:,} ({ratio:.4f}%)"),
+            ("Frozen parameters", f"{frozen:,}"),
+            (
+                "Encoder trainable",
+                f"{encoder_trainable:,}/{encoder_total:,} "
+                f"(frozen: {'yes' if encoder_total and encoder_trainable == 0 else 'no'})",
+            ),
+            (
+                "Prediction head trainable",
+                f"{head_trainable:,}/{head_total:,} "
+                f"(frozen parameters: {head_total - head_trainable:,})",
+            ),
+            (
+                "Encoder learning rate",
+                f"{float(self.train_cfg.get('encoder_learning_rate', 1e-5)):g}",
+            ),
+            (
+                "Head learning rate",
+                f"{float(self.train_cfg.get('head_learning_rate', 1e-4)):g}",
+            ),
+        ]
+        if audit.get("transfer_mode"):
+            rows.insert(3, ("Transfer mode", audit["transfer_mode"]))
+        _print_log_table("Hugging Face Graphormer model audit:", rows)
 
     def _collator(self):
         base = self.GraphormerDataCollator(
@@ -679,16 +724,6 @@ class HuggingFaceGraphormerTrainer:
                     else "restored_from_transfer_checkpoint"
                 ),
             }
-            if self.is_main_process:
-                print("Hugging Face Graphormer transfer-weight audit:")
-                print(f"  Source: {transfer_path}")
-                print(f"  Transfer mode: {transfer_mode}")
-                print(f"  Saved targets: {saved_targets or 'not recorded'}")
-                print(f"  Requested targets: {requested_targets}")
-                print(
-                    "  Prediction head: "
-                    f"{self.pretrained_weight_audit['prediction_head']}"
-                )
             return model
 
         checkpoint_value = self.model_cfg.get("checkpoint_path")
@@ -725,14 +760,6 @@ class HuggingFaceGraphormerTrainer:
                 "cryptographic_checksum": "not_configured",
                 "prediction_head": "reset_for_downstream_tasks",
             }
-            if self.is_main_process:
-                print("Hugging Face Graphormer pretrained-weight audit:")
-                print(f"  Source: {self.pretrained_weight_audit['source']}")
-                print(f"  Model: {model_name}")
-                if self.pretrained_weight_audit["resolved_path"]:
-                    print(f"  Resolved path: {self.pretrained_weight_audit['resolved_path']}")
-                print("  Model loading: passed (from_pretrained)")
-                print("  Prediction head: reset for downstream tasks")
             return model
 
         checkpoint_path = Path(str(checkpoint_value)).expanduser().resolve()
@@ -806,13 +833,6 @@ class HuggingFaceGraphormerTrainer:
                 f"Missing keys: {incompatible.missing_keys}; unexpected keys: "
                 f"{incompatible.unexpected_keys}."
             )
-        if self.is_main_process:
-            print("Hugging Face Graphormer pretrained-weight audit:")
-            print("  Source: configured local checkpoint")
-            print(f"  Resolved path: {checkpoint_path}")
-            print(f"  File size: {checkpoint_path.stat().st_size:,} bytes")
-            print("  Checkpoint compatibility: passed")
-            print("  Prediction head: reset for downstream tasks")
         self.pretrained_weight_audit = {
             "source": "configured local checkpoint",
             "model_name": self.model_cfg.get("model_name"),
@@ -1462,12 +1482,6 @@ class HuggingFaceGraphormerTrainer:
         self.pretrained_weight_audit["encoder_frozen"] = bool(
             self.model_cfg.get("freeze_encoder", False)
         )
-        if self.is_main_process:
-            print(
-                "  Encoder frozen: "
-                f"{self.pretrained_weight_audit['encoder_frozen']}"
-            )
-
         if self.is_main_process:
             self._print_parameter_summary(model)
 

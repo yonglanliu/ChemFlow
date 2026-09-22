@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from rdkit import Chem
 
@@ -17,12 +18,35 @@ from chemflow.deep_learning.chemeleon.trainer import (
     _load_transfer_encoder,
     _molecules_for_split,
     _resolve_resume_checkpoint,
+    _save_epoch_history,
     _save_split_manifest,
     load_config,
 )
 
 
 class CheMeleonCliTest(unittest.TestCase):
+    def test_lightning_metrics_are_compacted_to_one_row_per_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "metrics.csv"
+            output = Path(directory) / "training_history.csv"
+            pd.DataFrame(
+                [
+                    {"epoch": 0, "step": 0, "train_loss": 0.9},
+                    {"epoch": 0, "step": 1, "train_loss": 0.8},
+                    {"epoch": 0, "step": 1, "val_loss": 0.7},
+                    {"epoch": 1, "step": 2, "train_loss": 0.6},
+                    {"epoch": 1, "step": 2, "val_loss": 0.5},
+                ]
+            ).to_csv(source, index=False)
+
+            self.assertTrue(_save_epoch_history(source, output))
+            history = pd.read_csv(output)
+
+        self.assertEqual(history["epoch"].tolist(), [1, 2])
+        self.assertNotIn("step", history.columns)
+        self.assertEqual(history["train_loss"].tolist(), [0.8, 0.6])
+        self.assertEqual(history["val_loss"].tolist(), [0.7, 0.5])
+
     def test_train_subcommand_is_registered(self):
         args = build_parser().parse_args(
             ["train", "chemeleon", "config.toml"]

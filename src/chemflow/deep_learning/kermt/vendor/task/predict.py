@@ -366,7 +366,8 @@ def evaluate(model: nn.Module,
              args: Namespace,
              shared_dict,
              scaler: StandardScaler = None,
-             logger = None) -> List[float]:
+             logger = None,
+             return_predictions: bool = False):
     """
     Evaluates an ensemble of models on a dataset.
 
@@ -406,4 +407,6 @@ def evaluate(model: nn.Module,
         logger=logger
     )
 
+    if return_predictions:
+        return results, loss_avg, preds, targets
     return results, loss_avg

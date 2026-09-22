@@ -177,7 +177,12 @@ class KERMTTrainer:
             self.data_cfg.get("split_type", "scaffold_balanced")
         ).strip().lower()
         allowed = {
-            "random", "random_with_repeated_smiles", "scaffold_balanced", "predefined"
+            "random",
+            "random_with_repeated_smiles",
+            "scaffold_balanced",
+            "kennard_stone",
+            "kmeans",
+            "predefined",
         }
         if self.data_cfg.get("split_column"):
             self.split_type = "predefined"
@@ -336,6 +341,32 @@ class KERMTTrainer:
                     test_fraction=test_fraction,
                     seed=seed,
                 )
+            elif self.split_type in {"kennard_stone", "kmeans"}:
+                from chemprop import data as chemprop_data
+
+                molecules = [Chem.MolFromSmiles(value) for value in selected["smiles"]]
+                invalid = [index for index, molecule in enumerate(molecules) if molecule is None]
+                if invalid:
+                    raise ValueError(
+                        f"{self.split_type} splitting requires valid SMILES; "
+                        f"invalid prepared-row indices: {invalid[:10]}"
+                    )
+                split_indices = chemprop_data.make_split_indices(
+                    molecules,
+                    split=self.split_type,
+                    sizes=(
+                        1.0 - val_fraction - test_fraction,
+                        val_fraction,
+                        test_fraction,
+                    ),
+                    seed=seed,
+                )
+                indices = {
+                    name: [int(index) for index in values[0]]
+                    for name, values in zip(
+                        ("train", "val", "test"), split_indices
+                    )
+                }
             else:
                 smiles = selected["smiles"].tolist()
                 groups = (

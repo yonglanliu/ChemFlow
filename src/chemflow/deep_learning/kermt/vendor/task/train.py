@@ -43,6 +43,7 @@ import logging
 import os
 import json
 import pickle  # noqa: F401  (kept; available if a caller wants to load legacy .pckl splits)
+import sys
 import time
 from argparse import Namespace
 from logging import Logger
@@ -51,6 +52,8 @@ from typing import List
 
 import numpy as np
 import pandas as pd
+from scipy.stats import kendalltau, pearsonr, spearmanr
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 try:
     import wandb
 except ImportError:
@@ -62,6 +65,7 @@ from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
+from tqdm.auto import tqdm
 
 from chemflow.deep_learning.kermt.vendor.kermt.data import MolCollator
 from chemflow.deep_learning.kermt.vendor.kermt.data import StandardScaler
@@ -85,6 +89,23 @@ def _parameter_counts(named_parameters):
     return total, trainable, total - trainable
 
 
+def _log_table(title: str, rows: list[tuple[str, object]], log) -> None:
+    """Write a dependency-free fixed-width table to terminal and Slurm logs."""
+    headers = ("Item", "Value")
+    rendered = [(str(label), str(value)) for label, value in rows]
+    label_width = max(len(headers[0]), *(len(label) for label, _ in rendered))
+    value_width = max(len(headers[1]), *(len(value) for _, value in rendered))
+    border = f"+-{'-' * label_width}-+-{'-' * value_width}-+"
+
+    log(title)
+    log(border)
+    log(f"| {headers[0]:<{label_width}} | {headers[1]:<{value_width}} |")
+    log(border)
+    for label, value in rendered:
+        log(f"| {label:<{label_width}} | {value:<{value_width}} |")
+    log(border)
+
+
 def _log_model_audit(model, args: Namespace, checkpoint_path, debug) -> None:
     """Log checkpoint and post-freezing parameter state for a finetuning run."""
     named_parameters = list(model.named_parameters())
@@ -103,24 +124,31 @@ def _log_model_audit(model, args: Namespace, checkpoint_path, debug) -> None:
     head_total, head_trainable, head_frozen = _parameter_counts(downstream)
     trainable_percent = 100.0 * trainable / total if total else 0.0
 
-    debug("KERMT model audit:")
-    debug(
-        "  Checkpoint loaded successfully: "
-        + ("yes" if checkpoint_path is not None else "no; initialized from scratch")
+    _log_table(
+        "KERMT model audit:",
+        [
+            (
+                "Checkpoint loaded successfully",
+                "yes" if checkpoint_path is not None else "no; initialized from scratch",
+            ),
+            ("Checkpoint", checkpoint_path if checkpoint_path is not None else "none"),
+            ("Total parameters", f"{total:,}"),
+            ("Trainable parameters", f"{trainable:,} ({trainable_percent:.4f}%)"),
+            ("Frozen parameters", f"{frozen:,}"),
+            (
+                "Encoder trainable",
+                f"{encoder_trainable:,}/{encoder_total:,} "
+                f"(frozen: {'yes' if encoder_total and encoder_trainable == 0 else 'no'})",
+            ),
+            (
+                "Head/readout trainable",
+                f"{head_trainable:,}/{head_total:,} "
+                f"(frozen parameters: {head_frozen:,})",
+            ),
+            ("Encoder LR coefficient", f"{args.fine_tune_coff:g}"),
+        ],
+        debug,
     )
-    debug(f"  Checkpoint: {checkpoint_path if checkpoint_path is not None else 'none'}")
-    debug(f"  Total parameters:     {total:,}")
-    debug(f"  Trainable parameters: {trainable:,} ({trainable_percent:.4f}%)")
-    debug(f"  Frozen parameters:    {frozen:,}")
-    debug(
-        f"  Encoder trainable:    {encoder_trainable:,}/{encoder_total:,} "
-        f"(frozen: {'yes' if encoder_total and encoder_trainable == 0 else 'no'})"
-    )
-    debug(
-        f"  Head/readout trainable: {head_trainable:,}/{head_total:,} "
-        f"(frozen parameters: {head_frozen:,})"
-    )
-    debug(f"  Encoder LR coefficient: {args.fine_tune_coff:g}")
 
 
 def _resolve_resume_checkpoint(args: Namespace, model_idx: int, save_dir: str) -> str:
@@ -203,7 +231,17 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
         mol_loader = DataLoader(data, batch_size=args.batch_size, shuffle=True,
                             num_workers=num_workers, collate_fn=mol_collator)
 
-    for _, item in enumerate(mol_loader):
+    is_main = not dist.is_initialized() or dist.get_rank() == 0
+    progress = tqdm(
+        mol_loader,
+        desc=f"Epoch {epoch + 1}/{args.epochs}",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=0.5,
+        file=sys.stdout,
+        disable=not is_main,
+    )
+    for item in progress:
         _, batch, features_batch, mask, targets = item
         if next(model.parameters()).is_cuda:
             mask, targets = mask.cuda(), targets.cuda()
@@ -268,6 +306,15 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
 
         n_iter += args.batch_size
 
+        if is_main:
+            current_lr = scheduler.get_lr()[-1]
+            progress.set_postfix(
+                loss=f"{loss.item():.4f}",
+                mean=f"{cum_loss_sum / cum_iter_count:.4f}",
+                lr=f"{current_lr:.1e}",
+                refresh=False,
+            )
+
         #if (n_iter // args.batch_size) % args.log_frequency == 0:
         #    lrs = scheduler.get_lr()
         #    loss_avg = loss_sum / iter_count
@@ -278,6 +325,84 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
         #     print(f"After {cum_iter_count} iterations: {current_mem}MB, {peak_mem}MB")
 
     return n_iter, cum_loss_sum / cum_iter_count
+
+
+def _write_epoch_history(path: str | Path, row: dict) -> None:
+    """Write exactly one training-history row per epoch, including on resume."""
+    output_path = Path(path)
+    rows = []
+    if output_path.is_file():
+        rows = pd.read_csv(output_path).to_dict(orient="records")
+    epoch = int(row["epoch"])
+    rows = [previous for previous in rows if int(previous["epoch"]) != epoch]
+    rows.append(row)
+    pd.DataFrame(rows).sort_values("epoch").to_csv(output_path, index=False)
+
+
+def _regression_metrics_by_task(preds, targets, task_names) -> dict[str, dict]:
+    """Calculate ChemFlow's standard regression metrics for each KERMT task."""
+    predictions = np.asarray(preds, dtype=float)
+    observed = np.asarray(targets, dtype=float)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape(-1, 1)
+    if observed.ndim == 1:
+        observed = observed.reshape(-1, 1)
+
+    result: dict[str, dict] = {}
+    for task_index, task_name in enumerate(task_names):
+        valid = np.isfinite(observed[:, task_index]) & np.isfinite(
+            predictions[:, task_index]
+        )
+        y_true = observed[valid, task_index]
+        y_pred = predictions[valid, task_index]
+        metrics = {
+            "n": int(valid.sum()),
+            "rmse": float("nan"),
+            "mae": float("nan"),
+            "r2": float("nan"),
+            "pearson": float("nan"),
+            "spearman": float("nan"),
+            "kendall": float("nan"),
+        }
+        if y_true.size:
+            metrics["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+            metrics["mae"] = float(mean_absolute_error(y_true, y_pred))
+        if y_true.size >= 2:
+            metrics["r2"] = float(r2_score(y_true, y_pred))
+            if np.unique(y_true).size > 1 and np.unique(y_pred).size > 1:
+                for name, function in (
+                    ("pearson", pearsonr),
+                    ("spearman", spearmanr),
+                    ("kendall", kendalltau),
+                ):
+                    try:
+                        metrics[name] = float(function(y_true, y_pred).statistic)
+                    except (ValueError, FloatingPointError):
+                        pass
+        result[str(task_name)] = metrics
+    return result
+
+
+def _write_task_metrics(path: str | Path, epoch: int, metrics_by_split) -> None:
+    """Persist one row per epoch, split, and task without batch-level rows."""
+    output_path = Path(path)
+    rows = []
+    if output_path.is_file():
+        rows = pd.read_csv(output_path).to_dict(orient="records")
+    rows = [previous for previous in rows if int(previous["epoch"]) != epoch]
+    for split_name, task_metrics in metrics_by_split.items():
+        for task_name, metrics in task_metrics.items():
+            rows.append(
+                {
+                    "epoch": epoch,
+                    "split": split_name,
+                    "task": task_name,
+                    **metrics,
+                }
+            )
+    pd.DataFrame(rows).sort_values(["epoch", "split", "task"]).to_csv(
+        output_path, index=False
+    )
 
 
 def run_training(args: Namespace, logger: Logger = None, return_val=False,
@@ -529,7 +654,7 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             # scores are then broadcast so every rank makes the same best-model / early-stop
             # decisions; only rank 0 writes checkpoints.
             if is_main:
-                val_scores, val_loss = evaluate(
+                val_scores, val_loss, val_preds, val_targets = evaluate(
                     model=core_model,
                     data=val_data,
                     loss_func=loss_func,
@@ -540,7 +665,8 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                     scaler=scaler,
                     shared_dict=shared_dict,
                     logger=logger,
-                    args=args
+                    args=args,
+                    return_predictions=True,
                 )
             else:
                 val_scores, val_loss = None, None
@@ -556,6 +682,36 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             if isinstance(scheduler, ExponentialLR):
                 scheduler.step()
 
+            train_eval_time = 0.0
+            if is_main:
+                train_eval_start = time.time()
+                _, _, train_preds, train_targets = evaluate(
+                    model=core_model,
+                    data=train_data,
+                    loss_func=loss_func,
+                    num_tasks=args.num_tasks,
+                    metric_func=metric_func,
+                    batch_size=args.batch_size,
+                    dataset_type=args.dataset_type,
+                    scaler=scaler,
+                    shared_dict=shared_dict,
+                    logger=logger,
+                    args=args,
+                    return_predictions=True,
+                )
+                train_eval_time = time.time() - train_eval_start
+                train_metrics = _regression_metrics_by_task(
+                    train_preds, train_targets, args.task_names
+                )
+                val_metrics = _regression_metrics_by_task(
+                    val_preds, val_targets, args.task_names
+                )
+            if is_distributed:
+                # Non-zero ranks wait while rank zero evaluates the complete
+                # training set with the unwrapped model. This prevents them
+                # from entering the next DDP epoch early.
+                dist.barrier()
+
             if args.show_individual_scores:
                 # Individual validation scores
                 for task_name, val_score in zip(args.task_names, val_scores):
@@ -568,7 +724,52 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                       'cur_lr: {:.5f}'.format(scheduler.get_lr()[-1]),
                       't_time: {:.4f}s'.format(t_time),
                       'v_time: {:.4f}s'.format(v_time),
+                      'train_eval_time: {:.4f}s'.format(train_eval_time),
                       flush=True)
+                for split_label, split_metrics in (
+                    ("Train", train_metrics),
+                    ("Validation", val_metrics),
+                ):
+                    print(f"{split_label} metrics by task — epoch {epoch + 1}:")
+                    for task_name, values in split_metrics.items():
+                        print(
+                            f"  {task_name} (n={values['n']}): "
+                            f"RMSE={values['rmse']:.4f}, MAE={values['mae']:.4f}, "
+                            f"R2={values['r2']:.4f}, Pearson={values['pearson']:.4f}, "
+                            f"Spearman={values['spearman']:.4f}, "
+                            f"Kendall={values['kendall']:.4f}",
+                            flush=True,
+                        )
+                epoch_row = {
+                    "epoch": epoch + 1,
+                    "train_loss": float(train_loss),
+                    "val_loss": float(avg_val_loss),
+                    f"val_{args.metric}": float(avg_val_score),
+                    "learning_rate": float(scheduler.get_lr()[-1]),
+                    "train_time_seconds": float(t_time),
+                    "validation_time_seconds": float(v_time),
+                    "train_evaluation_time_seconds": float(train_eval_time),
+                }
+                for task_name, val_score in zip(args.task_names, val_scores):
+                    epoch_row[f"val_{task_name}_{args.metric}"] = float(val_score)
+                for split_name, split_metrics in (
+                    ("train", train_metrics),
+                    ("val", val_metrics),
+                ):
+                    for task_name, values in split_metrics.items():
+                        for metric_name, value in values.items():
+                            epoch_row[
+                                f"{split_name}_{task_name}_{metric_name}"
+                            ] = value
+                _write_epoch_history(
+                    Path(save_dir) / "training_history.csv",
+                    epoch_row,
+                )
+                _write_task_metrics(
+                    Path(save_dir) / "training_task_metrics.csv",
+                    epoch + 1,
+                    {"train": train_metrics, "validation": val_metrics},
+                )
             if args.wandb_project and is_main:
                 log_dict = {
                     "epoch": epoch,

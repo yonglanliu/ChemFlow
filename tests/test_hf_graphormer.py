@@ -13,6 +13,7 @@ from chemflow.deep_learning.hf_graphormer.trainer import (
     _classification_metrics,
     _metrics,
     _normalise_split,
+    _print_log_table,
     _validate_split_config,
 )
 
@@ -23,6 +24,17 @@ def test_hf_graphormer_cli_is_registered():
     )
     assert args.model == "hf-graphormer"
     assert args.config == "reference.toml"
+
+
+def test_graphormer_log_table_is_fixed_width(capsys):
+    _print_log_table(
+        "Graphormer audit:",
+        [("Checkpoint loaded successfully", "yes"), ("Total parameters", "42")],
+    )
+    output = capsys.readouterr().out
+    assert "| Item                           | Value |" in output
+    assert "| Checkpoint loaded successfully | yes   |" in output
+    assert "| Total parameters               | 42    |" in output
 
 
 def test_hf_graphormer_split_aliases():

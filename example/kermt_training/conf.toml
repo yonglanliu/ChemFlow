@@ -9,7 +9,7 @@ dataset_path = "../../dataset/curated/physchem_multitask.csv"
 # test_dataset_path = "/path/to/independent_test.csv"
 smiles_column = "SMILES"
 target_column = ["LogD_pH7_4", "Log_KSOL_ExpansionRX_mol_L"]
-split_type = "scaffold_balanced" # Options: "random", "random_with_repeated_smiles", "scaffold_balanced", "predefined".
+split_type = "scaffold_balanced" # Options: "random", "random_with_repeated_smiles", "scaffold_balanced", "kennard_stone", "kmeans", "predefined".
 val_fraction = 0.1
 test_fraction = 0.1 # Set to 0.0 when test_dataset_path is used.
 # split_column = "split" # Required with split_type = "predefined".

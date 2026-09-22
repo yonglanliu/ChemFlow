@@ -1182,6 +1182,34 @@ def _plot_history(metrics_path: Path, output_path: Path) -> None:
     plt.close(figure)
 
 
+def _save_epoch_history(metrics_path: Path, output_path: Path) -> bool:
+    """Collapse Lightning's step-oriented metrics into one row per epoch."""
+    if not metrics_path.is_file():
+        return False
+    history = pd.read_csv(metrics_path)
+    if "epoch" not in history.columns:
+        return False
+    history = history.loc[history["epoch"].notna()].copy()
+    if history.empty:
+        return False
+
+    rows: list[dict[str, Any]] = []
+    value_columns = [
+        column for column in history.columns if column not in {"epoch", "step"}
+    ]
+    for epoch, group in history.groupby("epoch", sort=True):
+        row: dict[str, Any] = {"epoch": int(epoch) + 1}
+        for column in value_columns:
+            values = group[column].dropna()
+            if not values.empty:
+                row[column] = values.iloc[-1]
+        rows.append(row)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(output_path, index=False)
+    return True
+
+
 class CheMeleonTrainer:
     def __init__(self, config_path: str | Path):
         self.config_path = Path(config_path).expanduser().resolve()
@@ -1388,7 +1416,7 @@ class CheMeleonTrainer:
         )
         callbacks: list[Callback] = [
             checkpoint_callback,
-            LearningRateMonitor(logging_interval="step"),
+            LearningRateMonitor(logging_interval="epoch"),
         ]
         if bool(self.config.training.inspect_task_metrics):
             callbacks.append(
@@ -1531,11 +1559,17 @@ class CheMeleonTrainer:
 
         csv_logger = loggers[0]
         metrics_path = Path(csv_logger.log_dir) / "metrics.csv"
-        if metrics_path.is_file():
-            shutil.copy2(metrics_path, self.workdir / "training_history.csv")
-            shutil.copy2(metrics_path, self.checkpoint_dir / "history.csv")
+        epoch_history_path = self.workdir / "training_history.csv"
+        if _save_epoch_history(metrics_path, epoch_history_path):
+            shutil.copy2(epoch_history_path, self.checkpoint_dir / "history.csv")
+            # Keep even Lightning's internal CSV compact after training so all
+            # persisted CSV histories contain one row per completed epoch.
+            shutil.copy2(epoch_history_path, metrics_path)
         if self.config.training.plot_training_history:
-            _plot_history(metrics_path, self.workdir / "plots" / "training_history.png")
+            _plot_history(
+                epoch_history_path,
+                self.workdir / "plots" / "training_history.png",
+            )
 
         best_path = checkpoint_callback.best_model_path
         if not best_path:

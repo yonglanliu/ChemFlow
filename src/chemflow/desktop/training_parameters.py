@@ -181,7 +181,7 @@ KERMT = ModelParameters(
         text("DatasetConfig.test_dataset_path", "", "Optional independent test dataset; set test fraction to zero."),
         text("DatasetConfig.smiles_column", "SMILES", "Column containing molecular SMILES strings."),
         items("DatasetConfig.target_column", ["target"], "One or more regression endpoints; missing labels enable native multitask training."),
-        choice("DatasetConfig.split_type", "scaffold_balanced", ("random", "random_with_repeated_smiles", "scaffold_balanced", "predefined"), "Split used to prepare KERMT's separate train, validation, and test CSV files."),
+        choice("DatasetConfig.split_type", "scaffold_balanced", SPLITS, "Split used to prepare KERMT's separate train, validation, and test CSV files."),
         text("DatasetConfig.split_column", "", "Existing train/val/test assignment column for predefined splitting."),
         number("DatasetConfig.val_fraction", 0.1, "Validation fraction.", 0.0, 0.9),
         number("DatasetConfig.test_fraction", 0.1, "Internal test fraction; use zero with an independent test dataset.", 0.0, 0.9),
