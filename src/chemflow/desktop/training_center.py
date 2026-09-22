@@ -44,6 +44,7 @@ MODEL_COMMANDS = {
     "Graphormer": "hf-graphormer",
     "CheMeleon": "chemeleon",
     "ChemBERTa": "chemberta",
+    "Chemprop": "chemprop",
     "KERMT": "kermt",
     "GPT": "gpt",
     "LSTM": "lstm",

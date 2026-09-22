@@ -71,8 +71,8 @@ all model dependencies.
 
 ## Training center
 
-The **Train** workspace supports conventional ML, Graphormer, CheMeleon,
-ChemBERTa, KERMT, GPT, and LSTM experiments. A configuration can be launched in the
+The **Train** workspace supports conventional ML, Chemprop, Graphormer,
+CheMeleon, ChemBERTa, KERMT, GPT, and LSTM experiments. A configuration can be launched in the
 desktop's local Python environment or submitted to a Slurm cluster through
 SSH. The HPC form records the login host, remote ChemFlow checkout, remote
 configuration, Conda environment, partition, GPU/CPU/memory request, and wall
@@ -103,7 +103,7 @@ Each model offers two configuration modes:
 
 The parameter schemas and defaults live in
 `chemflow.desktop.training_parameters`, so desktop forms and generated files
-are versioned with the source code. Generated Graphormer, CheMeleon,
+are versioned with the source code. Generated Chemprop, Graphormer, CheMeleon,
 ChemBERTa, KERMT, GPT, and LSTM configurations use TOML; conventional ML uses JSON.
 For local execution, the generated file is passed directly to ChemFlow. For
 Slurm execution, it is saved locally, uploaded over SCP to the configured

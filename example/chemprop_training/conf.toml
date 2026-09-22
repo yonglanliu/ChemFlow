@@ -1,0 +1,63 @@
+# Chemprop v2 D-MPNN baseline configuration.
+
+[BaseConfig]
+workdir = "./run"
+task = "regression" # Current adapter option: "regression".
+
+[DatasetConfig]
+# This file contains cluster-disjoint train/val labels for both validation ratios.
+dataset_path = "../../dataset/curated/clearance_chembl_biogen/splits/cl3_kmeans_splits.csv"
+test_dataset_path = "../../dataset/curated/clearance_chembl_biogen/splits/cl_test_splits.csv"
+smiles_column = "SMILES"
+# Keep all three for multitask learning, or retain one for a single-task run.
+target_column = [
+    "Log10_HLM_CLint_mL_min_kg",
+    "Log10_RLM_CLint_mL_min_kg",
+    "Log10_MLM_CLint_mL_min_kg",
+]
+split_type = "predefined" # Options: "random", "random_with_repeated_smiles", "scaffold_balanced", "kennard_stone", "kmeans", "predefined".
+split_column = "split_val_0.1" # Use "split_val_0.1" or "split_val_0.2".
+val_fraction = 0.1 # Used only for generated splits.
+test_fraction = 0.0 # Must be 0.0 when test_dataset_path is supplied.
+
+[ChempropConfig]
+# Plain Chemprop baseline: randomly initialized D-MPNN, not CheMeleon weights.
+message_hidden_dim = 300
+depth = 3
+dropout = 0.0
+activation = "RELU" # Common options: "RELU", "GELU", "SILU", "TANH".
+aggregation = "norm" # Options: "norm", "mean", "sum".
+aggregation_norm = 100.0
+ffn_hidden_dim = 300
+ffn_num_layers = 1
+batch_norm = false
+# Leave empty for the molecular-graph-only baseline.
+molecule_featurizers = [] # Options include "morgan_binary", "morgan_count", "rdkit_2d", "v1_rdkit_2d", "v1_rdkit_2d_normalized".
+no_descriptor_scaling = false
+
+[TrainingConfig]
+seed = 42
+pytorch_seed = 42
+# Chemprop v2 continues from model weights through --checkpoint. Its public CLI
+# does not restore optimizer/scheduler state or the previous epoch counter.
+resume = false
+# Leave unset to discover run/model_*/checkpoints/last.ckpt automatically.
+# resume_checkpoint = "./run/model_0/checkpoints/last.ckpt"
+accelerator = "auto" # Options: "auto", "cpu", "gpu", "mps".
+devices = "auto" # Examples: "auto", "1", "0,1".
+batch_size = 64
+num_workers = 0
+num_epochs = 100 # With resume=true, this is the number of additional epochs.
+early_stopping_patience = 20
+warmup_epochs = 2
+init_lr = 1e-4
+max_lr = 1e-3
+final_lr = 1e-4
+ensemble_size = 1
+num_replicates = 1
+metrics = ["rmse", "mae", "r2"] # Official Chemprop regression metrics.
+tracking_metric = "val_loss"
+save_data_splits = true # Saves SMILES splits in Chemprop 2.2 and full split CSVs in 2.3+.
+executable = "chemprop"
+extra_args = []
+dry_run = false # true validates inputs and records the command without training.

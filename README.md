@@ -44,6 +44,14 @@ losses, external or predefined test splits, applicability-only packaging,
 validation calibration, local neighbor uncertainty, OOD diagnostics, and
 MC-dropout inference.
 
+### Chemprop v2
+
+ChemFlow exposes the official Chemprop v2 CLI as a reproducible, randomly
+initialized D-MPNN baseline. The adapter validates single- or multitask CSV
+inputs, preserves independent test sets and predefined splits, records the
+resolved command, and keeps Chemprop baselines distinct from pretrained
+CheMeleon experiments.
+
 ### Split-aware dataset loading
 
 The model dataset loaders support molecule-aware global splits, predefined
@@ -123,6 +131,7 @@ This produces bootstrap confidence intervals and distribution plots for each tas
 ### Molecular AI
 
 - Hugging Face Graphormer
+- Chemprop v2
 - ChemBERTa
 - LSTM
 - GPT-style generation
@@ -171,7 +180,7 @@ drawn molecules stay on the local computer.
 The desktop combines local and Slurm/HPC training, a persistent job monitor,
 prediction, similarity search, molecular generation, and uncertainty
 evaluation. The training center supports conventional ML, Graphormer,
-CheMeleon, ChemBERTa, GPT, and LSTM. See the
+Chemprop, CheMeleon, ChemBERTa, KERMT, GPT, and LSTM. See the
 [desktop guide](src/chemflow/desktop/README.md) for details.
 
 ---
@@ -414,6 +423,16 @@ chemflow train chemberta example/chemberta_training/conf.toml
 
 See [the ChemBERTa tutorial](example/chemberta_training/README.md).
 
+### Train a Chemprop v2 baseline
+
+```bash
+chemflow train chemprop example/chemprop_training/conf.toml
+```
+
+The example uses a predefined cluster-disjoint CL-3 validation split and the
+independent CL-Test dataset. See the
+[Chemprop baseline guide](example/chemprop_training/README.md).
+
 ### Fine-tune KERMT
 
 ChemFlow vendors NVIDIA/Merck's KERMT architecture and fine-tuning runtime.
@@ -539,7 +558,7 @@ chemflow uncertainty bootstrap \
 
 | Category | Models |
 |-----------|--------|
-| Graph | Hugging Face Graphormer, CheMeleon |
+| Graph | Chemprop v2, Hugging Face Graphormer, CheMeleon, KERMT |
 | Sequence | ChemBERTa, LSTM, GPT |
 | Fine-tuning | LoRA |
 | Learning | single-task and multitask learning |

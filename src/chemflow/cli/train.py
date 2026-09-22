@@ -90,6 +90,16 @@ def train_kermt(args):
     KERMTTrainer(config_path).train()
 
 
+def train_chemprop(args):
+    """Train an official Chemprop v2 D-MPNN baseline."""
+    from chemflow.deep_learning.chemprop.trainer import ChempropTrainer
+
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    ChempropTrainer(config_path).train()
+
+
 def train_lstm(args):
     """Train or fine-tune the SMILES LSTM generator."""
     from chemflow.deep_learning.lstm.train_ddp import train
@@ -159,6 +169,13 @@ def add_train_parser(subparsers):
     )
     kermt_parser.add_argument("config", type=str)
     kermt_parser.set_defaults(func=train_kermt)
+
+    chemprop_parser = model_subparsers.add_parser(
+        "chemprop",
+        help="Train a Chemprop v2 single-task or multitask D-MPNN",
+    )
+    chemprop_parser.add_argument("config", type=str)
+    chemprop_parser.set_defaults(func=train_chemprop)
 
     # ========================================================
     # CheMeleon
