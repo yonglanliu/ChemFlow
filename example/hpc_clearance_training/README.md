@@ -8,7 +8,7 @@ The paths are intentionally fixed for the NIH HPC setup:
 ```text
 Repository:     /vf/users/liuy48/ChemFlow
 Slurm bundle:   /data/liuy48/model_training/adme/clearance
-Datasets:       /data/liuy48/model_training/adme/clearance/dataset/splits
+Datasets:       /data/liuy48/model_training/adme/clearance/dataset
 Outputs:        /data/liuy48/model_training/adme/clearance
 ```
 

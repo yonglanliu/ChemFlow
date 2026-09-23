@@ -11,6 +11,7 @@ from chemflow.cli.main import build_parser
 from chemflow.deep_learning.hf_graphormer.trainer import (
     HuggingFaceGraphormerTrainer,
     _classification_metrics,
+    _graphormer_dropout_kwargs,
     _metrics,
     _normalise_split,
     _print_log_table,
@@ -59,6 +60,31 @@ def test_graphormer_mc_dropout_preserves_batchnorm_evaluation_mode():
     assert model.training
     assert model[2].training
     assert not model[1].training
+
+
+def test_graphormer_dropout_configuration_defaults_and_overrides():
+    assert _graphormer_dropout_kwargs({}) == {
+        "dropout": 0.0,
+        "attention_dropout": 0.1,
+        "activation_dropout": 0.1,
+    }
+    assert _graphormer_dropout_kwargs(
+        {
+            "dropout": 0.2,
+            "attention_dropout": 0.15,
+            "activation_dropout": 0.25,
+        }
+    ) == {
+        "dropout": 0.2,
+        "attention_dropout": 0.15,
+        "activation_dropout": 0.25,
+    }
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.0, float("inf"), float("nan")])
+def test_graphormer_dropout_configuration_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="ModelConfig.dropout"):
+        _graphormer_dropout_kwargs({"dropout": value})
 
 
 def test_graphormer_log_table_is_fixed_width(capsys):

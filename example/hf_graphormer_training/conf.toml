@@ -36,6 +36,9 @@ local_files_only = true
 max_nodes = 512
 multi_hop_max_dist = 5
 spatial_pos_max = 1024
+dropout = 0.0                    # General residual/embedding dropout.
+attention_dropout = 0.1          # Dropout on attention probabilities.
+activation_dropout = 0.1         # Dropout after feed-forward activations.
 freeze_encoder = false          # true trains only the new prediction head.
 # Sequential transfer from a prior ChemFlow Graphormer best_model directory.
 # Full transfer is appropriate only when the target list is unchanged.

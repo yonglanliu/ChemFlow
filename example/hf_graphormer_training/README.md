@@ -92,6 +92,22 @@ The example loads the previously downloaded checkpoint from
 not contact Hugging Face. Remove `checkpoint_path` and set
 `local_files_only = false` only when direct Hugging Face HTTPS access works.
 
+Graphormer's three dropout probabilities are independently configurable under
+`[ModelConfig]` and are applied whether initialization uses the local state
+dictionary, the Hugging Face Hub/cache, or a ChemFlow transfer checkpoint:
+
+```toml
+dropout = 0.0
+attention_dropout = 0.1
+activation_dropout = 0.1
+```
+
+Each value must be in `[0, 1)`. `dropout` controls general residual/embedding
+dropout, `attention_dropout` controls attention probabilities, and
+`activation_dropout` controls feed-forward activations. Increase them only as
+a validated regularization experiment; changing them also changes the
+stochastic distribution used by MC-dropout inference.
+
 For a fair comparison, use the `data_splits.csv` produced by the existing run
 as `dataset_path` and set `split_column = "split"`. The input must also contain
 the configured SMILES and target columns.

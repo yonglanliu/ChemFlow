@@ -107,6 +107,24 @@ def _graphormer_imports():
     return GraphormerConfig, GraphormerForGraphClassification, GraphormerDataCollator, preprocess_item
 
 
+def _graphormer_dropout_kwargs(model_cfg: dict[str, Any]) -> dict[str, float]:
+    """Resolve and validate configurable Graphormer dropout probabilities."""
+    defaults = {
+        "dropout": 0.0,
+        "attention_dropout": 0.1,
+        "activation_dropout": 0.1,
+    }
+    resolved: dict[str, float] = {}
+    for name, default in defaults.items():
+        value = float(model_cfg.get(name, default))
+        if not math.isfinite(value) or not 0.0 <= value < 1.0:
+            raise ValueError(
+                f"ModelConfig.{name} must be a finite value in [0, 1)."
+            )
+        resolved[name] = value
+    return resolved
+
+
 @dataclass
 class Record:
     original_index: int
@@ -672,6 +690,7 @@ class HuggingFaceGraphormerTrainer:
         not trusted by Python Requests.  ChemFlow's cached checkpoint is the
         same state dictionary published in the Hugging Face repository.
         """
+        dropout_kwargs = _graphormer_dropout_kwargs(self.model_cfg)
         transfer_value = self.model_cfg.get("transfer_checkpoint")
         if transfer_value:
             transfer_path = Path(str(transfer_value)).expanduser().resolve()
@@ -689,6 +708,7 @@ class HuggingFaceGraphormerTrainer:
                 num_classes=num_tasks,
                 ignore_mismatched_sizes=encoder_only,
                 local_files_only=True,
+                **dropout_kwargs,
             )
             saved_targets = list(
                 getattr(model.config, "chemflow_target_names", []) or []
@@ -724,6 +744,7 @@ class HuggingFaceGraphormerTrainer:
                     if encoder_only
                     else "restored_from_transfer_checkpoint"
                 ),
+                "dropout_configuration": dropout_kwargs,
             }
             return model
 
@@ -743,6 +764,7 @@ class HuggingFaceGraphormerTrainer:
                     local_files_only=bool(
                         self.model_cfg.get("local_files_only", False)
                     ),
+                    **dropout_kwargs,
                 )
             except OSError as error:
                 raise RuntimeError(
@@ -760,6 +782,7 @@ class HuggingFaceGraphormerTrainer:
                 "checkpoint_compatibility": "passed_from_pretrained",
                 "cryptographic_checksum": "not_configured",
                 "prediction_head": "reset_for_downstream_tasks",
+                "dropout_configuration": dropout_kwargs,
             }
             return model
 
@@ -790,9 +813,7 @@ class HuggingFaceGraphormerTrainer:
             embedding_dim=768,
             ffn_embedding_dim=768,
             num_attention_heads=32,
-            dropout=0.0,
-            attention_dropout=0.1,
-            activation_dropout=0.1,
+            **dropout_kwargs,
             encoder_normalize_before=True,
             pre_layernorm=False,
             apply_graphormer_init=True,
@@ -843,6 +864,7 @@ class HuggingFaceGraphormerTrainer:
             "checkpoint_compatibility": "passed_expected_keys",
             "cryptographic_checksum": "not_configured",
             "prediction_head": "reset_for_downstream_tasks",
+            "dropout_configuration": dropout_kwargs,
         }
         return model
 

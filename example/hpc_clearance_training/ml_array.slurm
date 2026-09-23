@@ -12,7 +12,7 @@ source /home/liuy48/bin/myconda
 conda activate chemflow
 
 training_dir="/data/liuy48/model_training/adme/clearance"
-data_dir="$training_dir/dataset/splits"
+data_dir="$training_dir/dataset"
 base_config="$training_dir/ml_conf.yaml"
 test_file="$data_dir/cl_test_splits.csv"
 helper="$training_dir/prepare_config.py"
