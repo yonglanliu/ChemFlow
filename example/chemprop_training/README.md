@@ -23,8 +23,12 @@ validation-selected `best.pt`. This avoids Chemprop 2.2's single-GPU behavior
 of evaluating the final in-memory epoch. The following artifacts are written
 directly below `workdir`:
 
-- `test_predictions.csv`: standardized truth and best-model predictions.
-- `test_metrics.json`: RMSE, MAE, R2, Pearson, Spearman, and Kendall by task.
+- `test_predictions.csv`: truth, direct prediction, MC-dropout mean and SD,
+  validation-local calibrated prediction and interval, OOD/local-support
+  flags, uncertainty flag, and interval-coverage result.
+- `metrics.json` and `test_metrics.json`: RMSE, MAE, median absolute error, R2,
+  Pearson, Spearman, and Kendall for direct, MC-dropout, and locally calibrated
+  predictions, plus confidence-coverage diagnostics.
 - `training_history.csv`: epoch-level scalars exported from Lightning logs.
 - `final_model_test_predictions.csv`: Chemprop's original final-epoch output,
   retained for auditing when available.

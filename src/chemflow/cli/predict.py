@@ -584,6 +584,54 @@ def predict_chemeleon(args) -> None:
     print(f"Output: {output_path}")
 
 
+def predict_hf_graphormer(args) -> None:
+    from chemflow.deep_learning.hf_graphormer.predictor import (
+        HuggingFaceGraphormerPredictor,
+    )
+
+    input_frame = load_inference_input(
+        smiles=args.smiles,
+        input_path=args.input,
+        structure_column=args.structure_column,
+    )
+    predictor = HuggingFaceGraphormerPredictor(
+        args.model_directory,
+        device=args.device,
+        threshold=args.threshold,
+        applicability_domain=args.applicability_domain,
+        embedding_dimensions=args.embedding_dimensions,
+        calibration_confidence=args.calibration_confidence,
+        similarity_radius=args.similarity_radius,
+        similarity_bits=args.similarity_bits,
+        mc_dropout_samples=args.mc_dropout_samples,
+    )
+    task_names = args.task_names or predictor.target_names
+    values = predictor.predict_smiles(
+        input_frame[args.structure_column].astype(str).tolist(),
+        batch_size=args.batch_size,
+        task_names=task_names,
+    )
+    prediction_frame = pd.DataFrame(values)
+    duplicate_columns = set(input_frame.columns) & set(prediction_frame.columns)
+    if duplicate_columns:
+        raise ValueError(
+            "Prediction output columns already exist in the input: "
+            f"{sorted(duplicate_columns)}. Use --task-names to rename outputs."
+        )
+    result = pd.concat(
+        [input_frame.reset_index(drop=True), prediction_frame], axis=1
+    )
+    output_path = save_prediction_frame(result, args.output)
+    print("\n" + "=" * 70)
+    print("HF GRAPHORMER PREDICTION COMPLETE")
+    print("=" * 70)
+    print(f"Input molecules: {len(input_frame):,}")
+    print(f"Invalid/oversized molecules: {len(predictor.invalid_indices):,}")
+    print(f"MC-dropout passes: {args.mc_dropout_samples}")
+    print(f"Prediction columns: {prediction_frame.columns.tolist()}")
+    print(f"Output: {output_path}")
+
+
 def predict_chemberta(args) -> None:
     from chemflow.deep_learning.chemberta.predictor import ChemBERTaPredictor
 
@@ -779,6 +827,39 @@ def add_chemeleon_predict_parser(model_subparsers) -> None:
     parser.set_defaults(func=predict_chemeleon)
 
 
+def add_hf_graphormer_predict_parser(model_subparsers) -> None:
+    parser = model_subparsers.add_parser(
+        "hf-graphormer",
+        help="Run calibrated Graphormer inference with optional MC dropout.",
+    )
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--smiles", type=str, default=None)
+    input_group.add_argument("--input", type=str, default=None)
+    parser.add_argument("--structure-column", default="SMILES")
+    parser.add_argument("--task-names", nargs="+", default=None)
+    parser.add_argument("--model-directory", required=True)
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--applicability-domain",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--embedding-dimensions", type=int, default=None)
+    parser.add_argument("--calibration-confidence", type=float, default=0.90)
+    parser.add_argument("--similarity-radius", type=int, default=2)
+    parser.add_argument("--similarity-bits", type=int, default=2048)
+    parser.add_argument(
+        "--mc-dropout-samples",
+        type=int,
+        default=0,
+        help="Use 20-50 stochastic passes with a checkpoint containing dropout.",
+    )
+    parser.add_argument("--output", required=True)
+    parser.set_defaults(func=predict_hf_graphormer)
+
+
 def add_chemberta_predict_parser(model_subparsers) -> None:
     parser = model_subparsers.add_parser(
         "chemberta", help="Run inference with a trained ChemFlow ChemBERTa model."
@@ -848,4 +929,5 @@ def add_predict_parser(
     add_chemeleon_predict_parser(
         model_subparsers
     )
+    add_hf_graphormer_predict_parser(model_subparsers)
     add_chemberta_predict_parser(model_subparsers)

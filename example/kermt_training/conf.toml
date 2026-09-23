@@ -27,7 +27,7 @@ ffn_hidden_size = 700
 ffn_num_layers = 3
 bond_drop_rate = 0.1
 dist_coff = 0.15
-dropout = 0.0
+dropout = 0.1 # Required for MC-dropout test uncertainty.
 self_attention = true
 freeze_encoder = false # true freezes KERMT and trains only the prediction head/readout.
 no_features_scaling = true
@@ -38,6 +38,8 @@ features_generator = "rdkit_2d_normalized"
 rdkit2d_normalization_type = "fast" # Options: "fast", "standard".
 
 [TrainingConfig]
+test_mc_dropout_samples = 30
+test_calibration_confidence = 0.90
 seed = 42
 batch_size = 32
 num_epochs = 100

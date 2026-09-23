@@ -488,7 +488,20 @@ class KERMTTrainer:
             "--dropout", str(float(self.model_cfg.get("dropout", 0.0))),
             "--batch_size", str(int(self.training_cfg.get("batch_size", 32))),
             "--seed", str(int(self.training_cfg.get("seed", 42))),
+            "--test_mc_dropout_samples", str(
+                int(self.training_cfg.get("test_mc_dropout_samples", 0))
+            ),
+            "--test_calibration_confidence", str(
+                float(self.training_cfg.get("test_calibration_confidence", 0.90))
+            ),
         ]
+        if (
+            int(self.training_cfg.get("test_mc_dropout_samples", 0)) >= 2
+            and float(self.model_cfg.get("dropout", 0.0)) <= 0.0
+        ):
+            raise ValueError(
+                "KERMT MC-dropout test evaluation requires KERMTConfig.dropout > 0."
+            )
         if self.resume:
             if self.resume_checkpoint is not None:
                 if not self.resume_checkpoint.exists():
@@ -579,3 +592,30 @@ class KERMTTrainer:
             print("Dry run requested; KERMT was not launched.", flush=True)
             return
         subprocess.run(command, cwd=self.workdir, check=True)
+        history_paths = sorted(
+            (self.workdir / "kermt_output").glob(
+                "fold_*/model_*/training_history.csv"
+            )
+        )
+        if history_paths:
+            histories = []
+            for history_path in history_paths:
+                frame = pd.read_csv(history_path)
+                frame.insert(0, "model", history_path.parent.name)
+                frame.insert(0, "fold", history_path.parent.parent.name)
+                histories.append(frame)
+            combined_history = self.workdir / "training_history.csv"
+            pd.concat(histories, ignore_index=True).to_csv(
+                combined_history,
+                index=False,
+            )
+            from chemflow.deep_learning.plotter.training_plotter import (
+                plot_training_history,
+            )
+
+            plot_training_history(
+                combined_history,
+                self.workdir / "plots" / "training_history.png",
+                title="KERMT fine-tuning",
+            )
+            print(f"KERMT epoch history: {combined_history}", flush=True)

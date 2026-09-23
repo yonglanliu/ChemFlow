@@ -17,7 +17,6 @@ from chemflow.deep_learning.chemeleon.applicability import (
     DEFAULT_SIMILARITY_BITS,
     DEFAULT_SIMILARITY_RADIUS,
     applicability_diagnostics,
-    apply_calibration,
     apply_local_calibration,
     apply_mc_dropout_intervals,
 )
@@ -244,6 +243,7 @@ class CheMeleonPredictor:
                         mc_batches.append(stacked.mean(dim=0))
                         mc_std_batches.append(stacked.std(dim=0, unbiased=True))
             valid_predictions = torch.cat(batches, dim=0).numpy()
+            valid_direct_predictions = valid_predictions.copy()
             valid_embeddings = torch.cat(embedding_batches, dim=0).numpy()
             if mc_batches:
                 valid_mc_mean = torch.cat(mc_batches, dim=0).numpy()
@@ -255,10 +255,16 @@ class CheMeleonPredictor:
                     f"{valid_predictions.shape}; expected {(len(valid_indices), len(names))}."
                 )
             predictions[np.asarray(valid_indices)] = valid_predictions
+        else:
+            valid_direct_predictions = np.empty((0, len(names)), dtype=np.float32)
 
         output: dict[str, np.ndarray] = {}
         for task_index, name in enumerate(names):
             values = predictions[:, task_index]
+            direct = np.full(len(smiles_list), np.nan, dtype=np.float32)
+            if len(valid_direct_predictions):
+                direct[np.asarray(valid_indices)] = valid_direct_predictions[:, task_index]
+            output[f"direct_{name}"] = direct
             if valid_mc_mean is not None and valid_mc_std is not None:
                 mc_mean = np.full(len(smiles_list), np.nan, dtype=np.float32)
                 mc_std = np.full(len(smiles_list), np.nan, dtype=np.float32)
@@ -269,28 +275,12 @@ class CheMeleonPredictor:
             if self.task_types[task_index] == "regression":
                 output[name] = values
             else:
+                output[name] = values
                 output[f"prob_{name}"] = values
                 classes = np.full(len(values), np.nan, dtype=np.float32)
                 finite = np.isfinite(values)
                 classes[finite] = (values[finite] >= self.threshold).astype(np.float32)
                 output[f"class_{name}"] = classes
-        calibration = (
-            self.applicability.get("calibration")
-            if isinstance(self.applicability, dict)
-            else None
-        )
-        for original_name, output_name, task_type in zip(
-            self.target_names, names, self.task_types
-        ):
-            apply_calibration(
-                output,
-                calibration,
-                [original_name],
-                [output_name],
-                task_type,
-                self.threshold,
-                self.calibration_confidence,
-            )
         task_partitions = (
             self.applicability.get("training_by_task", {})
             if isinstance(self.applicability, dict)
@@ -324,20 +314,23 @@ class CheMeleonPredictor:
                 similarity_radius=self.similarity_radius,
                 similarity_bits=self.similarity_bits,
             ))
-        regression_indices = [
-            index for index, value in enumerate(self.task_types)
-            if value == "regression"
-        ]
-        if regression_indices:
+        if names:
+            bounded_names = [
+                names[index]
+                for index, task_type in enumerate(self.task_types)
+                if task_type == "classification"
+            ]
             apply_local_calibration(
                 output,
-                [self.target_names[index] for index in regression_indices],
-                [names[index] for index in regression_indices],
+                self.target_names,
+                names,
                 self.calibration_confidence,
+                bounded_names,
             )
             apply_mc_dropout_intervals(
                 output,
-                [names[index] for index in regression_indices],
+                names,
                 self.calibration_confidence,
+                bounded_names,
             )
         return output

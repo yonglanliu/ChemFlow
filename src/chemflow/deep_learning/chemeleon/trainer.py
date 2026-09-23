@@ -80,6 +80,7 @@ from chemflow.deep_learning.task_weighting import (
     resolve_task_loss_weights,
     resolve_task_types,
 )
+from chemflow.deep_learning.test_evaluation import save_test_evaluation
 
 
 @dataclass
@@ -128,6 +129,8 @@ class TrainingConfig:
     resume: bool = False
     resume_checkpoint: str | None = None
     verbose: bool = True
+    test_mc_dropout_samples: int = 30
+    test_calibration_confidence: float = DEFAULT_CALIBRATION_CONFIDENCE
 
 
 @dataclass
@@ -1157,29 +1160,15 @@ def _save_task_metrics_csv(
 def _plot_history(metrics_path: Path, output_path: Path) -> None:
     if not metrics_path.is_file():
         return
-    import matplotlib.pyplot as plt
+    from chemflow.deep_learning.plotter.training_plotter import (
+        plot_training_history,
+    )
 
-    history = pd.read_csv(metrics_path)
-    figure, axis = plt.subplots(figsize=(7, 5))
-    plotted = False
-    for column, label in (("train_loss", "Train"), ("val_loss", "Validation")):
-        if column not in history:
-            continue
-        values = history.loc[history[column].notna(), ["epoch", column]]
-        if values.empty:
-            continue
-        values = values.groupby("epoch", as_index=False)[column].last()
-        axis.plot(values["epoch"], values[column], label=label)
-        plotted = True
-    if plotted:
-        axis.set_xlabel("Epoch")
-        axis.set_ylabel("Loss")
-        axis.set_title("CheMeleon fine-tuning")
-        axis.legend()
-        figure.tight_layout()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(output_path, dpi=300)
-    plt.close(figure)
+    plot_training_history(
+        metrics_path,
+        output_path,
+        title="CheMeleon fine-tuning",
+    )
 
 
 def _save_epoch_history(metrics_path: Path, output_path: Path) -> bool:
@@ -1648,7 +1637,39 @@ class CheMeleonTrainer:
                     predictions[:, task_index] >= 0.5
                 ).astype(np.int64)
         prediction_frame = pd.DataFrame(prediction_data)
-        prediction_frame.to_csv(self.workdir / "test_predictions.csv", index=False)
+        from chemflow.deep_learning.chemeleon.predictor import CheMeleonPredictor
+
+        confidence = float(self.config.training.test_calibration_confidence)
+        predictor = CheMeleonPredictor(
+            best_path,
+            calibration_confidence=confidence,
+            mc_dropout_samples=int(self.config.training.test_mc_dropout_samples),
+        )
+        prediction_output = predictor.predict_smiles(
+            [item["smiles"] for item in test_records],
+            batch_size=int(self.config.training.batch_size),
+            num_workers=int(self.config.training.num_workers),
+            task_names=[f"{target}_prediction" for target in target_columns],
+        )
+        evaluation_summary = {
+            **run_summary,
+            "task": self.config.base.task,
+            "task_types": dict(zip(target_columns, task_types)),
+            "targets": target_columns,
+            "trainer_direct_test_metrics": metrics,
+            "applicability_bundle": "embedded_in_best_checkpoint",
+        }
+        _, evaluation_summary = save_test_evaluation(
+            workdir=self.workdir,
+            smiles=[item["smiles"] for item in test_records],
+            truths=targets,
+            targets=target_columns,
+            task_types=task_types,
+            predictions=prediction_output,
+            summary=evaluation_summary,
+            confidence=confidence,
+        )
+        save_json(evaluation_summary, self.workdir / "test_metrics.json")
 
         metric_text = " ".join(
             f"{name}={value:.4f}"

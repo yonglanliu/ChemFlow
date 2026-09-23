@@ -261,6 +261,14 @@ def add_finetune_args(parser: ArgumentParser):
             '--metric and its minimize/maximize direction; loss is minimized.'
         ),
     )
+    parser.add_argument(
+        '--test_mc_dropout_samples', type=int, default=0,
+        help='MC-dropout passes for final validation/test uncertainty evaluation.',
+    )
+    parser.add_argument(
+        '--test_calibration_confidence', type=float, default=0.90,
+        help='Coverage used for validation-only local prediction intervals.',
+    )
 
     # Model arguments
     parser.add_argument('--ensemble_size', type=int, default=1,

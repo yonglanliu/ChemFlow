@@ -14,7 +14,7 @@ from sklearn.decomposition import PCA
 from sklearn.isotonic import IsotonicRegression
 
 
-APPLICABILITY_VERSION = 6
+APPLICABILITY_VERSION = 7
 MAX_EMBEDDING_DIMENSIONS = 128
 DEFAULT_CALIBRATION_CONFIDENCE = 0.90
 DEFAULT_OOD_CONFIDENCE = 0.95
@@ -527,6 +527,10 @@ def applicability_diagnostics(
         output["ood_fp_score"] = fp_score
         output["ood_embedding_score"] = embedding_score
         output["ood_score"] = np.fmax(fp_score, embedding_score)
+        confidence = float(
+            ood_calibration.get("confidence", DEFAULT_OOD_CONFIDENCE)
+        )
+        output["ood_flag"] = output["ood_score"] >= confidence
 
     validation_by_task = payload.get("validation_by_task", {})
     validation = (
@@ -557,6 +561,7 @@ def applicability_diagnostics(
         local_bias = np.full(size, np.nan, dtype=np.float32)
         local_radius = np.full(size, np.nan, dtype=np.float32)
         local_used = np.zeros(size, dtype=bool)
+        local_weak = np.zeros(size, dtype=bool)
         validation_max_fp = np.full(size, np.nan, dtype=np.float32)
         validation_max_embedding = np.full(size, np.nan, dtype=np.float32)
         confidence = float(
@@ -597,6 +602,23 @@ def applicability_diagnostics(
                 & np.isfinite(validation_targets)
                 & np.isfinite(validation_predictions)
             )
+            weak_support = comparable_indices.size < min_samples
+            if weak_support:
+                # Local-only calibration must not silently fall back to a global
+                # bias. Use the nearest labeled validation compounds and expose
+                # that the similarity-qualified neighborhood was insufficient.
+                eligible = np.flatnonzero(
+                    np.isfinite(validation_targets)
+                    & np.isfinite(validation_predictions)
+                )
+                combined_distance = (
+                    (1.0 - fp_similarities[eligible])
+                    + (1.0 - embedding_similarities[eligible]) / 2.0
+                )
+                neighbor_count = min(min_samples, max_samples, eligible.size)
+                comparable_indices = eligible[
+                    np.argsort(combined_distance)[:neighbor_count]
+                ]
             if comparable_indices.size > max_samples:
                 combined_distance = (
                     (1.0 - fp_similarities[comparable_indices])
@@ -606,7 +628,7 @@ def applicability_diagnostics(
                 comparable_indices = comparable_indices[order]
             count = int(comparable_indices.size)
             local_count[result_index] = count
-            if count < min_samples:
+            if count == 0:
                 continue
             signed_errors = (
                 validation_targets[comparable_indices]
@@ -619,8 +641,10 @@ def applicability_diagnostics(
                 residuals, confidence
             )
             local_used[result_index] = True
+            local_weak[result_index] = weak_support
         output["local_calibration_count"] = local_count
         output["local_calibration_used"] = local_used
+        output["local_calibration_weak"] = local_weak
         output["local_calibration_bias"] = local_bias
         output["local_uncertainty_radius"] = local_radius
         output["validation_max_tanimoto"] = validation_max_fp
@@ -633,9 +657,11 @@ def apply_local_calibration(
     original_names: Sequence[str],
     output_names: Sequence[str],
     confidence: float,
+    bounded_output_names: Sequence[str] = (),
 ) -> None:
-    """Override global regression calibration where local support is sufficient."""
+    """Apply validation-neighbor calibration without a global fallback."""
     coverage_label = int(round(float(confidence) * 100))
+    bounded = set(bounded_output_names)
     for original_name, output_name in zip(original_names, output_names):
         used_key = f"{original_name}_local_calibration_used"
         if used_key not in output or output_name not in output:
@@ -653,6 +679,8 @@ def apply_local_calibration(
             output.get(calibrated_key, raw.copy()), dtype=np.float32
         ).copy()
         calibrated[used] = raw[used] + bias[used]
+        if output_name in bounded:
+            calibrated = np.clip(calibrated, 0.0, 1.0)
         output[calibrated_key] = calibrated
         lower_key = f"{output_name}_lower_{coverage_label}"
         upper_key = f"{output_name}_upper_{coverage_label}"
@@ -660,6 +688,9 @@ def apply_local_calibration(
         upper = np.asarray(output.get(upper_key, calibrated), dtype=np.float32).copy()
         lower[used] = calibrated[used] - radius[used]
         upper[used] = calibrated[used] + radius[used]
+        if output_name in bounded:
+            lower = np.clip(lower, 0.0, 1.0)
+            upper = np.clip(upper, 0.0, 1.0)
         output[lower_key] = lower
         output[upper_key] = upper
 
@@ -668,6 +699,7 @@ def apply_mc_dropout_intervals(
     output: dict[str, np.ndarray],
     output_names: Sequence[str],
     confidence: float,
+    bounded_output_names: Sequence[str] = (),
 ) -> None:
     """Combine MC-dropout spread with validation-calibrated intervals.
 
@@ -680,6 +712,7 @@ def apply_mc_dropout_intervals(
         raise ValueError("calibration_confidence must be between 0 and 1.")
     coverage_label = int(round(confidence * 100))
     z_value = float(NormalDist().inv_cdf(0.5 + confidence / 2.0))
+    bounded = set(bounded_output_names)
     for output_name in output_names:
         std_key = f"mc_std_{output_name}"
         lower_key = f"{output_name}_lower_{coverage_label}"
@@ -699,6 +732,11 @@ def apply_mc_dropout_intervals(
         finite = np.isfinite(center) & np.isfinite(combined_radius)
         lower[finite] = center[finite] - combined_radius[finite]
         upper[finite] = center[finite] + combined_radius[finite]
+        if output_name in bounded:
+            lower = np.clip(lower, 0.0, 1.0)
+            upper = np.clip(upper, 0.0, 1.0)
         output[lower_key] = lower
         output[upper_key] = upper
         output[f"{output_name}_mc_radius_{coverage_label}"] = mc_radius
+        output[f"{output_name}_uncertainty_radius_{coverage_label}"] = combined_radius
+        output[f"{output_name}_uncertainty_flag"] = mc_radius > residual_radius

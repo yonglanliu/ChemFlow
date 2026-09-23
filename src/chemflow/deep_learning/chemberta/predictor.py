@@ -16,7 +16,7 @@ from .trainer import (
     _transformer_imports,
 )
 from chemflow.deep_learning.chemeleon.applicability import (
-    applicability_diagnostics, apply_calibration, apply_local_calibration,
+    applicability_diagnostics, apply_local_calibration,
     apply_mc_dropout_intervals,
 )
 
@@ -86,6 +86,7 @@ class ChemBERTaPredictor:
                 valid_indices.append(index)
                 canonical.append(Chem.MolToSmiles(molecule, canonical=True))
         means = np.full((len(smiles), len(self.targets)), np.nan, dtype=np.float32)
+        direct_means = np.full_like(means, np.nan)
         standard_deviations = np.full_like(means, np.nan)
         valid_embedding_batches: list[np.ndarray] = []
         with torch.inference_mode():
@@ -98,7 +99,7 @@ class ChemBERTaPredictor:
                 tokens = {key: value.to(self.device) for key, value in tokens.items()}
                 if self.mc_dropout_samples:
                     self.model.eval()
-                    _, pooled = self.model(**tokens)
+                    direct_logits, pooled = self.model(**tokens)
                     for module in self.model.modules():
                         if isinstance(module, torch.nn.Dropout):
                             module.train()
@@ -109,8 +110,10 @@ class ChemBERTaPredictor:
                     self.model.eval()
                 else:
                     logits, pooled = self.model(**tokens)
+                    direct_logits = logits
                     logit_std = torch.zeros_like(logits)
                 values = logits.float().cpu().numpy()
+                direct_values = direct_logits.float().cpu().numpy()
                 spreads = logit_std.float().cpu().numpy()
                 for task_index, task_type in enumerate(self.task_types):
                     if task_type == "classification":
@@ -118,19 +121,30 @@ class ChemBERTaPredictor:
                         # Delta-method conversion from logit spread.
                         spreads[:, task_index] *= probabilities * (1.0 - probabilities)
                         values[:, task_index] = probabilities
+                        direct_values[:, task_index] = 1.0 / (
+                            1.0 + np.exp(-direct_values[:, task_index])
+                        )
                     else:
                         values[:, task_index] = (
                             values[:, task_index] * self.stds[task_index]
                             + self.means[task_index]
                         )
                         spreads[:, task_index] *= self.stds[task_index]
+                        direct_values[:, task_index] = (
+                            direct_values[:, task_index] * self.stds[task_index]
+                            + self.means[task_index]
+                        )
                 selected = np.asarray(valid_indices[start : start + len(batch_smiles)])
                 means[selected] = values
+                direct_means[selected] = direct_values
                 standard_deviations[selected] = spreads
                 valid_embedding_batches.append(pooled.float().cpu().numpy())
         output: dict[str, np.ndarray] = {}
         for index, (name, task_type) in enumerate(zip(self.targets, self.task_types)):
+            output[f"direct_{name}_prediction"] = direct_means[:, index]
             output[f"{name}_prediction"] = means[:, index]
+            if self.mc_dropout_samples:
+                output[f"mc_mean_{name}_prediction"] = means[:, index]
             output[f"{name}_mc_std"] = standard_deviations[:, index]
             output[f"mc_std_{name}_prediction"] = standard_deviations[:, index]
             if task_type == "classification":
@@ -139,17 +153,6 @@ class ChemBERTaPredictor:
                 finite = np.isfinite(means[:, index])
                 classes[finite] = (means[finite, index] >= self.threshold).astype(float)
                 output[f"{name}_class"] = classes
-                apply_calibration(
-                    output,
-                    self.applicability.get("calibration") if self.applicability else None,
-                    [name], [name], task_type, self.threshold,
-                )
-            else:
-                apply_calibration(
-                    output,
-                    self.applicability.get("calibration") if self.applicability else None,
-                    [name], [f"{name}_prediction"], task_type, self.threshold,
-                )
         if self.applicability and valid_embedding_batches:
             embeddings = np.concatenate(valid_embedding_batches, axis=0)
             for name in self.targets:
@@ -158,18 +161,20 @@ class ChemBERTaPredictor:
                     reference_task=name,
                 )
                 output.update({f"{name}_{key}": value for key, value in diagnostics.items()})
-        regression_names = [
-            f"{name}_prediction" for name, task_type in zip(self.targets, self.task_types)
-            if task_type == "regression"
-        ]
-        regression_targets = [
-            name for name, task_type in zip(self.targets, self.task_types)
-            if task_type == "regression"
+        output_names = [f"{name}_prediction" for name in self.targets]
+        bounded_names = [
+            f"{name}_prediction"
+            for name, task_type in zip(self.targets, self.task_types)
+            if task_type == "classification"
         ]
         confidence = float(
             self.applicability.get("calibration", {}).get("confidence", 0.90)
             if self.applicability else 0.90
         )
-        apply_local_calibration(output, regression_targets, regression_names, confidence)
-        apply_mc_dropout_intervals(output, regression_names, confidence)
+        apply_local_calibration(
+            output, self.targets, output_names, confidence, bounded_names
+        )
+        apply_mc_dropout_intervals(
+            output, output_names, confidence, bounded_names
+        )
         return output

@@ -1,36 +1,41 @@
-# Complete CheMeleon training template.
-# Keep one active value per option; uncomment an alternative only after
-# commenting out the currently active value.
+# Local CheMeleon regression and uncertainty-report example.
+# Run from the repository root with:
+#   chemflow train chemeleon example/chemeleon_training/conf.toml
+# This intentionally uses one endpoint and a short schedule so the complete
+# train -> test -> MC dropout -> local calibration -> plotting path can be
+# checked on a laptop. Increase num_epochs and restore the multitask target
+# list for a production experiment.
 
 [BaseConfig]
-workdir = "./example/chemeleon_training/run"
+workdir = "./example/chemeleon_training/run_local_cl3_hlm"
 task = "regression"             # Options: "regression", "classification", "mixed".
 seed = 42
 
 [DatasetConfig]
-dataset_path = "./dataset/curated/Biogen_ExpansionRX_clearance_training.csv"
-# Use a physically separate final test set only with test_fraction = 0.0.
-# test_dataset_path = "/path/to/independent_test.csv"
+dataset_path = "./dataset/curated/clearance_chembl_biogen/splits/cl3_kmeans_splits.csv"
+test_dataset_path = "./dataset/curated/clearance_chembl_biogen/splits/cl_test_splits.csv"
 smiles_column = "SMILES"
 
-# A string selects single-task learning:
-# target_column = "Log_HLM_CLint"
-# A list selects homogeneous or mixed multitask learning:
-target_column = ["Log_HLM_CLint", "Log_RLM_CLint", "Log_MLM_CLint"]
+# A single endpoint keeps this local demonstration reasonably fast.
+target_column = "Log10_HLM_CLint_mL_min_kg"
+# Production multitask alternative:
+# target_column = [
+#     "Log10_HLM_CLint_mL_min_kg",
+#     "Log10_RLM_CLint_mL_min_kg",
+#     "Log10_MLM_CLint_mL_min_kg",
+# ]
 # Required only when task = "mixed"; order must match target_column:
 # task_types = ["regression", "classification", "classification"]
 
-split_type = "scaffold_balanced" # Options: "random", "random_with_repeated_smiles", "scaffold_balanced", "kennard_stone", "kmeans", "predefined".
+split_type = "predefined"
+split_column = "split_val_0.1" # Change to "split_val_0.2" for the 20% validation experiment.
 val_fraction = 0.1
-test_fraction = 0.1
-# To reuse labels in dataset_path, replace split_type with "predefined":
-# split_type = "predefined"
-# split_column = "split"
+test_fraction = 0.0 # CL-Test is physically separate and must remain untouched.
 
 [CheMeleonTrainingConfig]
-batch_size = 64                 # Per-device batch size under DDP.
+batch_size = 64                 # Reduce to 32 if local GPU/MPS memory is limited.
 num_workers = 0                 # Increase on Linux/HPC after testing I/O.
-num_epochs = 30
+num_epochs = 100                  # Short local check; use 30-100 for model selection.
 accelerator = "auto"            # Options: "cpu", "gpu", "mps", "auto".
 devices = 1                     # Example DDP value: 4.
 strategy = "auto"               # Options: "auto", "ddp".
@@ -40,15 +45,17 @@ precision = "32-true"           # Common options: "32-true", "16-mixed", "bf16-m
 deterministic = true
 gradient_clip_value = 1.0
 early_stopping = true
-early_stopping_patience = 6
+early_stopping_patience = 7
 class_balance = false           # Classification only.
 evaluate_test = true
 plot_training_history = true
 inspect_task_metrics = true
 tensorboard = true
 tensorboard_dir = "tensorboard"
+test_mc_dropout_samples = 10   # Use 30-100 for a final reported experiment.
+test_calibration_confidence = 0.90
 
-task_loss_weighting = "sqrt_inverse_frequency" # Options: "uniform", "sqrt_inverse_frequency", "inverse_frequency".
+task_loss_weighting = "uniform" # A single endpoint does not need frequency weighting.
 # Explicit weights override the policy; use target_column order:
 # task_loss_weights = [1.0, 1.0, 1.0]
 
@@ -67,13 +74,13 @@ verbose = true
 # For sequential transfer, initialize only the encoder from a previously
 # fine-tuned full checkpoint. This is different from resume.
 # transfer_checkpoint = "/path/to/public_pretraining/best.ckpt"
-transfer_encoder_only = true
+# transfer_encoder_only = true
 
-freeze_epochs = 3              # Fit the new head before unfreezing the encoder.
-dropout = 0.1                  # Required for MC-dropout inference uncertainty.
-ffn_hidden_dim = 256
+freeze_epochs = 0              # Fit the new head briefly before unfreezing.
+dropout = 0.2                  # Required for MC-dropout inference uncertainty.
+ffn_hidden_dim = 128
 ffn_num_layers = 1
-warmup_epochs = 2
-init_lr = 1e-5                 # Conservative pretrained-encoder fine-tuning.
-max_lr = 2e-4
-final_lr = 1e-5
+warmup_epochs = 1
+init_lr = 5e-6                # Conservative pretrained-encoder fine-tuning.
+max_lr = 5e-5
+final_lr = 5e-6

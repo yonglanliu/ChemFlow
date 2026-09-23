@@ -43,6 +43,7 @@ from chemflow.deep_learning.chemeleon.applicability import (
     fit_embedding_projection, fit_multitask_validation_calibration,
     fit_ood_calibration, packed_morgan_fingerprints,
 )
+from chemflow.deep_learning.test_evaluation import save_test_evaluation
 
 
 def _transformer_imports():
@@ -947,6 +948,15 @@ class ChemBERTaTrainer:
         if not self.is_main_process:
             dist.destroy_process_group()
             return
+        from chemflow.deep_learning.plotter.training_plotter import (
+            plot_training_history,
+        )
+
+        plot_training_history(
+            self.workdir / "training_history.csv",
+            self.workdir / "plots" / "training_history.png",
+            title="ChemBERTa fine-tuning",
+        )
         encoder = _load_saved_encoder(
             best_dir,
             self.model_cfg.get("architecture", "roberta"),
@@ -958,9 +968,45 @@ class ChemBERTaTrainer:
         summary = {"task": self.task, "task_types": dict(zip(self.targets, self.task_types)), "best_val_loss": best_loss, "ddp_world_size": self.world_size, "target_scaling": {target: {"mean": float(mean), "std": float(std)} for target, mean, std in zip(self.targets, means, stds)}, "applicability_bundle": str(best_dir / "applicability.pt"), "pretrained_weight_audit": pretrained_audit}
         if "test" in reference_loaders:
             _, predictions = self._evaluate(best_model, reference_loaders["test"], means, stds)
-            predictions.to_csv(self.workdir / "test_predictions.csv", index=False)
-            summary["test_metrics"] = self._task_metrics(predictions)
-        (self.workdir / "metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            summary["trainer_direct_test_metrics"] = self._task_metrics(predictions)
+            from chemflow.deep_learning.chemberta.predictor import ChemBERTaPredictor
+
+            confidence = float(
+                self.train_cfg.get(
+                    "test_calibration_confidence", DEFAULT_CALIBRATION_CONFIDENCE
+                )
+            )
+            predictor = ChemBERTaPredictor(
+                best_dir,
+                device=str(self.device),
+                threshold=self.threshold,
+                mc_dropout_samples=int(
+                    self.train_cfg.get("test_mc_dropout_samples", 30)
+                ),
+            )
+            prediction_output = predictor.predict_smiles(
+                predictions["SMILES"].astype(str).tolist(),
+                batch_size=int(self.train_cfg.get("batch_size", 32)),
+                max_length=int(self.model_cfg.get("max_length", 512)),
+            )
+            truths = np.column_stack(
+                [predictions[f"{target}_true"].to_numpy(float) for target in self.targets]
+            )
+            save_test_evaluation(
+                workdir=self.workdir,
+                smiles=predictions["SMILES"].astype(str).tolist(),
+                truths=truths,
+                targets=self.targets,
+                task_types=self.task_types,
+                predictions=prediction_output,
+                summary=summary,
+                confidence=confidence,
+                threshold=self.threshold,
+            )
+        else:
+            (self.workdir / "metrics.json").write_text(
+                json.dumps(summary, indent=2), encoding="utf-8"
+            )
         resolved_config = copy.deepcopy(self.raw)
         resolved_config["pretrained_weight_audit"] = pretrained_audit
         (self.workdir / "config.json").write_text(

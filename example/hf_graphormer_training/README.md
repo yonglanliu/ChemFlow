@@ -163,6 +163,27 @@ The test split is not used to construct the applicability domain or calibrate
 predictions. On a resumed run, these artifacts are rebuilt from the selected
 best model and the unchanged training/validation split.
 
+Run calibrated inference from the saved best model with:
+
+```bash
+chemflow predict hf-graphormer \
+  --input ./dataset/molecules.csv \
+  --structure-column SMILES \
+  --model-directory ./hf_graphormer_run/best_model \
+  --mc-dropout-samples 50 \
+  --calibration-confidence 0.90 \
+  --output ./hf_graphormer_run/test_predictions_mc_calibrated.csv
+```
+
+For regression, the MC mean becomes the raw prediction, validation calibration
+adds global or locally supported bias correction, and validation residuals
+anchor the prediction interval. The interval is widened when the Gaussian
+MC-dropout radius is larger. The output includes raw predictions,
+`mc_mean_<task>`, `mc_std_<task>`, `calibrated_<task>`, interval bounds, and
+applicability-domain diagnostics. MC dropout requires a checkpoint containing
+nonzero dropout and increases inference time approximately linearly with the
+number of passes.
+
 To backfill these files into an already trained `best_model/` without changing
 its weights, retain its original work directory and set:
 

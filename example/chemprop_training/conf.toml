@@ -36,6 +36,8 @@ molecule_featurizers = [] # Options include "morgan_binary", "morgan_count", "rd
 no_descriptor_scaling = false
 
 [TrainingConfig]
+test_mc_dropout_samples = 30
+test_calibration_confidence = 0.90
 seed = 42
 pytorch_seed = 42
 # Chemprop v2 continues from model weights through --checkpoint. Its public CLI

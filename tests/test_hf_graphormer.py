@@ -16,6 +16,9 @@ from chemflow.deep_learning.hf_graphormer.trainer import (
     _print_log_table,
     _validate_split_config,
 )
+from chemflow.deep_learning.hf_graphormer.predictor import (
+    _enable_stochastic_dropout,
+)
 
 
 def test_hf_graphormer_cli_is_registered():
@@ -24,6 +27,38 @@ def test_hf_graphormer_cli_is_registered():
     )
     assert args.model == "hf-graphormer"
     assert args.config == "reference.toml"
+
+
+def test_hf_graphormer_prediction_cli_is_registered():
+    args = build_parser().parse_args(
+        [
+            "predict",
+            "hf-graphormer",
+            "--smiles",
+            "CCO",
+            "--model-directory",
+            "best_model",
+            "--mc-dropout-samples",
+            "50",
+            "--output",
+            "predictions.csv",
+        ]
+    )
+    assert args.predict_model == "hf-graphormer"
+    assert args.mc_dropout_samples == 50
+
+
+def test_graphormer_mc_dropout_preserves_batchnorm_evaluation_mode():
+    model = torch.nn.Sequential(
+        torch.nn.Linear(3, 3),
+        torch.nn.BatchNorm1d(3),
+        torch.nn.Dropout(0.2),
+    )
+    active = _enable_stochastic_dropout(model)
+    assert active == 1
+    assert model.training
+    assert model[2].training
+    assert not model[1].training
 
 
 def test_graphormer_log_table_is_fixed_width(capsys):

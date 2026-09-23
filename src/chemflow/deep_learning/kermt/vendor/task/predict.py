@@ -63,7 +63,8 @@ def predict(model: nn.Module,
             loss_func,
             logger,
             shared_dict,
-            scaler: StandardScaler = None
+            scaler: StandardScaler = None,
+            mc_dropout: bool = False,
             ) -> List[List[float]]:
     """
     Makes predictions on a dataset using an ensemble of models.
@@ -77,6 +78,13 @@ def predict(model: nn.Module,
     """
     # debug = logger.debug if logger is not None else print
     model.eval()
+    if mc_dropout:
+        for module in model.modules():
+            if isinstance(
+                module,
+                (nn.Dropout, nn.Dropout1d, nn.Dropout2d, nn.Dropout3d, nn.AlphaDropout),
+            ) and float(getattr(module, "p", 0.0)) > 0.0:
+                module.train()
     # Evaluation must not apply bond dropout, but do NOT mutate the shared args:
     # training and eval reuse one args instance and graphs are rebuilt every epoch
     # (caching is off by default), so setting args.bond_drop_rate = 0 here would

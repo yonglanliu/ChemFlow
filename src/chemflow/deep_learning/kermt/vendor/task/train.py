@@ -67,6 +67,11 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
+from chemflow.deep_learning.test_evaluation import (
+    fingerprint_local_predictions,
+    save_test_evaluation,
+)
+
 from chemflow.deep_learning.kermt.vendor.kermt.data import MolCollator
 from chemflow.deep_learning.kermt.vendor.kermt.data import StandardScaler
 from chemflow.deep_learning.kermt.vendor.kermt.util.loss import MTLLoss
@@ -473,6 +478,15 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
     # Set up test set evaluation
     test_smiles, test_targets = test_data.smiles(), test_data.targets()
     sum_test_preds = np.zeros((len(test_smiles), args.num_tasks))
+    val_smiles = val_data.smiles()
+    scaled_val_targets = np.asarray(val_data.targets(), dtype=float)
+    val_targets = (
+        scaler.inverse_transform(scaled_val_targets).astype(float)
+        if scaler is not None else scaled_val_targets
+    )
+    sum_val_preds = np.zeros((len(val_smiles), args.num_tasks))
+    mc_test_draws = []
+    mc_val_draws = []
 
     # Check if test data is blinded (no target columns)
     is_blinded_test = len(test_targets) == 0 or (len(test_targets) > 0 and len(test_targets[0]) == 0)
@@ -1049,6 +1063,32 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                 scaler=scaler,
                 args=args
             )
+            val_preds, _ = predict(
+                model=model,
+                data=val_data,
+                loss_func=None,
+                batch_size=args.batch_size,
+                logger=logger,
+                shared_dict=shared_dict,
+                scaler=scaler,
+                args=args,
+            )
+            sum_val_preds += np.asarray(val_preds, dtype=float)
+            for _ in range(int(getattr(args, 'test_mc_dropout_samples', 0))):
+                mc_test, _ = predict(
+                    model=model, data=test_data, loss_func=None,
+                    batch_size=args.batch_size, logger=logger,
+                    shared_dict=shared_dict, scaler=scaler, args=args,
+                    mc_dropout=True,
+                )
+                mc_val, _ = predict(
+                    model=model, data=val_data, loss_func=None,
+                    batch_size=args.batch_size, logger=logger,
+                    shared_dict=shared_dict, scaler=scaler, args=args,
+                    mc_dropout=True,
+                )
+                mc_test_draws.append(np.asarray(mc_test, dtype=float))
+                mc_val_draws.append(np.asarray(mc_val, dtype=float))
             if not is_blinded_test:
                 test_scores = evaluate_predictions(
                     preds=test_preds,
@@ -1125,6 +1165,53 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
         # Close TensorBoard writer
         if args.tensorboard:
             writer.close()
+
+    if (
+        is_main and not is_blinded_test and not args.task_wise_checkpoint
+        and int(getattr(args, 'test_mc_dropout_samples', 0)) >= 2
+    ):
+        direct_test = sum_test_preds / args.ensemble_size
+        direct_val = sum_val_preds / args.ensemble_size
+        stacked_test = np.stack(mc_test_draws, axis=0)
+        stacked_val = np.stack(mc_val_draws, axis=0)
+        mc_test = stacked_test.mean(axis=0)
+        mc_test_sd = stacked_test.std(axis=0, ddof=1)
+        mc_val = stacked_val.mean(axis=0)
+        prediction_output = fingerprint_local_predictions(
+            train_smiles=train_data.smiles(),
+            validation_smiles=val_smiles,
+            validation_truths=val_targets,
+            validation_predictions=mc_val,
+            test_smiles=test_smiles,
+            direct_predictions=direct_test,
+            mc_predictions=mc_test,
+            mc_standard_deviations=mc_test_sd,
+            targets=args.task_names,
+            confidence=float(getattr(args, 'test_calibration_confidence', 0.90)),
+        )
+        output_root = Path(args.save_dir).parent
+        summary = {
+            'backend': 'KERMT',
+            'selection': 'best_validation_checkpoint',
+            'models': [
+                str(Path(args.save_dir) / f'model_{index}' / 'model.pt')
+                for index in range(args.ensemble_size)
+            ],
+            'targets': list(args.task_names),
+        }
+        _, summary = save_test_evaluation(
+            workdir=output_root,
+            smiles=test_smiles,
+            truths=np.asarray(test_targets, dtype=float),
+            targets=args.task_names,
+            task_types=['regression'] * len(args.task_names),
+            predictions=prediction_output,
+            summary=summary,
+            confidence=float(getattr(args, 'test_calibration_confidence', 0.90)),
+        )
+        (output_root / 'test_metrics.json').write_text(
+            json.dumps(summary, indent=2) + '\n', encoding='utf-8'
+        )
 
     if return_val:
         return ensemble_scores, min_val_loss

@@ -52,6 +52,32 @@ inputs, preserves independent test sets and predefined splits, records the
 resolved command, and keeps Chemprop baselines distinct from pretrained
 CheMeleon experiments.
 
+### Standard deep-learning test evaluation
+
+Graphormer, CheMeleon, ChemBERTa, Chemprop, and KERMT can run the same final
+uncertainty evaluation when `test_mc_dropout_samples` is at least 2. Their
+`metrics.json` reports independent-test metrics for deterministic, MC-dropout
+mean, and locally calibrated predictions. Their `test_predictions.csv` stores
+all three predictions, MC standard deviation, calibrated interval and
+uncertainty, OOD flags, weak-local-support flags, and interval coverage.
+
+Calibration is fitted exclusively from the validation partition. Each query
+uses neighboring validation compounds; there is no global residual fallback.
+`test_uncertainty_diagnostics` compares observed with nominal coverage and
+labels the resulting intervals as overconfident, underconfident, or
+approximately calibrated. MC dropout requires a nonzero dropout rate in the
+trained model. Gaussian MC-dropout diagnostics are calculated with
+Uncertainty Toolbox and include RMS/mean calibration error, miscalibration
+area, sharpness, NLL, CRPS, check score, and interval score.
+
+When a labeled test set is available, the same post-training step creates an
+`uncertainty/` directory for every predictive deep-learning backend. Each
+regression endpoint receives confidence-band, prediction-interval, ordered-
+interval, calibration-before/after, residual-versus-uncertainty, sharpness,
+adversarial-group-calibration, and combined overview plots in PNG and PDF.
+Calibration curves, adversarial-group values, per-compound uncertainty data,
+and the before/after calibration table are also exported as CSV files.
+
 ### Split-aware dataset loading
 
 The model dataset loaders support molecule-aware global splits, predefined

@@ -46,6 +46,7 @@ from chemflow.deep_learning.task_weighting import (
     resolve_task_types,
 )
 from chemflow.deep_learning.utils import move_optimizer_state_to_device
+from chemflow.deep_learning.test_evaluation import save_test_evaluation
 from chemflow.deep_learning.chemeleon.applicability import (
     APPLICABILITY_VERSION,
     DEFAULT_CALIBRATION_CONFIDENCE,
@@ -1641,9 +1642,11 @@ class HuggingFaceGraphormerTrainer:
                 val_selection_metric = self._aggregate_metric(
                     val_metrics, selection_metric_name
                 )
+                mean_val_loss = self._aggregate_metric(val_metrics, "loss")
                 row: dict[str, Any] = {
                     "epoch": epoch,
                     "train_loss": mean_train_loss,
+                    "val_loss": mean_val_loss,
                     f"val_{selection_metric_name}": val_selection_metric,
                     "encoder_lr": encoder_lr,
                     "head_lr": head_lr,
@@ -1799,6 +1802,16 @@ class HuggingFaceGraphormerTrainer:
             dist.destroy_process_group()
             return
 
+        from chemflow.deep_learning.plotter.training_plotter import (
+            plot_training_history,
+        )
+
+        plot_training_history(
+            self.workdir / "training_history.csv",
+            self.workdir / "plots" / "training_history.png",
+            title="Graphormer fine-tuning",
+        )
+
         best_model = self.GraphormerForGraphClassification.from_pretrained(best_dir).to(self.device)
         self._build_applicability_bundle(
             best_model,
@@ -1838,9 +1851,48 @@ class HuggingFaceGraphormerTrainer:
             test_metrics, predictions = self._evaluate(
                 best_model, loaders["test"], target_means, target_stds
             )
-            predictions.to_csv(self.workdir / "test_predictions.csv", index=False)
-            summary["test_metrics"] = test_metrics
-        (self.workdir / "metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            summary["trainer_direct_test_metrics"] = test_metrics
+            from chemflow.deep_learning.hf_graphormer.predictor import (
+                HuggingFaceGraphormerPredictor,
+            )
+
+            confidence = float(
+                self.train_cfg.get(
+                    "test_calibration_confidence", DEFAULT_CALIBRATION_CONFIDENCE
+                )
+            )
+            predictor = HuggingFaceGraphormerPredictor(
+                best_dir,
+                device=str(self.device),
+                threshold=self.threshold,
+                calibration_confidence=confidence,
+                mc_dropout_samples=int(
+                    self.train_cfg.get("test_mc_dropout_samples", 30)
+                ),
+            )
+            prediction_output = predictor.predict_smiles(
+                predictions["SMILES"].astype(str).tolist(),
+                batch_size=int(self.train_cfg.get("batch_size", 16)),
+                task_names=[f"{target}_prediction" for target in target_columns],
+            )
+            truths = np.column_stack(
+                [predictions[f"{target}_true"].to_numpy(float) for target in target_columns]
+            )
+            save_test_evaluation(
+                workdir=self.workdir,
+                smiles=predictions["SMILES"].astype(str).tolist(),
+                truths=truths,
+                targets=target_columns,
+                task_types=self.task_types,
+                predictions=prediction_output,
+                summary=summary,
+                confidence=confidence,
+                threshold=self.threshold,
+            )
+        else:
+            (self.workdir / "metrics.json").write_text(
+                json.dumps(summary, indent=2), encoding="utf-8"
+            )
         resolved_config = copy.deepcopy(self.raw)
         resolved_config["pretrained_weight_audit"] = self.pretrained_weight_audit
         (self.workdir / "config.json").write_text(

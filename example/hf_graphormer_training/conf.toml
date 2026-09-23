@@ -69,3 +69,5 @@ head_learning_rate = 1e-4
 weight_decay = 0.01
 gradient_clip = 1.0
 early_stopping_patience = 8
+test_mc_dropout_samples = 30   # Final direct, MC-dropout, and local-calibrated test evaluation.
+test_calibration_confidence = 0.90

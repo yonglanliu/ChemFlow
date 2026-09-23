@@ -19,6 +19,10 @@ import pandas as pd
 from rdkit import Chem
 from scipy.stats import kendalltau, pearsonr, spearmanr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from chemflow.deep_learning.test_evaluation import (
+    fingerprint_local_predictions,
+    save_test_evaluation,
+)
 
 
 _SPLIT_ALIASES = {
@@ -611,50 +615,128 @@ class ChempropTrainer:
                 f"{len(predicted)} != {len(truth)}."
             )
 
-        results = pd.DataFrame({self.smiles_column: truth[self.smiles_column]})
-        metric_summary: dict[str, Any] = {}
-        for target in self.targets:
-            if target not in predicted:
-                raise ValueError(
-                    f"Chemprop prediction output is missing target {target!r}; "
-                    f"available columns: {list(predicted.columns)}"
-                )
-            true_values = pd.to_numeric(truth[target], errors="coerce")
-            predicted_values = pd.to_numeric(predicted[target], errors="coerce")
-            results[f"{target}_true"] = true_values
-            results[f"{target}_prediction"] = predicted_values
-            results[f"{target}_error"] = predicted_values - true_values
-            metric_summary[target] = _regression_metrics(true_values, predicted_values)
-
+        direct_matrix = np.column_stack(
+            [pd.to_numeric(predicted[target], errors="coerce") for target in self.targets]
+        )
         official_output = self.workdir / "model_0" / "test_predictions.csv"
         if official_output.is_file():
             shutil.copy2(
                 official_output,
                 self.workdir / "final_model_test_predictions.csv",
             )
-        prediction_path = self.workdir / "test_predictions.csv"
-        metrics_path = self.workdir / "test_metrics.json"
-        results.to_csv(prediction_path, index=False)
-        metrics_path.write_text(
-            json.dumps(
-                {
-                    "selection": "best_validation_checkpoint",
-                    "models": [str(path) for path in best_models],
-                    "targets": metric_summary,
-                },
-                indent=2,
+        samples = int(self.training_cfg.get("test_mc_dropout_samples", 0))
+        dropout = float(self.model_cfg.get("dropout", 0.0))
+        if samples == 1 or samples < 0:
+            raise ValueError(
+                "TrainingConfig.test_mc_dropout_samples must be 0 or at least 2."
             )
-            + "\n",
-            encoding="utf-8",
+        if samples >= 2 and dropout <= 0.0:
+            raise ValueError(
+                "Chemprop MC-dropout test evaluation requires ChempropConfig.dropout > 0."
+            )
+
+        if samples == 0:
+            results = pd.DataFrame({self.smiles_column: truth[self.smiles_column]})
+            direct_metrics: dict[str, Any] = {}
+            for task_index, target in enumerate(self.targets):
+                true_values = pd.to_numeric(truth[target], errors="coerce")
+                predicted_values = direct_matrix[:, task_index]
+                results[f"{target}_true"] = true_values
+                results[f"{target}_prediction"] = predicted_values
+                results[f"{target}_direct_prediction"] = predicted_values
+                direct_metrics[target] = _regression_metrics(
+                    true_values, predicted_values
+                )
+            prediction_path = self.workdir / "test_predictions.csv"
+            metrics_path = self.workdir / "metrics.json"
+            results.to_csv(prediction_path, index=False)
+            metrics_path.write_text(json.dumps({
+                "backend": "Chemprop v2",
+                "selection": "best_validation_checkpoint",
+                "models": [str(path) for path in best_models],
+                "targets": direct_metrics,
+                "target_names": self.targets,
+                "test_metrics": {"direct_prediction": direct_metrics},
+                "mc_dropout_evaluation": "disabled",
+            }, indent=2) + "\n", encoding="utf-8")
+            shutil.copy2(metrics_path, self.workdir / "test_metrics.json")
+            return prediction_path, metrics_path
+
+        def mc_predict(input_path: Path, output_path: Path) -> pd.DataFrame:
+            mc_command = list(command)
+            mc_command[mc_command.index("--test-path") + 1] = str(input_path)
+            mc_command[mc_command.index("--preds-path") + 1] = str(output_path)
+            mc_command.extend([
+                "--uncertainty-method", "dropout",
+                "--dropout-sampling-size", str(samples),
+            ])
+            subprocess.run(
+                mc_command,
+                cwd=self.workdir,
+                env=process_environment,
+                check=True,
+            )
+            return pd.read_csv(output_path)
+
+        mc_test = mc_predict(
+            prediction_input, self.workdir / "best_model_mc_predictions.csv"
         )
-        print("Independent test metrics — best validation checkpoint", flush=True)
-        for target, metrics in metric_summary.items():
-            values = "  ".join(
-                f"{name}={metrics[name]:.4f}"
-                for name in ("rmse", "mae", "r2", "pearson", "spearman", "kendall")
-                if metrics[name] is not None
-            )
-            print(f"  {target} (n={metrics['n']}): {values}", flush=True)
+        validation = pd.read_csv(self.workdir / "prepared_data" / "val.csv")
+        validation_smiles_path = self.workdir / "prepared_data" / "val_smiles.csv"
+        validation[[self.smiles_column]].to_csv(validation_smiles_path, index=False)
+        mc_validation = mc_predict(
+            validation_smiles_path,
+            self.workdir / "best_model_validation_mc_predictions.csv",
+        )
+        mc_matrix = np.column_stack(
+            [pd.to_numeric(mc_test[target], errors="coerce") for target in self.targets]
+        )
+        mc_sd_matrix = np.column_stack([
+            np.sqrt(np.maximum(pd.to_numeric(mc_test[f"{target}_unc"], errors="coerce"), 0.0))
+            for target in self.targets
+        ])
+        validation_mc_matrix = np.column_stack([
+            pd.to_numeric(mc_validation[target], errors="coerce") for target in self.targets
+        ])
+        validation_truths = validation[self.targets].apply(
+            pd.to_numeric, errors="coerce"
+        ).to_numpy(float)
+        training = pd.read_csv(self.workdir / "prepared_data" / "train.csv")
+        prediction_output = fingerprint_local_predictions(
+            train_smiles=training[self.smiles_column].astype(str).tolist(),
+            validation_smiles=validation[self.smiles_column].astype(str).tolist(),
+            validation_truths=validation_truths,
+            validation_predictions=validation_mc_matrix,
+            test_smiles=truth[self.smiles_column].astype(str).tolist(),
+            direct_predictions=direct_matrix,
+            mc_predictions=mc_matrix,
+            mc_standard_deviations=mc_sd_matrix,
+            targets=self.targets,
+            confidence=float(
+                self.training_cfg.get("test_calibration_confidence", 0.90)
+            ),
+        )
+        summary = {
+            "backend": "Chemprop v2",
+            "selection": "best_validation_checkpoint",
+            "models": [str(path) for path in best_models],
+            "targets": self.targets,
+        }
+        _, summary = save_test_evaluation(
+            workdir=self.workdir,
+            smiles=truth[self.smiles_column].astype(str).tolist(),
+            truths=truth[self.targets].apply(pd.to_numeric, errors="coerce").to_numpy(float),
+            targets=self.targets,
+            task_types=["regression"] * len(self.targets),
+            predictions=prediction_output,
+            summary=summary,
+            confidence=float(
+                self.training_cfg.get("test_calibration_confidence", 0.90)
+            ),
+        )
+        prediction_path = self.workdir / "test_predictions.csv"
+        metrics_path = self.workdir / "metrics.json"
+        shutil.copy2(metrics_path, self.workdir / "test_metrics.json")
         return prediction_path, metrics_path
 
     @staticmethod
@@ -790,6 +872,15 @@ class ChempropTrainer:
         history_path = self._export_training_history()
         if history_path is not None:
             print(f"Chemprop epoch history: {history_path}", flush=True)
+            from chemflow.deep_learning.plotter.training_plotter import (
+                plot_training_history,
+            )
+
+            plot_training_history(
+                history_path,
+                self.workdir / "plots" / "training_history.png",
+                title="Chemprop training",
+            )
         prediction_path, metrics_path = self._evaluate_best_models(
             command[0], process_environment
         )

@@ -1,9 +1,145 @@
 from __future__ import annotations
+from collections.abc import Mapping
 from typing import Any
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
+
+
+_TRAIN_LOSS_COLUMNS = (
+    "train_loss",
+    "train_loss_epoch",
+    "loss_train",
+    "train/loss",
+    "train_macro_loss",
+    "training_loss",
+)
+_VALIDATION_LOSS_COLUMNS = (
+    "val_loss",
+    "val_loss_epoch",
+    "loss_val",
+    "val/loss",
+    "validation_loss",
+    "val_macro_loss",
+)
+
+
+def _history_frame(
+    history: pd.DataFrame | Mapping[str, Any] | str | Path,
+) -> pd.DataFrame:
+    if isinstance(history, pd.DataFrame):
+        return history.copy()
+    if isinstance(history, Mapping):
+        return pd.DataFrame(history)
+    path = Path(history)
+    if not path.is_file():
+        raise FileNotFoundError(f"Training history not found: {path}")
+    return pd.read_csv(path)
+
+
+def _first_history_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    return next((column for column in candidates if column in frame.columns), None)
+
+
+def plot_training_history(
+    history: pd.DataFrame | Mapping[str, Any] | str | Path,
+    output_path: str | Path,
+    *,
+    title: str = "Training history",
+) -> dict[str, str] | None:
+    """Plot epoch-level training and validation loss on the same axes.
+
+    The accepted aliases cover ChemFlow's native trainers, Lightning CSV logs,
+    Chemprop, and the vendored KERMT backend. Replicates or ensemble members are
+    averaged by epoch; their between-run standard deviation is shown when more
+    than one value is available.
+    """
+    frame = _history_frame(history)
+    epoch_column = _first_history_column(frame, ("epoch", "Epoch", "step"))
+    train_column = _first_history_column(frame, _TRAIN_LOSS_COLUMNS)
+    validation_column = _first_history_column(frame, _VALIDATION_LOSS_COLUMNS)
+    if epoch_column is None or (train_column is None and validation_column is None):
+        return None
+
+    selected_columns = [
+        column
+        for column in (epoch_column, train_column, validation_column)
+        if column is not None
+    ]
+    values = frame[selected_columns].copy()
+    for column in selected_columns:
+        values[column] = pd.to_numeric(values[column], errors="coerce")
+    values = values.loc[values[epoch_column].notna()]
+    if values.empty:
+        return None
+
+    figure, axis = plt.subplots(figsize=(8.2, 6.4))
+    colors = {"Training": "#0072B2", "Validation": "#D55E00"}
+    plotted = False
+    for column, label in (
+        (train_column, "Training"),
+        (validation_column, "Validation"),
+    ):
+        if column is None:
+            continue
+        finite = values.loc[values[column].notna(), [epoch_column, column]]
+        if finite.empty:
+            continue
+        grouped = finite.groupby(epoch_column, sort=True)[column].agg(["mean", "std"])
+        epochs = grouped.index.to_numpy(dtype=float)
+        means = grouped["mean"].to_numpy(dtype=float)
+        axis.plot(
+            epochs,
+            means,
+            color=colors[label],
+            linewidth=2.6,
+            marker="o",
+            markersize=4.5,
+            label=label,
+        )
+        spread = grouped["std"].to_numpy(dtype=float)
+        available = np.isfinite(spread) & (spread > 0)
+        if available.any():
+            lower = means - np.nan_to_num(spread, nan=0.0)
+            upper = means + np.nan_to_num(spread, nan=0.0)
+            axis.fill_between(
+                epochs,
+                lower,
+                upper,
+                color=colors[label],
+                alpha=0.16,
+                linewidth=0,
+            )
+        plotted = True
+
+    if not plotted:
+        plt.close(figure)
+        return None
+    axis.set_xlabel("Epoch", fontsize=17, labelpad=8)
+    axis.set_ylabel("Loss", fontsize=17, labelpad=8)
+    axis.set_title(title, fontsize=19, fontweight="semibold", pad=12)
+    axis.tick_params(axis="both", labelsize=15, width=1.5, length=6)
+    for spine in axis.spines.values():
+        spine.set_linewidth(1.5)
+    axis.grid(axis="both", linestyle=":", linewidth=0.9, alpha=0.35)
+    axis.legend(frameon=False, fontsize=14)
+    figure.tight_layout(pad=0.8)
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    png_path = output.with_suffix(".png")
+    pdf_path = output.with_suffix(".pdf")
+    figure.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
+    figure.savefig(pdf_path, bbox_inches="tight", facecolor="white")
+    plt.close(figure)
+    return {
+        "png": str(png_path),
+        "pdf": str(pdf_path),
+        "train_column": train_column or "",
+        "validation_column": validation_column or "",
+    }
 
 
 
