@@ -119,7 +119,7 @@ def plot_training_history(
         return None
     axis.set_xlabel("Epoch", fontsize=17, labelpad=8)
     axis.set_ylabel("Loss", fontsize=17, labelpad=8)
-    axis.set_title(title, fontsize=19, fontweight="semibold", pad=12)
+    axis.set_title(title, fontsize=19, fontweight="bold", pad=12)
     axis.tick_params(axis="both", labelsize=15, width=1.5, length=6)
     for spine in axis.spines.values():
         spine.set_linewidth(1.5)

@@ -83,7 +83,7 @@ def _style_axis(axis) -> None:
     axis.set_title(
         axis.get_title(),
         fontsize=_TITLE_SIZE,
-        fontweight="semibold",
+        fontweight="bold",
         pad=12,
     )
     for annotation in axis.texts:
@@ -486,7 +486,7 @@ def generate_uncertainty_report(
             overview.suptitle(
                 f"{target}: MC-dropout uncertainty",
                 fontsize=20,
-                fontweight="semibold",
+                fontweight="bold",
                 y=0.975,
             )
             # Explicit margins avoid the very large inter-panel whitespace that
