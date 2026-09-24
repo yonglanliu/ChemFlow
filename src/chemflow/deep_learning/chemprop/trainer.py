@@ -42,6 +42,8 @@ _GENERATED_SPLITS = {
     "kmeans",
 }
 _REGRESSION_METRICS = {"mse", "mae", "rmse", "r2"}
+_REGRESSION_LOSSES = {"l2", "mse", "mae", "huber", "nll", "gaussian_nll"}
+_CUSTOM_REGRESSION_LOSSES = {"huber", "nll", "gaussian_nll"}
 
 
 def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
@@ -192,6 +194,26 @@ class ChempropTrainer:
             raise ValueError(f"Unsupported Chemprop regression metrics: {unsupported}")
         if not self.metrics:
             raise ValueError("TrainingConfig.metrics must contain at least one metric.")
+        self.regression_loss = str(
+            self.training_cfg.get("regression_loss", "mse")
+        ).strip().lower()
+        if self.regression_loss not in _REGRESSION_LOSSES:
+            raise ValueError(
+                "TrainingConfig.regression_loss must be one of "
+                f"{sorted(_REGRESSION_LOSSES)}."
+            )
+        self.huber_delta = float(self.training_cfg.get("huber_delta", 1.0))
+        self.nll_scale = float(self.training_cfg.get("nll_scale", 1.0))
+        self.gaussian_nll_variance = float(
+            self.training_cfg.get("gaussian_nll_variance", 1.0)
+        )
+        for name, value in (
+            ("huber_delta", self.huber_delta),
+            ("nll_scale", self.nll_scale),
+            ("gaussian_nll_variance", self.gaussian_nll_variance),
+        ):
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"TrainingConfig.{name} must be positive and finite.")
         extra_args = self.training_cfg.get("extra_args", [])
         if not isinstance(extra_args, (list, tuple)):
             raise TypeError("TrainingConfig.extra_args must be a list.")
@@ -442,6 +464,13 @@ class ChempropTrainer:
                 "chemflow.deep_learning.chemprop.periodic_cli",
                 "train",
             ]
+        elif self.regression_loss in _CUSTOM_REGRESSION_LOSSES:
+            command = [
+                sys.executable,
+                "-m",
+                "chemflow.deep_learning.chemprop.loss_cli",
+                "train",
+            ]
         else:
             command = [executable, "train"]
         command.extend(["--data-path", *(str(path) for path in data_paths)])
@@ -449,6 +478,15 @@ class ChempropTrainer:
         command.extend(["--smiles-columns", self.smiles_column])
         command.extend(["--target-columns", *self.targets])
         command.extend(["--task-type", self.task])
+        command.extend(
+            [
+                "--loss-function",
+                {
+                    "l2": "mse",
+                    "gaussian_nll": "gaussian-nll",
+                }.get(self.regression_loss, self.regression_loss),
+            ]
+        )
         if resume_checkpoints:
             command.extend(["--checkpoint", *(str(path) for path in resume_checkpoints)])
 
@@ -784,6 +822,15 @@ class ChempropTrainer:
         if resolved_executable is not None:
             command[0] = resolved_executable
         process_environment = os.environ.copy()
+        process_environment.update(
+            {
+                "CHEMFLOW_HUBER_DELTA": str(self.huber_delta),
+                "CHEMFLOW_NLL_SCALE": str(self.nll_scale),
+                "CHEMFLOW_GAUSSIAN_NLL_VARIANCE": str(
+                    self.gaussian_nll_variance
+                ),
+            }
+        )
         if self.checkpoint_interval > 0:
             process_environment["CHEMFLOW_CHECKPOINT_EVERY_N_EPOCHS"] = str(
                 self.checkpoint_interval

@@ -66,6 +66,9 @@ from chemflow.deep_learning.chemeleon.applicability import (
 )
 
 
+REGRESSION_LOSSES = ("l2", "mse", "mae", "huber", "nll", "gaussian_nll")
+
+
 def _print_log_table(title: str, rows: list[tuple[str, object]]) -> None:
     """Print a fixed-width table that remains readable in Slurm logs."""
     headers = ("Item", "Value")
@@ -302,6 +305,26 @@ class HuggingFaceGraphormerTrainer:
         self.task_types = resolve_task_types(
             self.task, self._target_columns(), self.data_cfg.get("task_types")
         )
+        self.regression_loss = str(
+            self.train_cfg.get("regression_loss", "mse")
+        ).strip().lower()
+        if self.regression_loss not in REGRESSION_LOSSES:
+            raise ValueError(
+                "TrainingConfig.regression_loss must be one of "
+                f"{list(REGRESSION_LOSSES)}."
+            )
+        self.huber_delta = float(self.train_cfg.get("huber_delta", 1.0))
+        self.nll_scale = float(self.train_cfg.get("nll_scale", 1.0))
+        self.gaussian_nll_variance = float(
+            self.train_cfg.get("gaussian_nll_variance", 1.0)
+        )
+        for name, value in (
+            ("huber_delta", self.huber_delta),
+            ("nll_scale", self.nll_scale),
+            ("gaussian_nll_variance", self.gaussian_nll_variance),
+        ):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"TrainingConfig.{name} must be positive and finite.")
         self.threshold = float(self.train_cfg.get("classification_threshold", 0.5))
         if not 0.0 <= self.threshold <= 1.0:
             raise ValueError(
@@ -904,6 +927,10 @@ class HuggingFaceGraphormerTrainer:
         task_weights: torch.Tensor,
         task: str = "regression",
         task_types: list[str] | None = None,
+        regression_loss: str = "mse",
+        huber_delta: float = 1.0,
+        nll_scale: float = 1.0,
+        gaussian_nll_variance: float = 1.0,
     ) -> torch.Tensor:
         """Return a weighted mean over the finite labels in a batch."""
         mask = torch.isfinite(labels)
@@ -918,7 +945,35 @@ class HuggingFaceGraphormerTrainer:
                     logits[:, index], finite_labels[:, index], reduction="none"
                 )
             else:
-                element_loss[:, index] = (logits[:, index] - finite_labels[:, index]).square()
+                predictions = logits[:, index]
+                targets = finite_labels[:, index]
+                if regression_loss in {"l2", "mse"}:
+                    values = (predictions - targets).square()
+                elif regression_loss == "mae":
+                    values = (predictions - targets).abs()
+                elif regression_loss == "huber":
+                    values = torch.nn.functional.huber_loss(
+                        predictions,
+                        targets,
+                        reduction="none",
+                        delta=huber_delta,
+                    )
+                elif regression_loss == "nll":
+                    scale = predictions.new_tensor(nll_scale)
+                    values = (predictions - targets).abs() / scale + torch.log(
+                        2.0 * scale
+                    )
+                elif regression_loss == "gaussian_nll":
+                    values = torch.nn.functional.gaussian_nll_loss(
+                        predictions,
+                        targets,
+                        torch.full_like(predictions, gaussian_nll_variance),
+                        full=True,
+                        reduction="none",
+                    )
+                else:
+                    raise ValueError(f"Unsupported regression loss: {regression_loss!r}")
+                element_loss[:, index] = values
         weights = task_weights.reshape(1, -1).expand_as(labels)
         effective_weights = weights * mask
         return (element_loss * effective_weights).sum() / effective_weights.sum()
@@ -1625,6 +1680,10 @@ class HuggingFaceGraphormerTrainer:
                     loss_weights_tensor,
                     task=self.task,
                     task_types=self.task_types,
+                    regression_loss=self.regression_loss,
+                    huber_delta=self.huber_delta,
+                    nll_scale=self.nll_scale,
+                    gaussian_nll_variance=self.gaussian_nll_variance,
                 )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.train_cfg.get("gradient_clip", 1.0)))

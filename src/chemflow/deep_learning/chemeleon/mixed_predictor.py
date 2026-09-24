@@ -7,12 +7,36 @@ from chemprop.nn.metrics import ChempropMetric
 from chemprop.nn.predictors import _FFNPredictorBase
 
 
-class MixedTaskLoss(ChempropMetric):
-    """MSE for regression columns and BCE-with-logits for binary columns."""
+class HuberLoss(ChempropMetric):
+    """Huber regression loss compatible with Chemprop predictor masking."""
 
-    def __init__(self, task_types, task_weights=1.0):
+    def __init__(self, task_weights=1.0, delta: float = 1.0):
+        super().__init__(task_weights=task_weights)
+        self.delta = float(delta)
+
+    def _calc_unreduced_loss(self, preds, targets, *args):
+        return torch.nn.functional.huber_loss(
+            preds,
+            targets,
+            reduction="none",
+            delta=self.delta,
+        )
+
+
+class MixedTaskLoss(ChempropMetric):
+    """Configurable regression loss and BCE-with-logits for binary columns."""
+
+    def __init__(
+        self,
+        task_types,
+        task_weights=1.0,
+        regression_loss: str = "mse",
+        huber_delta: float = 1.0,
+    ):
         super().__init__(task_weights=task_weights)
         self.task_types = [str(value) for value in task_types]
+        self.regression_loss = str(regression_loss).strip().lower()
+        self.huber_delta = float(huber_delta)
 
     def _calc_unreduced_loss(self, preds, targets, *args):
         loss = torch.zeros_like(preds)
@@ -20,6 +44,13 @@ class MixedTaskLoss(ChempropMetric):
             if task_type == "classification":
                 loss[:, index] = torch.nn.functional.binary_cross_entropy_with_logits(
                     preds[:, index], targets[:, index], reduction="none"
+                )
+            elif self.regression_loss == "huber":
+                loss[:, index] = torch.nn.functional.huber_loss(
+                    preds[:, index],
+                    targets[:, index],
+                    reduction="none",
+                    delta=self.huber_delta,
                 )
             else:
                 loss[:, index] = (preds[:, index] - targets[:, index]).square()
@@ -29,9 +60,17 @@ class MixedTaskLoss(ChempropMetric):
 class MixedTaskMetric(ChempropMetric):
     """Combined validation loss for normalized regression values and logits."""
 
-    def __init__(self, task_types, task_weights=1.0):
+    def __init__(
+        self,
+        task_types,
+        task_weights=1.0,
+        regression_loss: str = "mse",
+        huber_delta: float = 1.0,
+    ):
         super().__init__(task_weights=task_weights)
         self.task_types = [str(value) for value in task_types]
+        self.regression_loss = str(regression_loss).strip().lower()
+        self.huber_delta = float(huber_delta)
 
     def _calc_unreduced_loss(self, preds, targets, *args):
         loss = torch.zeros_like(preds)
@@ -41,6 +80,13 @@ class MixedTaskMetric(ChempropMetric):
                     preds[:, index],
                     targets[:, index],
                     reduction="none",
+                )
+            elif self.regression_loss == "huber":
+                loss[:, index] = torch.nn.functional.huber_loss(
+                    preds[:, index],
+                    targets[:, index],
+                    reduction="none",
+                    delta=self.huber_delta,
                 )
             else:
                 loss[:, index] = (preds[:, index] - targets[:, index]).square()
@@ -54,12 +100,26 @@ class MixedTaskFFN(_FFNPredictorBase):
     _T_default_criterion = MixedTaskLoss
     _T_default_metric = MixedTaskMetric
 
-    def __init__(self, *, task_types, task_weights=None, criterion=None, **kwargs):
+    def __init__(
+        self,
+        *,
+        task_types,
+        task_weights=None,
+        criterion=None,
+        regression_loss: str = "mse",
+        huber_delta: float = 1.0,
+        **kwargs,
+    ):
         self.task_types = [str(value) for value in task_types]
         kwargs.pop("n_tasks", None)
         if task_weights is None:
             task_weights = torch.ones(len(self.task_types))
-        criterion = criterion or MixedTaskLoss(self.task_types, task_weights)
+        criterion = criterion or MixedTaskLoss(
+            self.task_types,
+            task_weights,
+            regression_loss=regression_loss,
+            huber_delta=huber_delta,
+        )
         super().__init__(
             n_tasks=len(self.task_types),
             task_weights=task_weights,

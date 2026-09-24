@@ -9,6 +9,7 @@ from pathlib import Path
 def main() -> None:
     # Imports stay inside main so ChemFlow can be imported without the optional
     # Chemprop/Lightning stack installed.
+    from chemflow.deep_learning.chemprop import losses as _losses  # noqa: F401
     from lightning.pytorch.callbacks import ModelCheckpoint
     from chemprop.cli import train as train_module
 

@@ -573,6 +573,30 @@ class KERMTTrainer:
             raise ValueError(
                 "TrainingConfig.checkpoint_every_n_epochs cannot be negative."
             )
+        regression_loss = str(
+            self.training_cfg.get("regression_loss", "l2")
+        ).strip().lower()
+        allowed_regression_losses = {
+            "l2", "mse", "mae", "huber", "nll", "gaussian_nll"
+        }
+        if regression_loss not in allowed_regression_losses:
+            raise ValueError(
+                "TrainingConfig.regression_loss must be one of "
+                f"{sorted(allowed_regression_losses)}."
+            )
+        huber_delta = float(self.training_cfg.get("huber_delta", 1.0))
+        nll_scale = float(self.training_cfg.get("nll_scale", 1.0))
+        gaussian_nll_variance = float(
+            self.training_cfg.get("gaussian_nll_variance", 1.0)
+        )
+        if huber_delta <= 0.0:
+            raise ValueError("TrainingConfig.huber_delta must be positive.")
+        if nll_scale <= 0.0:
+            raise ValueError("TrainingConfig.nll_scale must be positive.")
+        if gaussian_nll_variance <= 0.0:
+            raise ValueError(
+                "TrainingConfig.gaussian_nll_variance must be positive."
+            )
         fine_tune_coefficient = 0.0 if freeze_encoder else encoder_lr_multiplier
         command = [
             python_executable,
@@ -594,6 +618,10 @@ class KERMTTrainer:
             "--epochs", str(int(self.training_cfg.get("num_epochs", 100))),
             "--checkpoint_every_n_epochs", str(checkpoint_interval),
             "--metric", str(self.training_cfg.get("metric", "mae")),
+            "--regression_loss", regression_loss,
+            "--huber_delta", str(huber_delta),
+            "--nll_scale", str(nll_scale),
+            "--gaussian_nll_variance", str(gaussian_nll_variance),
             "--dist_coff", str(float(self.model_cfg.get("dist_coff", 0.15))),
             "--init_lr", str(float(self.training_cfg.get("init_lr", 1e-5))),
             "--max_lr", str(float(self.training_cfg.get("max_lr", 1e-4))),

@@ -72,6 +72,7 @@ from chemflow.deep_learning.chemeleon.pretrained import (
     ensure_pretrained_weights,
 )
 from chemflow.deep_learning.chemeleon.mixed_predictor import (
+    HuberLoss,
     MixedTaskFFN,
     MixedTaskMetric,
 )
@@ -110,6 +111,8 @@ class TrainingConfig:
     num_epochs: int = 30
     checkpoint_every_n_epochs: int = 0
     weight_decay: float = 0.0
+    regression_loss: str = "mse"
+    huber_delta: float = 1.0
     accelerator: str = "auto"
     devices: int | str = 1
     strategy: str = "auto"
@@ -380,6 +383,13 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
         training.weight_decay
     ) < 0.0:
         raise ValueError("weight_decay must be a finite nonnegative value.")
+    training.regression_loss = str(training.regression_loss).strip().lower()
+    if training.regression_loss not in {"mse", "huber"}:
+        raise ValueError("regression_loss must be either 'mse' or 'huber'.")
+    if not math.isfinite(float(training.huber_delta)) or float(
+        training.huber_delta
+    ) <= 0.0:
+        raise ValueError("huber_delta must be a finite positive value.")
     if int(training.num_nodes) < 1:
         raise ValueError("num_nodes must be at least 1.")
     accelerator = str(training.accelerator).strip().lower()
@@ -652,6 +662,14 @@ def _make_model(
         scaler = train_dataset.normalize_targets()
         val_dataset.normalize_targets(scaler)
         output_transform = nn.UnscaleTransform.from_standard_scaler(scaler)
+        predictor_kwargs: dict[str, Any] = {}
+        if config.training.regression_loss == "huber":
+            predictor_kwargs["criterion"] = HuberLoss(
+                task_weights=torch.as_tensor(
+                    task_loss_weights, dtype=torch.float32
+                ),
+                delta=float(config.training.huber_delta),
+            )
         predictor = nn.RegressionFFN(
             n_tasks=n_tasks,
             input_dim=message_passing.output_dim,
@@ -660,6 +678,7 @@ def _make_model(
             dropout=float(config.model.dropout),
             output_transform=output_transform,
             task_weights=torch.as_tensor(task_loss_weights, dtype=torch.float32),
+            **predictor_kwargs,
         )
         metrics = [nn.metrics.RMSE(), nn.metrics.MAE(), nn.metrics.R2Score()]
     elif config.base.task == "classification":
@@ -695,8 +714,16 @@ def _make_model(
             dropout=float(config.model.dropout),
             output_transform=output_transform,
             task_weights=torch.as_tensor(task_loss_weights, dtype=torch.float32),
+            regression_loss=config.training.regression_loss,
+            huber_delta=float(config.training.huber_delta),
         )
-        metrics = [MixedTaskMetric(task_types)]
+        metrics = [
+            MixedTaskMetric(
+                task_types,
+                regression_loss=config.training.regression_loss,
+                huber_delta=float(config.training.huber_delta),
+            )
+        ]
 
     return WeightDecayMPNN(
         message_passing=message_passing,

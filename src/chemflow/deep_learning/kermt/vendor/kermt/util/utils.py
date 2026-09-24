@@ -953,7 +953,8 @@ def get_loss_func(args: Namespace, model=None):
     if args.dataset_type == 'classification':
         return nn.BCEWithLogitsLoss(reduction='none')
     if args.dataset_type == 'regression':
-        return nn.MSELoss(reduction='none')
+        from chemflow.deep_learning.kermt.vendor.kermt.util.loss import get_regression_loss
+        return get_regression_loss(args)
 
     raise ValueError(f'Dataset type "{args.dataset_type}" not supported.')
 

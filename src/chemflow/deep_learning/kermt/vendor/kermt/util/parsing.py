@@ -172,6 +172,20 @@ def add_finetune_args(parser: ArgumentParser):
                         choices=['classification', 'regression'], default='classification',
                         help='Type of dataset, e.g. classification or regression.'
                              'This determines the loss function used during training.')
+    parser.add_argument(
+        '--regression_loss',
+        type=str,
+        choices=['l2', 'mse', 'mae', 'huber', 'nll', 'gaussian_nll'],
+        default='l2',
+        help='Regression training loss. nll is fixed-scale Laplace NLL and '
+             'gaussian_nll uses a fixed variance.',
+    )
+    parser.add_argument('--huber_delta', type=float, default=1.0,
+                        help='Huber quadratic-to-linear transition point.')
+    parser.add_argument('--nll_scale', type=float, default=1.0,
+                        help='Fixed Laplace scale used by regression_loss=nll.')
+    parser.add_argument('--gaussian_nll_variance', type=float, default=1.0,
+                        help='Fixed variance used by regression_loss=gaussian_nll.')
     parser.add_argument('--separate_val_path', type=str,
                         help='Path to separate val set, optional')
     parser.add_argument('--separate_val_features_path', type=str, nargs='*',
@@ -218,8 +232,7 @@ def add_finetune_args(parser: ArgumentParser):
                                  'matthews_corrcoef',
                                  'spearmanr'],
                         help='Metric to use during evaluation.'
-                             'Note: Does NOT affect loss function used during training'
-                             '(loss is determined by the `dataset_type` argument).'
+                             'Note: Does NOT affect the configured training loss.'
                              'Note: Defaults to "auc" for classification and "rmse" for regression.')
     parser.add_argument('--use_mtl_loss', action='store_true', default=False,
                         help='Use MTL loss function')

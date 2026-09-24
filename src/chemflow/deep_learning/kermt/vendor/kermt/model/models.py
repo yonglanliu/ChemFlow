@@ -50,6 +50,7 @@ from torch.cuda import nvtx
 from chemflow.deep_learning.kermt.vendor.kermt.data import get_atom_fdim, get_bond_fdim
 from chemflow.deep_learning.kermt.vendor.kermt.model.layers import Readout, GTransEncoder, RoPETransformerDecoderLayer, PositionalEncoding
 from chemflow.deep_learning.kermt.vendor.kermt.util.loss_utils import normalize_loss_gradient
+from chemflow.deep_learning.kermt.vendor.kermt.util.loss import get_regression_loss
 from chemflow.deep_learning.kermt.vendor.kermt.util.nn_utils import get_activation_function
 
 
@@ -1432,7 +1433,7 @@ class KermtFinetuneTask(nn.Module):
             if dt == 'classification':
                 pred_loss = nn.BCEWithLogitsLoss(reduction='none')
             elif dt == 'regression':
-                pred_loss = nn.MSELoss(reduction='none')
+                pred_loss = get_regression_loss(args)
             else:
                 raise ValueError(f'Dataset type "{args.dataset_type}" not supported.')
 
