@@ -47,6 +47,7 @@ class TrainingConfig:
     batch_size: int = 64
     learning_rate: float = 1e-3
     epochs: int = 100
+    checkpoint_every_n_epochs: int = 0
     weight_decay: float = 1e-5
     gradient_clip: float = 1.0
     gradient_clip_value: float = 1.0

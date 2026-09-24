@@ -201,6 +201,11 @@ def run_training(
         "gradient_clip_value",
         1.0,
     )
+    checkpoint_interval = int(
+        getattr(training_config, "checkpoint_every_n_epochs", 0)
+    )
+    if checkpoint_interval < 0:
+        raise ValueError("checkpoint_every_n_epochs cannot be negative.")
 
     scheduler_name = getattr(
         training_config,
@@ -316,6 +321,25 @@ def run_training(
                 history=history,
                 config=full_config,
             )
+            if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
+                periodic_path = checkpoint_dir / f"epoch_{epoch:04d}.pt"
+                save_checkpoint(
+                    path=periodic_path,
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    train_loss=avg_train_loss,
+                    val_loss=val_loss,
+                    val_perplexity=val_ppl,
+                    best_val_loss=best_val_loss,
+                    best_val_perplexity=best_val_perplexity,
+                    best_epoch=best_epoch,
+                    patience_counter=patience_counter,
+                    scheduler=scheduler,
+                    history=history,
+                    config=full_config,
+                )
+                print(f"Saved periodic checkpoint to {periodic_path}", flush=True)
 
             if improved:
                 save_checkpoint(

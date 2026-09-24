@@ -43,6 +43,7 @@ class GPTTrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     num_epochs: int = 100
+    checkpoint_every_n_epochs: int = 0
     seed: int = 42
     early_stopping: bool = True
     early_stopping_patience: int = 5

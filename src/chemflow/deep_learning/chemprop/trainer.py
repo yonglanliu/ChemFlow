@@ -220,6 +220,13 @@ class ChempropTrainer:
             raise ValueError(
                 "TrainingConfig.num_epochs must be greater than warmup_epochs."
             )
+        self.checkpoint_interval = int(
+            self.training_cfg.get("checkpoint_every_n_epochs", 0)
+        )
+        if self.checkpoint_interval < 0:
+            raise ValueError(
+                "TrainingConfig.checkpoint_every_n_epochs cannot be negative."
+            )
         self.early_stopping_patience = int(
             self.training_cfg.get("early_stopping_patience", 20)
         )
@@ -428,7 +435,16 @@ class ChempropTrainer:
         resume_checkpoints: list[Path] | None = None,
     ) -> list[str]:
         executable = str(self.training_cfg.get("executable", "chemprop")).strip()
-        command = [executable, "train", "--data-path", *(str(path) for path in data_paths)]
+        if self.checkpoint_interval > 0:
+            command = [
+                sys.executable,
+                "-m",
+                "chemflow.deep_learning.chemprop.periodic_cli",
+                "train",
+            ]
+        else:
+            command = [executable, "train"]
+        command.extend(["--data-path", *(str(path) for path in data_paths)])
         command.extend(["--output-dir", str(self.workdir)])
         command.extend(["--smiles-columns", self.smiles_column])
         command.extend(["--target-columns", *self.targets])
@@ -768,6 +784,10 @@ class ChempropTrainer:
         if resolved_executable is not None:
             command[0] = resolved_executable
         process_environment = os.environ.copy()
+        if self.checkpoint_interval > 0:
+            process_environment["CHEMFLOW_CHECKPOINT_EVERY_N_EPOCHS"] = str(
+                self.checkpoint_interval
+            )
         compatibility_environment: dict[str, str] = {}
         if _version_tuple(version) < (2, 3):
             # Chemprop 2.2 asks Lightning to reload the checkpoint it just
@@ -794,6 +814,10 @@ class ChempropTrainer:
                 "patience": self.early_stopping_patience,
                 "min_delta": 0.0,
                 "state_restored_on_resume": False,
+            },
+            "periodic_checkpoints": {
+                "every_n_epochs": self.checkpoint_interval,
+                "enabled": self.checkpoint_interval > 0,
             },
             "resume": {
                 "enabled": self.resume,

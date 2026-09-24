@@ -593,6 +593,22 @@ class MolCollator(object):
                 features_batch.append(features)
         elif "rdkit_2d_normalized_cuik_molmaker" in batch[0].features_generator:
             features_batch = self.rdkit2d_featurizer.featurize(smiles_batch)
+            if isinstance(features_batch, torch.Tensor):
+                finite_rows = (
+                    torch.isfinite(features_batch).all(dim=1).detach().cpu().numpy()
+                )
+            else:
+                finite_rows = np.isfinite(
+                    np.asarray(features_batch, dtype=float)
+                ).all(axis=1)
+            if not finite_rows.all():
+                failing_smiles = [
+                    smiles for smiles, finite in zip(smiles_batch, finite_rows) if not finite
+                ]
+                raise ValueError(
+                    "KERMT generated non-finite RDKit2D-normalized descriptors for "
+                    f"{len(failing_smiles)} molecule(s): {failing_smiles}"
+                )
         else:
             features_batch = [d.features for d in batch]
 

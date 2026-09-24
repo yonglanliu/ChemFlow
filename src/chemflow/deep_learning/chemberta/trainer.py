@@ -758,6 +758,11 @@ class ChemBERTaTrainer:
         )
         epochs = int(self.train_cfg.get("num_epochs", 20))
         patience = int(self.train_cfg.get("early_stopping_patience", 5))
+        checkpoint_interval = int(
+            self.train_cfg.get("checkpoint_every_n_epochs", 0)
+        )
+        if checkpoint_interval < 0:
+            raise ValueError("checkpoint_every_n_epochs cannot be negative.")
         best_loss, bad_epochs = math.inf, 0
         history = []
         best_dir = self.workdir / "best_model"
@@ -936,6 +941,10 @@ class ChemBERTaTrainer:
                 if torch.cuda.is_available():
                     resume_state["cuda_rng"] = torch.cuda.get_rng_state_all()
                 torch.save(resume_state, last_path)
+                if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
+                    periodic_path = checkpoint_dir / f"epoch_{epoch:04d}.pt"
+                    torch.save(resume_state, periodic_path)
+                    print(f"Saved periodic checkpoint: {periodic_path}")
                 should_stop = bad_epochs >= patience
             if self.distributed:
                 control = torch.tensor([float(should_stop)], device=self.device)

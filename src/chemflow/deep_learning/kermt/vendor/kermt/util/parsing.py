@@ -164,6 +164,8 @@ def add_finetune_args(parser: ArgumentParser):
                         help='Resume model, optimizer, scheduler, and epoch from last_checkpoint.pt')
     parser.add_argument('--resume_checkpoint', type=str, default=None,
                         help='Optional last_checkpoint.pt file or KERMT output root used with --resume')
+    parser.add_argument('--checkpoint_every_n_epochs', type=int, default=0,
+                        help='Retain a full restart checkpoint every N completed epochs; 0 disables snapshots')
 
     # Data splitting.
     parser.add_argument('--dataset_type', type=str,

@@ -1520,6 +1520,11 @@ class HuggingFaceGraphormerTrainer:
 
         epochs = int(self.train_cfg.get("num_epochs", 30))
         patience = int(self.train_cfg.get("early_stopping_patience", 8))
+        checkpoint_interval = int(
+            self.train_cfg.get("checkpoint_every_n_epochs", 0)
+        )
+        if checkpoint_interval < 0:
+            raise ValueError("checkpoint_every_n_epochs cannot be negative.")
         checkpoint_dir = self.workdir / "checkpoints"
         last_checkpoint = checkpoint_dir / "last.pt"
         configured_resume_path = self.train_cfg.get("resume_checkpoint")
@@ -1799,6 +1804,22 @@ class HuggingFaceGraphormerTrainer:
                     target_stds=target_stds,
                 )
                 print(f"Saved resume checkpoint: {last_checkpoint}")
+                if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
+                    periodic_checkpoint = (
+                        checkpoint_dir / f"epoch_{epoch:04d}.pt"
+                    )
+                    self._save_resume_checkpoint(
+                        periodic_checkpoint,
+                        model=model,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        best_metric=best_metric,
+                        bad_epochs=bad_epochs,
+                        history=history,
+                        target_means=target_means,
+                        target_stds=target_stds,
+                    )
+                    print(f"Saved periodic checkpoint: {periodic_checkpoint}")
                 should_stop = bad_epochs >= patience
 
             control = torch.tensor(

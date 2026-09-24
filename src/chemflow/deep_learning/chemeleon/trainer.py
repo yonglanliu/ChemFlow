@@ -108,6 +108,7 @@ class TrainingConfig:
     batch_size: int = 64
     num_workers: int = 0
     num_epochs: int = 30
+    checkpoint_every_n_epochs: int = 0
     accelerator: str = "auto"
     devices: int | str = 1
     strategy: str = "auto"
@@ -173,6 +174,23 @@ class FreezeMessagePassingCallback(Callback):
         if trainer.current_epoch == self.freeze_epochs:
             for parameter in pl_module.message_passing.parameters():
                 parameter.requires_grad = True
+
+
+class PeriodicCheckpointCallback(Callback):
+    """Retain full-state snapshots after a configured number of epochs."""
+
+    def __init__(self, checkpoint_dir: Path, every_n_epochs: int):
+        super().__init__()
+        self.checkpoint_dir = checkpoint_dir
+        self.every_n_epochs = int(every_n_epochs)
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        completed_epoch = int(trainer.current_epoch) + 1
+        if completed_epoch % self.every_n_epochs != 0:
+            return
+        path = self.checkpoint_dir / f"epoch_{completed_epoch:04d}.ckpt"
+        # Lightning coordinates checkpoint I/O across distributed ranks.
+        trainer.save_checkpoint(path)
 
 
 class TrainingTaskMetricsCallback(Callback):
@@ -339,6 +357,8 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
         raise ValueError("val_fraction + test_fraction must be less than 1.")
     if int(training.num_epochs) < 1:
         raise ValueError("num_epochs must be at least 1.")
+    if int(training.checkpoint_every_n_epochs) < 0:
+        raise ValueError("checkpoint_every_n_epochs cannot be negative.")
     if int(training.num_nodes) < 1:
         raise ValueError("num_nodes must be at least 1.")
     accelerator = str(training.accelerator).strip().lower()
@@ -1407,6 +1427,16 @@ class CheMeleonTrainer:
             checkpoint_callback,
             LearningRateMonitor(logging_interval="epoch"),
         ]
+        checkpoint_interval = int(
+            self.config.training.checkpoint_every_n_epochs
+        )
+        if checkpoint_interval > 0:
+            callbacks.append(
+                PeriodicCheckpointCallback(
+                    checkpoint_dir=self.checkpoint_dir,
+                    every_n_epochs=checkpoint_interval,
+                )
+            )
         if bool(self.config.training.inspect_task_metrics):
             callbacks.append(
                 TrainingTaskMetricsCallback(

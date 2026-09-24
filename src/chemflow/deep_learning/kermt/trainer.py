@@ -455,6 +455,13 @@ class KERMTTrainer:
             raise ValueError(
                 "TrainingConfig.early_stopping_monitor must be 'metric' or 'loss'."
             )
+        checkpoint_interval = int(
+            self.training_cfg.get("checkpoint_every_n_epochs", 0)
+        )
+        if checkpoint_interval < 0:
+            raise ValueError(
+                "TrainingConfig.checkpoint_every_n_epochs cannot be negative."
+            )
         fine_tune_coefficient = 0.0 if freeze_encoder else encoder_lr_multiplier
         command = [
             python_executable,
@@ -474,6 +481,7 @@ class KERMTTrainer:
             "--ffn_num_layers", str(int(self.model_cfg.get("ffn_num_layers", 3))),
             "--bond_drop_rate", str(float(self.model_cfg.get("bond_drop_rate", 0.1))),
             "--epochs", str(int(self.training_cfg.get("num_epochs", 100))),
+            "--checkpoint_every_n_epochs", str(checkpoint_interval),
             "--metric", str(self.training_cfg.get("metric", "mae")),
             "--dist_coff", str(float(self.model_cfg.get("dist_coff", 0.15))),
             "--init_lr", str(float(self.training_cfg.get("init_lr", 1e-5))),

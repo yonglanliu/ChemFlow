@@ -954,6 +954,19 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                             print(f"Saving model at epoch {epoch} with validation score {best_score:.4f}")
                             save_checkpoint(os.path.join(save_dir, 'model.pt'), core_model, scaler, features_scaler, args)
             if is_main:
+                restart_state = {
+                    "best_score": best_score,
+                    "best_epoch": best_epoch,
+                    "min_val_loss": min_val_loss,
+                    "n_iter": n_iter,
+                    "early_stopping": {
+                        "monitor": early_stopping_monitor,
+                        "best_value": early_stopping_best,
+                        "bad_epochs": early_stopping_bad_epochs,
+                        "patience": early_stopping_patience,
+                        "min_delta": early_stopping_min_delta,
+                    },
+                }
                 save_model_for_restart(
                     os.path.join(save_dir, 'last_checkpoint.pt'),
                     core_model,
@@ -963,20 +976,33 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                     features_scaler,
                     args,
                     epoch + 1,
-                    training_state={
-                        "best_score": best_score,
-                        "best_epoch": best_epoch,
-                        "min_val_loss": min_val_loss,
-                        "n_iter": n_iter,
-                        "early_stopping": {
-                            "monitor": early_stopping_monitor,
-                            "best_value": early_stopping_best,
-                            "bad_epochs": early_stopping_bad_epochs,
-                            "patience": early_stopping_patience,
-                            "min_delta": early_stopping_min_delta,
-                        },
-                    },
+                    training_state=restart_state,
                 )
+                checkpoint_interval = int(args.checkpoint_every_n_epochs)
+                completed_epoch = epoch + 1
+                if (
+                    checkpoint_interval > 0
+                    and completed_epoch % checkpoint_interval == 0
+                ):
+                    periodic_path = os.path.join(
+                        save_dir,
+                        f"epoch_{completed_epoch:04d}_checkpoint.pt",
+                    )
+                    save_model_for_restart(
+                        periodic_path,
+                        core_model,
+                        optimizer,
+                        scheduler,
+                        scaler,
+                        features_scaler,
+                        args,
+                        completed_epoch,
+                        training_state=restart_state,
+                    )
+                    print(
+                        f"Saved periodic checkpoint: {periodic_path}",
+                        flush=True,
+                    )
             if early_stopping_patience > 0 and is_main:
                 print(
                     "Early stopping status: "
