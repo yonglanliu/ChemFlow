@@ -1589,6 +1589,11 @@ class CheMeleonTrainer:
                     if resume_checkpoint is not None
                     else None
                 ),
+                # Full-state ChemFlow checkpoints contain trusted ChemProp
+                # metric objects as well as tensors. PyTorch 2.6+ otherwise
+                # defaults Lightning checkpoint restoration to weights-only
+                # deserialization, which cannot restore optimizer-level runs.
+                weights_only=False,
             )
 
         # DDP workers must not race while copying logs, evaluating the full
