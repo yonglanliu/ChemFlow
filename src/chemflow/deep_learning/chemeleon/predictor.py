@@ -132,7 +132,16 @@ class CheMeleonPredictor:
 
         # ChemProp's direct loader reconstructs all submodules without going
         # through Lightning's PyTorch 2.6+ weights-only checkpoint default.
-        self.model = models.MPNN.load_from_file(
+        # Checkpoints produced by ChemFlow's weight-decay-aware subclass carry
+        # ``weight_decay`` in their saved hyperparameters, so they must be
+        # reconstructed with that subclass rather than ChemProp's base MPNN.
+        model_class = models.MPNN
+        hyper_parameters = checkpoint.get("hyper_parameters", {})
+        if isinstance(hyper_parameters, dict) and "weight_decay" in hyper_parameters:
+            from chemflow.deep_learning.chemeleon.trainer import WeightDecayMPNN
+
+            model_class = WeightDecayMPNN
+        self.model = model_class.load_from_file(
             self.checkpoint_path,
             map_location="cpu",
         )
