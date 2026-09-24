@@ -109,6 +109,7 @@ class TrainingConfig:
     num_workers: int = 0
     num_epochs: int = 30
     checkpoint_every_n_epochs: int = 0
+    weight_decay: float = 0.0
     accelerator: str = "auto"
     devices: int | str = 1
     strategy: str = "auto"
@@ -157,6 +158,22 @@ class CheMeleonRunConfig:
     dataset: DatasetConfig
     training: TrainingConfig
     model: ModelConfig
+
+
+class WeightDecayMPNN(models.MPNN):
+    """Chemprop MPNN whose native Adam optimizer applies configured L2 decay."""
+
+    def __init__(self, *args, weight_decay: float = 0.0, **kwargs):
+        self.chemflow_weight_decay = float(weight_decay)
+        super().__init__(*args, **kwargs)
+
+    def configure_optimizers(self):
+        configuration = super().configure_optimizers()
+        optimizer = configuration["optimizer"]
+        optimizer.defaults["weight_decay"] = self.chemflow_weight_decay
+        for parameter_group in optimizer.param_groups:
+            parameter_group["weight_decay"] = self.chemflow_weight_decay
+        return configuration
 
 
 class FreezeMessagePassingCallback(Callback):
@@ -359,6 +376,10 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
         raise ValueError("num_epochs must be at least 1.")
     if int(training.checkpoint_every_n_epochs) < 0:
         raise ValueError("checkpoint_every_n_epochs cannot be negative.")
+    if not math.isfinite(float(training.weight_decay)) or float(
+        training.weight_decay
+    ) < 0.0:
+        raise ValueError("weight_decay must be a finite nonnegative value.")
     if int(training.num_nodes) < 1:
         raise ValueError("num_nodes must be at least 1.")
     accelerator = str(training.accelerator).strip().lower()
@@ -677,7 +698,7 @@ def _make_model(
         )
         metrics = [MixedTaskMetric(task_types)]
 
-    return models.MPNN(
+    return WeightDecayMPNN(
         message_passing=message_passing,
         agg=nn.MeanAggregation(),
         predictor=predictor,
@@ -687,6 +708,7 @@ def _make_model(
         init_lr=float(config.model.init_lr),
         max_lr=float(config.model.max_lr),
         final_lr=float(config.model.final_lr),
+        weight_decay=float(config.training.weight_decay),
     )
 
 
