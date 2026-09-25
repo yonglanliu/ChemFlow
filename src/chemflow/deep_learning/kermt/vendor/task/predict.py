@@ -244,6 +244,13 @@ def make_predictions(args: Namespace, newest_train_args=None, smiles: List[str] 
     # Use train_args.num_tasks since args.num_tasks may be 0 for blinded test data
     num_tasks = train_args.num_tasks if hasattr(train_args, 'num_tasks') else args.num_tasks
     sum_preds = np.zeros((len(test_data), num_tasks))
+    mc_dropout_samples = int(getattr(args, 'mc_dropout_samples', 0))
+    if mc_dropout_samples == 1 or mc_dropout_samples < 0:
+        raise ValueError('mc_dropout_samples must be 0 or at least 2.')
+    mc_sum_preds = (
+        np.zeros((mc_dropout_samples, len(test_data), num_tasks), dtype=float)
+        if mc_dropout_samples >= 2 else None
+    )
     print(f'Predicting...')
     shared_dict = {}
     # loss_func = torch.nn.BCEWithLogitsLoss()
@@ -266,6 +273,20 @@ def make_predictions(args: Namespace, newest_train_args=None, smiles: List[str] 
             return model_preds
 
         sum_preds += np.array(model_preds, dtype=float)
+        if mc_sum_preds is not None:
+            for sample_index in range(mc_dropout_samples):
+                mc_preds, _ = predict(
+                    model=model,
+                    data=test_data,
+                    batch_size=args.batch_size,
+                    scaler=scaler,
+                    shared_dict=shared_dict,
+                    args=args,
+                    logger=logger,
+                    loss_func=None,
+                    mc_dropout=True,
+                )
+                mc_sum_preds[sample_index] += np.asarray(mc_preds, dtype=float)
         count += 1
 
     # Ensemble predictions
@@ -277,6 +298,13 @@ def make_predictions(args: Namespace, newest_train_args=None, smiles: List[str] 
     # Put Nones for invalid smiles
     args.valid_indices = valid_indices
     avg_preds = np.array(avg_preds)
+    if mc_sum_preds is not None:
+        mc_draws = mc_sum_preds / len(args.checkpoint_paths)
+        args.prediction_uncertainty = {
+            'direct': avg_preds,
+            'mc_mean': mc_draws.mean(axis=0),
+            'mc_std': mc_draws.std(axis=0, ddof=1),
+        }
     test_smiles = full_data.smiles()
     return avg_preds, test_smiles
 

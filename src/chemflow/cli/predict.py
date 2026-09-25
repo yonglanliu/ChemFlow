@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from statistics import NormalDist
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from chemflow.machine_learning.predict.predictor import (
@@ -652,6 +654,196 @@ def predict_chemberta(args) -> None:
     print(f"ChemBERTa predictions saved to {output_path}")
 
 
+def predict_kermt(args) -> None:
+    """Run inference with one or more trained KERMT checkpoints."""
+    from chemflow.deep_learning.kermt.vendor.task import predict as kermt_predict
+
+    if not 0.0 < args.calibration_confidence < 1.0:
+        raise ValueError("calibration_confidence must be between 0 and 1.")
+
+    input_frame = load_inference_input(
+        smiles=args.smiles,
+        input_path=args.input,
+        structure_column=args.structure_column,
+    )
+
+    if args.checkpoint_path:
+        checkpoint_paths = [
+            str(Path(args.checkpoint_path).expanduser().resolve())
+        ]
+        if not Path(checkpoint_paths[0]).is_file():
+            raise FileNotFoundError(
+                f"KERMT checkpoint not found: {checkpoint_paths[0]}"
+            )
+    else:
+        checkpoint_dir = Path(args.checkpoint_dir).expanduser().resolve()
+        if not checkpoint_dir.is_dir():
+            raise FileNotFoundError(
+                f"KERMT checkpoint directory not found: {checkpoint_dir}"
+            )
+        checkpoint_paths = sorted(
+            str(path)
+            for path in checkpoint_dir.rglob("*.pt")
+            if path.name != "last_checkpoint.pt"
+        )
+        if not checkpoint_paths:
+            raise FileNotFoundError(
+                f"No KERMT model checkpoints found in: {checkpoint_dir}"
+            )
+
+    if args.device == "cuda" and not kermt_predict.torch.cuda.is_available():
+        raise RuntimeError("KERMT requested CUDA, but CUDA is unavailable.")
+    use_cuda = args.device == "cuda" or (
+        args.device == "auto" and kermt_predict.torch.cuda.is_available()
+    )
+
+    vendor_args = argparse.Namespace(
+        checkpoint_paths=checkpoint_paths,
+        checkpoint_path=None,
+        checkpoint_dir=None,
+        cuda=use_cuda,
+        gpu=0 if use_cuda else None,
+        batch_size=args.batch_size,
+        mc_dropout_samples=args.mc_dropout_samples,
+        data_path=None,
+        use_compound_names=False,
+        fingerprint=False,
+    )
+    predictions, _ = kermt_predict.make_predictions(
+        vendor_args,
+        smiles=input_frame[args.structure_column].astype(str).tolist(),
+    )
+    checkpoint_task_names = list(vendor_args.task_names)
+    coverage_label = int(round(args.calibration_confidence * 100))
+    uncertainty = getattr(vendor_args, "prediction_uncertainty", None)
+    if uncertainty is None:
+        prediction_frame = pd.DataFrame(
+            predictions,
+            columns=checkpoint_task_names,
+        )
+    else:
+        direct = np.asarray(uncertainty["direct"], dtype=float)
+        mc_mean = np.asarray(uncertainty["mc_mean"], dtype=float)
+        mc_std = np.asarray(uncertainty["mc_std"], dtype=float)
+        prediction_frame = pd.DataFrame(
+            {
+                **{
+                    f"direct_{name}": direct[:, index]
+                    for index, name in enumerate(checkpoint_task_names)
+                },
+                **{
+                    f"mc_mean_{name}": mc_mean[:, index]
+                    for index, name in enumerate(checkpoint_task_names)
+                },
+                **{
+                    f"mc_std_{name}": mc_std[:, index]
+                    for index, name in enumerate(checkpoint_task_names)
+                },
+                **{
+                    name: mc_mean[:, index]
+                    for index, name in enumerate(checkpoint_task_names)
+                },
+            }
+        )
+        z_value = NormalDist().inv_cdf(
+            0.5 + args.calibration_confidence / 2.0
+        )
+        for index, name in enumerate(checkpoint_task_names):
+            prediction_frame[f"{name}_mc_lower_{coverage_label}"] = (
+                mc_mean[:, index] - z_value * mc_std[:, index]
+            )
+            prediction_frame[f"{name}_mc_upper_{coverage_label}"] = (
+                mc_mean[:, index] + z_value * mc_std[:, index]
+            )
+
+    if args.calibration_input:
+        calibration_frame = load_inference_input(
+            smiles=None,
+            input_path=args.calibration_input,
+            structure_column=args.structure_column,
+        )
+        missing_targets = [
+            name for name in checkpoint_task_names
+            if name not in calibration_frame.columns
+        ]
+        if missing_targets:
+            raise KeyError(
+                "Calibration input is missing KERMT target columns: "
+                f"{missing_targets}"
+            )
+        calibration_predictions, _ = kermt_predict.make_predictions(
+            vendor_args,
+            smiles=calibration_frame[args.structure_column].astype(str).tolist(),
+        )
+        calibration_uncertainty = getattr(
+            vendor_args, "prediction_uncertainty", None
+        )
+        calibration_values = np.asarray(
+            calibration_uncertainty["mc_mean"]
+            if calibration_uncertainty is not None
+            else calibration_predictions,
+            dtype=float,
+        )
+        prediction_values = np.asarray(
+            uncertainty["mc_mean"] if uncertainty is not None else predictions,
+            dtype=float,
+        )
+        for index, name in enumerate(checkpoint_task_names):
+            targets = pd.to_numeric(
+                calibration_frame[name], errors="coerce"
+            ).to_numpy(dtype=float)
+            values = calibration_values[:, index]
+            valid = np.isfinite(targets) & np.isfinite(values)
+            if not valid.any():
+                raise ValueError(
+                    f"Calibration target '{name}' has no finite labeled rows."
+                )
+            bias = float(np.median(targets[valid] - values[valid]))
+            residuals = np.abs(targets[valid] - values[valid] - bias)
+            radius = float(
+                np.quantile(
+                    residuals,
+                    min(
+                        1.0,
+                        np.ceil((len(residuals) + 1) * args.calibration_confidence)
+                        / len(residuals),
+                    ),
+                    method="higher",
+                )
+            )
+            calibrated = prediction_values[:, index] + bias
+            prediction_frame[f"calibrated_{name}"] = calibrated
+            prediction_frame[f"{name}_lower_{coverage_label}"] = calibrated - radius
+            prediction_frame[f"{name}_upper_{coverage_label}"] = calibrated + radius
+
+    if args.task_names:
+        if len(args.task_names) != len(checkpoint_task_names):
+            raise ValueError(
+                "--task-names must contain one name per KERMT target "
+                f"({len(checkpoint_task_names)} expected)."
+            )
+        rename_map = dict(zip(checkpoint_task_names, args.task_names))
+        prediction_frame.rename(columns=rename_map, inplace=True)
+
+    duplicate_columns = set(input_frame.columns) & set(prediction_frame.columns)
+    if duplicate_columns:
+        raise ValueError(
+            "Prediction output columns already exist in the input: "
+            f"{sorted(duplicate_columns)}. Use --task-names to rename outputs."
+        )
+    result_frame = pd.concat(
+        [input_frame.reset_index(drop=True), prediction_frame], axis=1
+    )
+    output_path = save_prediction_frame(result_frame, args.output)
+    print("\n" + "=" * 70)
+    print("KERMT PREDICTION COMPLETE")
+    print("=" * 70)
+    print(f"Input molecules: {len(input_frame):,}")
+    print(f"Checkpoint models: {len(checkpoint_paths):,}")
+    print(f"Prediction columns: {prediction_frame.columns.tolist()}")
+    print(f"Output: {output_path}")
+
+
 # ============================================================
 # Traditional ML parser
 # ============================================================
@@ -878,6 +1070,46 @@ def add_chemberta_predict_parser(model_subparsers) -> None:
     parser.set_defaults(func=predict_chemberta)
 
 
+def add_kermt_predict_parser(model_subparsers) -> None:
+    parser = model_subparsers.add_parser(
+        "kermt", help="Run inference with trained KERMT checkpoints."
+    )
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--smiles", type=str, default=None)
+    input_group.add_argument("--input", type=str, default=None)
+    parser.add_argument("--structure-column", default="SMILES")
+    checkpoint_group = parser.add_mutually_exclusive_group(required=True)
+    checkpoint_group.add_argument("--checkpoint-path")
+    checkpoint_group.add_argument("--checkpoint-dir")
+    parser.add_argument(
+        "--task-names",
+        nargs="+",
+        default=None,
+        help="Optional output names; defaults to names stored in the checkpoint.",
+    )
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--mc-dropout-samples",
+        type=int,
+        default=0,
+        help="Use at least 2 stochastic passes to emit MC mean/std intervals.",
+    )
+    parser.add_argument(
+        "--calibration-input",
+        default=None,
+        help="Labeled CSV/parquet used for validation residual calibration.",
+    )
+    parser.add_argument(
+        "--calibration-confidence",
+        type=float,
+        default=0.90,
+        help="Prediction interval coverage, between 0 and 1 (default: 0.90).",
+    )
+    parser.add_argument("--output", required=True)
+    parser.set_defaults(func=predict_kermt)
+
+
 # ============================================================
 # Main predict parser
 # ============================================================
@@ -931,3 +1163,4 @@ def add_predict_parser(
     )
     add_hf_graphormer_predict_parser(model_subparsers)
     add_chemberta_predict_parser(model_subparsers)
+    add_kermt_predict_parser(model_subparsers)

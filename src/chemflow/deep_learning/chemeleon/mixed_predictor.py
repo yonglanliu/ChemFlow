@@ -7,19 +7,77 @@ from chemprop.nn.metrics import ChempropMetric
 from chemprop.nn.predictors import _FFNPredictorBase
 
 
-class HuberLoss(ChempropMetric):
-    """Huber regression loss compatible with Chemprop predictor masking."""
+REGRESSION_LOSSES = ("l2", "mse", "mae", "huber", "nll", "gaussian_nll")
 
-    def __init__(self, task_weights=1.0, delta: float = 1.0):
-        super().__init__(task_weights=task_weights)
-        self.delta = float(delta)
 
-    def _calc_unreduced_loss(self, preds, targets, *args):
+def _regression_loss_values(
+    preds,
+    targets,
+    *,
+    name: str,
+    huber_delta: float,
+    nll_scale: float,
+    gaussian_nll_variance: float,
+):
+    """Calculate an unreduced point or fixed-noise regression loss."""
+    if name in {"l2", "mse"}:
+        return (preds - targets).square()
+    if name == "mae":
+        return (preds - targets).abs()
+    if name == "huber":
         return torch.nn.functional.huber_loss(
+            preds, targets, reduction="none", delta=huber_delta
+        )
+    if name == "nll":
+        scale = preds.new_tensor(nll_scale)
+        return (preds - targets).abs() / scale + torch.log(2.0 * scale)
+    if name == "gaussian_nll":
+        return torch.nn.functional.gaussian_nll_loss(
             preds,
             targets,
+            torch.full_like(preds, gaussian_nll_variance),
+            full=True,
             reduction="none",
-            delta=self.delta,
+        )
+    raise ValueError(f"Unsupported regression loss: {name!r}")
+
+
+class RegressionLoss(ChempropMetric):
+    """Configurable regression loss compatible with Chemprop masking."""
+
+    def __init__(
+        self,
+        task_weights=1.0,
+        name: str = "mse",
+        huber_delta: float = 1.0,
+        nll_scale: float = 1.0,
+        gaussian_nll_variance: float = 1.0,
+    ):
+        super().__init__(task_weights=task_weights)
+        self.name = str(name).strip().lower()
+        self.huber_delta = float(huber_delta)
+        self.nll_scale = float(nll_scale)
+        self.gaussian_nll_variance = float(gaussian_nll_variance)
+
+    def _calc_unreduced_loss(self, preds, targets, *args):
+        return _regression_loss_values(
+            preds,
+            targets,
+            name=self.name,
+            huber_delta=self.huber_delta,
+            nll_scale=self.nll_scale,
+            gaussian_nll_variance=self.gaussian_nll_variance,
+        )
+
+
+class HuberLoss(RegressionLoss):
+    """Backward-compatible Huber criterion used by existing callers."""
+
+    def __init__(self, task_weights=1.0, delta: float = 1.0):
+        super().__init__(
+            task_weights=task_weights,
+            name="huber",
+            huber_delta=delta,
         )
 
 
@@ -32,11 +90,15 @@ class MixedTaskLoss(ChempropMetric):
         task_weights=1.0,
         regression_loss: str = "mse",
         huber_delta: float = 1.0,
+        nll_scale: float = 1.0,
+        gaussian_nll_variance: float = 1.0,
     ):
         super().__init__(task_weights=task_weights)
         self.task_types = [str(value) for value in task_types]
         self.regression_loss = str(regression_loss).strip().lower()
         self.huber_delta = float(huber_delta)
+        self.nll_scale = float(nll_scale)
+        self.gaussian_nll_variance = float(gaussian_nll_variance)
 
     def _calc_unreduced_loss(self, preds, targets, *args):
         loss = torch.zeros_like(preds)
@@ -45,15 +107,15 @@ class MixedTaskLoss(ChempropMetric):
                 loss[:, index] = torch.nn.functional.binary_cross_entropy_with_logits(
                     preds[:, index], targets[:, index], reduction="none"
                 )
-            elif self.regression_loss == "huber":
-                loss[:, index] = torch.nn.functional.huber_loss(
+            else:
+                loss[:, index] = _regression_loss_values(
                     preds[:, index],
                     targets[:, index],
-                    reduction="none",
-                    delta=self.huber_delta,
+                    name=self.regression_loss,
+                    huber_delta=self.huber_delta,
+                    nll_scale=self.nll_scale,
+                    gaussian_nll_variance=self.gaussian_nll_variance,
                 )
-            else:
-                loss[:, index] = (preds[:, index] - targets[:, index]).square()
         return loss
 
 
@@ -66,11 +128,15 @@ class MixedTaskMetric(ChempropMetric):
         task_weights=1.0,
         regression_loss: str = "mse",
         huber_delta: float = 1.0,
+        nll_scale: float = 1.0,
+        gaussian_nll_variance: float = 1.0,
     ):
         super().__init__(task_weights=task_weights)
         self.task_types = [str(value) for value in task_types]
         self.regression_loss = str(regression_loss).strip().lower()
         self.huber_delta = float(huber_delta)
+        self.nll_scale = float(nll_scale)
+        self.gaussian_nll_variance = float(gaussian_nll_variance)
 
     def _calc_unreduced_loss(self, preds, targets, *args):
         loss = torch.zeros_like(preds)
@@ -81,15 +147,15 @@ class MixedTaskMetric(ChempropMetric):
                     targets[:, index],
                     reduction="none",
                 )
-            elif self.regression_loss == "huber":
-                loss[:, index] = torch.nn.functional.huber_loss(
+            else:
+                loss[:, index] = _regression_loss_values(
                     preds[:, index],
                     targets[:, index],
-                    reduction="none",
-                    delta=self.huber_delta,
+                    name=self.regression_loss,
+                    huber_delta=self.huber_delta,
+                    nll_scale=self.nll_scale,
+                    gaussian_nll_variance=self.gaussian_nll_variance,
                 )
-            else:
-                loss[:, index] = (preds[:, index] - targets[:, index]).square()
         return loss
 
 
@@ -108,6 +174,8 @@ class MixedTaskFFN(_FFNPredictorBase):
         criterion=None,
         regression_loss: str = "mse",
         huber_delta: float = 1.0,
+        nll_scale: float = 1.0,
+        gaussian_nll_variance: float = 1.0,
         **kwargs,
     ):
         self.task_types = [str(value) for value in task_types]
@@ -119,6 +187,8 @@ class MixedTaskFFN(_FFNPredictorBase):
             task_weights,
             regression_loss=regression_loss,
             huber_delta=huber_delta,
+            nll_scale=nll_scale,
+            gaussian_nll_variance=gaussian_nll_variance,
         )
         super().__init__(
             n_tasks=len(self.task_types),

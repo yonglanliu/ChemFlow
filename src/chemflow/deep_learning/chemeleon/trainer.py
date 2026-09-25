@@ -72,9 +72,10 @@ from chemflow.deep_learning.chemeleon.pretrained import (
     ensure_pretrained_weights,
 )
 from chemflow.deep_learning.chemeleon.mixed_predictor import (
-    HuberLoss,
     MixedTaskFFN,
     MixedTaskMetric,
+    REGRESSION_LOSSES,
+    RegressionLoss,
 )
 from chemflow.deep_learning.utils.train_utils import save_json, set_seed
 from chemflow.deep_learning.task_weighting import (
@@ -113,6 +114,8 @@ class TrainingConfig:
     weight_decay: float = 0.0
     regression_loss: str = "mse"
     huber_delta: float = 1.0
+    nll_scale: float = 1.0
+    gaussian_nll_variance: float = 1.0
     accelerator: str = "auto"
     devices: int | str = 1
     strategy: str = "auto"
@@ -384,12 +387,14 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
     ) < 0.0:
         raise ValueError("weight_decay must be a finite nonnegative value.")
     training.regression_loss = str(training.regression_loss).strip().lower()
-    if training.regression_loss not in {"mse", "huber"}:
-        raise ValueError("regression_loss must be either 'mse' or 'huber'.")
-    if not math.isfinite(float(training.huber_delta)) or float(
-        training.huber_delta
-    ) <= 0.0:
-        raise ValueError("huber_delta must be a finite positive value.")
+    if training.regression_loss not in REGRESSION_LOSSES:
+        raise ValueError(
+            f"regression_loss must be one of {list(REGRESSION_LOSSES)}."
+        )
+    for name in ("huber_delta", "nll_scale", "gaussian_nll_variance"):
+        value = float(getattr(training, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be a finite positive value.")
     if int(training.num_nodes) < 1:
         raise ValueError("num_nodes must be at least 1.")
     accelerator = str(training.accelerator).strip().lower()
@@ -662,14 +667,17 @@ def _make_model(
         scaler = train_dataset.normalize_targets()
         val_dataset.normalize_targets(scaler)
         output_transform = nn.UnscaleTransform.from_standard_scaler(scaler)
-        predictor_kwargs: dict[str, Any] = {}
-        if config.training.regression_loss == "huber":
-            predictor_kwargs["criterion"] = HuberLoss(
-                task_weights=torch.as_tensor(
-                    task_loss_weights, dtype=torch.float32
+        predictor_kwargs: dict[str, Any] = {
+            "criterion": RegressionLoss(
+                task_weights=torch.as_tensor(task_loss_weights, dtype=torch.float32),
+                name=config.training.regression_loss,
+                huber_delta=float(config.training.huber_delta),
+                nll_scale=float(config.training.nll_scale),
+                gaussian_nll_variance=float(
+                    config.training.gaussian_nll_variance
                 ),
-                delta=float(config.training.huber_delta),
             )
+        }
         predictor = nn.RegressionFFN(
             n_tasks=n_tasks,
             input_dim=message_passing.output_dim,
@@ -716,12 +724,18 @@ def _make_model(
             task_weights=torch.as_tensor(task_loss_weights, dtype=torch.float32),
             regression_loss=config.training.regression_loss,
             huber_delta=float(config.training.huber_delta),
+            nll_scale=float(config.training.nll_scale),
+            gaussian_nll_variance=float(config.training.gaussian_nll_variance),
         )
         metrics = [
             MixedTaskMetric(
                 task_types,
                 regression_loss=config.training.regression_loss,
                 huber_delta=float(config.training.huber_delta),
+                nll_scale=float(config.training.nll_scale),
+                gaussian_nll_variance=float(
+                    config.training.gaussian_nll_variance
+                ),
             )
         ]
 
