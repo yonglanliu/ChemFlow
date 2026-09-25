@@ -369,7 +369,21 @@ def smiles_to_graph_batch(smiles_list: List[str], args: argparse.Namespace) -> T
         Graph batch tuple
     """
     shared_dict = {}
-    batch_graph = mol2graph(smiles_list, shared_dict, args)
+    if getattr(args, "use_cuikmolmaker_featurization", False):
+        from chemflow.deep_learning.kermt.vendor.kermt.data.kermtdataset import (
+            setup_cuik_molmaker_features,
+        )
+
+        cmm_tensors, cmm_feature_range = setup_cuik_molmaker_features(args)
+        batch_graph = mol2graph(
+            smiles_list,
+            shared_dict,
+            args,
+            cmm_feature_range=cmm_feature_range,
+            cmm_tensors=cmm_tensors,
+        )
+    else:
+        batch_graph = mol2graph(smiles_list, shared_dict, args)
     return batch_graph.get_components()
 
 
