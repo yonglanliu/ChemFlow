@@ -96,21 +96,6 @@ def _extract_embeddings(
 ) -> tuple[np.ndarray, np.ndarray]:
     smiles = frame[smiles_column].astype(str).tolist()
 
-    from chemflow.deep_learning.chemeleon.predictor import CheMeleonPredictor
-
-    print("Extracting CheMeleon embeddings", flush=True)
-    chemeleon = CheMeleonPredictor(chemeleon_checkpoint, device=device)
-    for parameter in chemeleon.model.parameters():
-        parameter.requires_grad_(False)
-    chemeleon_output = chemeleon.predict_smiles(
-        smiles,
-        batch_size=batch_size,
-        return_embeddings=True,
-    )
-    chemeleon_embeddings = np.asarray(chemeleon_output["embedding"], dtype=np.float32)
-    del chemeleon, chemeleon_output
-    _release_encoder()
-
     from chemflow.deep_learning.kermt.vendor.task.extract_embeddings import (
         extract_all_embeddings,
         load_encoder_from_checkpoint,
@@ -133,24 +118,65 @@ def _extract_embeddings(
     missing_types = sorted(set(kermt_embedding_types) - set(kermt_output))
     if missing_types:
         raise KeyError(f"KERMT embeddings not available: {missing_types}")
-    kermt_embeddings = np.concatenate(
+    kermt_valid = np.asarray(kermt_valid, dtype=bool)
+    kermt_valid_indices = np.flatnonzero(kermt_valid)
+    kermt_embeddings_valid = np.concatenate(
         [np.asarray(kermt_output[name], dtype=np.float32) for name in kermt_embedding_types],
         axis=1,
     )
+    kermt_embeddings = np.full(
+        (len(smiles), kermt_embeddings_valid.shape[1]),
+        np.nan,
+        dtype=np.float32,
+    )
+    kermt_embeddings[kermt_valid_indices] = kermt_embeddings_valid[kermt_valid_indices]
+    kermt_smiles = [smiles[index] for index in kermt_valid_indices]
     print(
-        "Full frozen embedding dimensions: "
-        f"CheMeleon={chemeleon_embeddings.shape[1]}, "
-        f"KERMT={kermt_embeddings.shape[1]}, "
-        f"combined={chemeleon_embeddings.shape[1] + kermt_embeddings.shape[1]}",
+        f"KERMT accepted {len(kermt_smiles):,}/{len(smiles):,} molecules; "
+        "CheMeleon will process only this accepted subset.",
         flush=True,
     )
     del kermt_encoder, kermt_readout, kermt_args, kermt_output
     _release_encoder()
 
-    valid = np.isfinite(chemeleon_embeddings).all(axis=1)
-    valid &= np.asarray(kermt_valid, dtype=bool)
-    valid &= np.isfinite(kermt_embeddings).all(axis=1)
-    return np.concatenate([chemeleon_embeddings, kermt_embeddings], axis=1), valid
+    from chemflow.deep_learning.chemeleon.predictor import CheMeleonPredictor
+
+    print("Extracting CheMeleon embeddings", flush=True)
+    chemeleon = CheMeleonPredictor(chemeleon_checkpoint, device=device)
+    for parameter in chemeleon.model.parameters():
+        parameter.requires_grad_(False)
+    chemeleon_output = chemeleon.predict_smiles(
+        kermt_smiles,
+        batch_size=batch_size,
+        return_embeddings=True,
+    )
+    chemeleon_embeddings_valid = np.asarray(
+        chemeleon_output["embedding"], dtype=np.float32
+    )
+    chemeleon_valid = np.isfinite(chemeleon_embeddings_valid).all(axis=1)
+    chemeleon_valid_indices = kermt_valid_indices[chemeleon_valid]
+    chemeleon_embeddings = np.full(
+        (len(smiles), chemeleon_embeddings_valid.shape[1]),
+        np.nan,
+        dtype=np.float32,
+    )
+    chemeleon_embeddings[chemeleon_valid_indices] = (
+        chemeleon_embeddings_valid[chemeleon_valid]
+    )
+    del chemeleon, chemeleon_output
+    _release_encoder()
+
+    valid = np.zeros(len(smiles), dtype=bool)
+    valid[chemeleon_valid_indices] = True
+    combined = np.concatenate([chemeleon_embeddings, kermt_embeddings], axis=1)
+    print(
+        f"Both encoders accepted {int(valid.sum()):,}/{len(smiles):,} molecules. "
+        "Full frozen embedding dimensions: "
+        f"CheMeleon={chemeleon_embeddings.shape[1]}, "
+        f"KERMT={kermt_embeddings.shape[1]}, combined={combined.shape[1]}",
+        flush=True,
+    )
+    return combined, valid
 
 
 def _split_indices(size: int, val_fraction: float, test_fraction: float, seed: int):
@@ -535,6 +561,9 @@ class FusionTrainer:
             test_targets = test_targets_all[valid_test]
             if len(test_embeddings) == 0:
                 raise ValueError("External test dataset has no valid molecules.")
+        clean_dir = workdir / "prepared_data"
+        clean_dir.mkdir(parents=True, exist_ok=True)
+        clean_training_frame = frame.loc[valid_train].reset_index(drop=True)
         np.savez_compressed(
             workdir / "embeddings.npz",
             embeddings=embeddings,
@@ -551,6 +580,26 @@ class FusionTrainer:
             float(self.dataset.get("val_fraction", 0.1)),
             float(self.dataset.get("test_fraction", 0.1)),
             int(self.base.get("seed", 42)),
+        )
+        clean_training_frame.iloc[splits["train"]].to_csv(
+            clean_dir / "train.csv", index=False
+        )
+        clean_training_frame.iloc[splits["val"]].to_csv(
+            clean_dir / "val.csv", index=False
+        )
+        if test_frame is not None:
+            test_frame.loc[valid_test].to_csv(clean_dir / "test.csv", index=False)
+        else:
+            clean_training_frame.iloc[splits["test"]].to_csv(
+                clean_dir / "test.csv", index=False
+            )
+        print(
+            "Prepared filtered fusion datasets: "
+            f"train={len(splits['train']):,}, "
+            f"val={len(splits['val']):,}, "
+            f"test={len(test_embeddings) if test_embeddings is not None else len(splits['test']):,}; "
+            f"directory={clean_dir}",
+            flush=True,
         )
         resume_checkpoint = None
         if bool(self.fusion.get("resume", False)):
