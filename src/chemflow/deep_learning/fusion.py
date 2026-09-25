@@ -33,14 +33,22 @@ class FusionHead(nn.Module):
         hidden_dim: int,
         output_dim: int,
         dropout: float = 0.0,
+        head_type: str = "mlp",
     ):
         super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, output_dim),
-        )
+        head_type = str(head_type).strip().lower()
+        if head_type == "linear":
+            self.network = nn.Linear(input_dim, output_dim)
+        elif head_type == "mlp":
+            self.network = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, output_dim),
+            )
+        else:
+            raise ValueError("head_type must be 'linear' or 'mlp'.")
+        self.head_type = head_type
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         return self.network(values)
@@ -290,6 +298,7 @@ def _fit_head(
     task_loss_weights: list[float] | dict[str, float] | None,
     lr_scheduler: str,
     min_learning_rate: float,
+    head_type: str,
     device: str,
 ) -> tuple[FusionHead, dict[str, Any]]:
     train_indices = splits["train"]
@@ -321,7 +330,11 @@ def _fit_head(
     if not 0.0 <= dropout < 1.0:
         raise ValueError("Fusion head dropout must be between 0 and 1.")
     model = FusionHead(
-        embeddings.shape[1], hidden_dim, targets.shape[1], dropout=dropout
+        embeddings.shape[1],
+        hidden_dim,
+        targets.shape[1],
+        dropout=dropout,
+        head_type=head_type,
     ).to(device)
     if resume_checkpoint is not None:
         state = torch.load(resume_checkpoint, map_location="cpu", weights_only=False)
@@ -479,6 +492,7 @@ def _fit_head(
         "task_loss_weights": resolved_task_weights.tolist(),
         "lr_scheduler": lr_scheduler,
         "min_learning_rate": min_learning_rate,
+        "head_type": head_type,
         "history": history,
     }
     return model.cpu(), metadata
@@ -705,6 +719,7 @@ class FusionTrainer:
             min_learning_rate=float(
                 self.fusion.get("min_learning_rate", 1e-5)
             ),
+            head_type=str(self.fusion.get("head_type", "mlp")),
             device=device,
         )
         history = pd.DataFrame(metadata.pop("history", []))
@@ -825,6 +840,7 @@ class FusionTrainer:
                 "kermt_embedding_types": list(embedding_types),
                 "input_dim": embeddings.shape[1],
                 "hidden_dim": int(self.fusion.get("hidden_dim", 512)),
+                "head_type": str(self.fusion.get("head_type", "mlp")),
                 "dropout": float(self.fusion.get("dropout", 0.0)),
                 "regression_loss": str(
                     self.fusion.get("regression_loss", "mse")
