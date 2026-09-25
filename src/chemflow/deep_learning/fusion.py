@@ -91,7 +91,8 @@ def _extract_embeddings(
     chemeleon_checkpoint: Path,
     kermt_checkpoint: Path,
     kermt_embedding_types: tuple[str, ...],
-    batch_size: int,
+    kermt_batch_size: int,
+    chemeleon_batch_size: int,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     smiles = frame[smiles_column].astype(str).tolist()
@@ -112,7 +113,7 @@ def _extract_embeddings(
         kermt_readout,
         smiles,
         kermt_args,
-        batch_size=batch_size,
+        batch_size=kermt_batch_size,
         device=device,
     )
     missing_types = sorted(set(kermt_embedding_types) - set(kermt_output))
@@ -147,8 +148,9 @@ def _extract_embeddings(
         parameter.requires_grad_(False)
     chemeleon_output = chemeleon.predict_smiles(
         kermt_smiles,
-        batch_size=batch_size,
+        batch_size=chemeleon_batch_size,
         return_embeddings=True,
+        show_progress=True,
     )
     chemeleon_embeddings_valid = np.asarray(
         chemeleon_output["embedding"], dtype=np.float32
@@ -586,7 +588,13 @@ class FusionTrainer:
             chemeleon_checkpoint,
             kermt_checkpoint,
             embedding_types,
-            int(self.fusion.get("batch_size", 64)),
+            int(
+                self.fusion.get(
+                    "kermt_batch_size",
+                    self.fusion.get("batch_size", 64),
+                )
+            ),
+            int(self.fusion.get("chemeleon_batch_size", 64)),
             device,
         )
         valid_train = valid_train_targets & valid_embeddings[:train_count]
@@ -665,7 +673,12 @@ class FusionTrainer:
             splits,
             hidden_dim=int(self.fusion.get("hidden_dim", 512)),
             epochs=int(self.fusion.get("epochs", 100)),
-            batch_size=int(self.fusion.get("head_batch_size", 128)),
+            batch_size=int(
+                self.fusion.get(
+                    "head_batch_size",
+                    self.fusion.get("batch_size", 128),
+                )
+            ),
             learning_rate=float(self.fusion.get("learning_rate", 1e-3)),
             weight_decay=float(self.fusion.get("weight_decay", 1e-4)),
             dropout=float(self.fusion.get("dropout", 0.0)),

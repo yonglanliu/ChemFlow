@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from chemprop import data, featurizers, models
 from rdkit import Chem
+from tqdm.auto import tqdm
 
 from chemflow.deep_learning.chemeleon.applicability import (
     DEFAULT_CALIBRATION_CONFIDENCE,
@@ -182,6 +183,7 @@ class CheMeleonPredictor:
         num_workers: int = 0,
         task_names: list[str] | None = None,
         return_embeddings: bool = False,
+        show_progress: bool = False,
     ) -> dict[str, np.ndarray]:
         names = self.target_names if task_names is None else list(task_names)
         if len(names) != len(self.target_names):
@@ -222,8 +224,15 @@ class CheMeleonPredictor:
             embedding_batches: list[torch.Tensor] = []
             mc_batches: list[torch.Tensor] = []
             mc_std_batches: list[torch.Tensor] = []
+            batches_iterator = loader
+            if show_progress:
+                batches_iterator = tqdm(
+                    loader,
+                    total=len(loader),
+                    desc="Extracting CheMeleon embeddings",
+                )
             with torch.inference_mode():
-                for batch_index, batch in enumerate(loader):
+                for batch_index, batch in enumerate(batches_iterator):
                     batch = self.model.transfer_batch_to_device(
                         batch, self.device, 0
                     )
