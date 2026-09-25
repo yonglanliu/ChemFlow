@@ -183,7 +183,11 @@ def make_predictions(args: Namespace, newest_train_args=None, smiles: List[str] 
     # Use task_names from checkpoint for blinded test data (no target columns)
     args.task_names = train_args.task_names if hasattr(train_args, 'task_names') else get_task_names(args.data_path)
     if smiles is not None:
-        test_data = get_data_from_smiles(smiles=smiles, skip_invalid_smiles=False)
+        test_data = get_data_from_smiles(
+            smiles=smiles,
+            skip_invalid_smiles=False,
+            args=args,
+        )
     else:
         test_data = get_data(path=args.data_path, args=args,
                              use_compound_names=args.use_compound_names, skip_invalid_smiles=False)
