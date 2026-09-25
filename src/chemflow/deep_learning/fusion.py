@@ -422,7 +422,7 @@ def _fit_head(
             validation_prediction = validation_prediction.cpu().numpy()
         target_scale_array = np.asarray(target_scale)
         target_mean_array = np.asarray(target_mean)
-        train_metrics, _ = _task_metrics(
+        train_metrics, train_text = _task_metrics(
             train_prediction * target_scale_array + target_mean_array,
             targets[train_indices],
             target_names,
@@ -448,13 +448,14 @@ def _fit_head(
                 **train_metrics,
                 **validation_metrics,
             })
-        if epoch == 0 or (epoch + 1) % max(1, epochs // 10) == 0:
-            print(
-                f"Fusion epoch {epoch + 1}/{epochs}: "
-                f"train_loss={np.mean(losses):.6f}, val_loss={validation_loss:.6f}; "
-                f"validation metrics: {validation_text}",
-                flush=True,
-            )
+        print(
+            f"Fusion epoch {epoch + 1}/{epochs}: "
+            f"train_loss={np.mean(losses):.6f}, val_loss={validation_loss:.6f}, "
+            f"learning_rate={optimizer.param_groups[0]['lr']:.6g}\n"
+            f"  train metrics: {train_text}\n"
+            f"  validation metrics: {validation_text}",
+            flush=True,
+        )
         if early_stopping_patience > 0 and bad_epochs >= early_stopping_patience:
             print(
                 f"Fusion early stopping at epoch {epoch + 1} "
@@ -790,21 +791,30 @@ class FusionTrainer:
                 output[f"direct_{name}"] = direct[:, index]
                 output[f"mc_mean_{name}"] = mc_mean[:, index]
                 output[f"mc_std_{name}"] = mc_std[:, index]
-                output[f"{name}_prediction"] = mc_mean[:, index]
+                output[f"{name}_prediction"] = direct[:, index]
+                output[f"{name}_mc_prediction"] = mc_mean[:, index]
                 output[f"calibrated_{name}"] = calibrated
                 output[f"{name}_lower_{coverage_label}"] = calibrated - radius
                 output[f"{name}_upper_{coverage_label}"] = calibrated + radius
-                output[f"{name}_error"] = mc_mean[:, index] - evaluation_targets[:, index]
+                output[f"{name}_error"] = direct[:, index] - evaluation_targets[:, index]
+                output[f"{name}_mc_error"] = mc_mean[:, index] - evaluation_targets[:, index]
             output.to_csv(workdir / "test_predictions.csv", index=False)
-            _, test_metrics_text = _task_metrics(
+            _, direct_metrics_text = _task_metrics(
+                direct,
+                evaluation_targets,
+                target_columns,
+                "test_direct",
+            )
+            _, mc_metrics_text = _task_metrics(
                 mc_mean,
                 evaluation_targets,
                 target_columns,
-                "test",
+                "test_mc",
             )
             print(
                 "Fusion test metrics: "
-                f"{test_metrics_text}; MC samples={mc_samples}",
+                f"direct={direct_metrics_text}; "
+                f"mc_mean={mc_metrics_text}; MC samples={mc_samples}",
                 flush=True,
             )
         checkpoint = workdir / "fusion_head.pt"
