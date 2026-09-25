@@ -13,6 +13,8 @@ import pandas as pd
 import torch
 from torch import nn
 
+from chemflow.deep_learning.task_weighting import resolve_task_loss_weights
+
 
 DEFAULT_KERMT_EMBEDDINGS = (
     "atom_from_atom",
@@ -25,11 +27,18 @@ DEFAULT_KERMT_EMBEDDINGS = (
 class FusionHead(nn.Module):
     """Small trainable prediction head over concatenated frozen embeddings."""
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
 
@@ -161,6 +170,37 @@ def _split_indices(size: int, val_fraction: float, test_fraction: float, seed: i
     }
 
 
+def _elementwise_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    name: str,
+    huber_delta: float,
+    nll_scale: float,
+    gaussian_nll_variance: float,
+) -> torch.Tensor:
+    if name in {"l2", "mse"}:
+        return (prediction - target).square()
+    if name == "mae":
+        return (prediction - target).abs()
+    if name == "huber":
+        return nn.functional.smooth_l1_loss(
+            prediction, target, beta=huber_delta, reduction="none"
+        )
+    if name == "nll":
+        scale = torch.as_tensor(nll_scale, dtype=prediction.dtype, device=prediction.device)
+        return (prediction - target).abs() / scale + torch.log(scale)
+    if name == "gaussian_nll":
+        variance = torch.as_tensor(
+            gaussian_nll_variance,
+            dtype=prediction.dtype,
+            device=prediction.device,
+        )
+        return 0.5 * ((prediction - target).square() / variance + torch.log(variance))
+    raise ValueError(
+        "regression_loss must be one of l2, mse, mae, huber, nll, gaussian_nll."
+    )
+
+
 def _fit_head(
     embeddings: np.ndarray,
     targets: np.ndarray,
@@ -171,6 +211,17 @@ def _fit_head(
     batch_size: int,
     learning_rate: float,
     weight_decay: float,
+    dropout: float,
+    early_stopping_patience: int,
+    early_stopping_min_delta: float,
+    resume_checkpoint: Path | None,
+    target_names: list[str],
+    regression_loss: str,
+    huber_delta: float,
+    nll_scale: float,
+    gaussian_nll_variance: float,
+    task_loss_weighting: str,
+    task_loss_weights: list[float] | dict[str, float] | None,
     device: str,
 ) -> tuple[FusionHead, dict[str, Any]]:
     train_indices = splits["train"]
@@ -180,15 +231,34 @@ def _fit_head(
     target_mean = targets[train_indices].mean(axis=0)
     target_scale = targets[train_indices].std(axis=0)
     target_scale[target_scale < 1e-8] = 1.0
+    regression_loss = str(regression_loss).strip().lower()
+    if huber_delta <= 0.0 or nll_scale <= 0.0 or gaussian_nll_variance <= 0.0:
+        raise ValueError("Fusion loss scale parameters must be positive.")
+    _, resolved_task_weights = resolve_task_loss_weights(
+        targets[train_indices],
+        target_names,
+        strategy=task_loss_weighting,
+        configured=task_loss_weights,
+    )
+    task_weights = torch.as_tensor(resolved_task_weights, dtype=torch.float32, device=device)
 
     normalized_embeddings = (embeddings - embedding_mean) / embedding_scale
     normalized_targets = (targets - target_mean) / target_scale
-    model = FusionHead(embeddings.shape[1], hidden_dim, targets.shape[1]).to(device)
+    if not 0.0 <= dropout < 1.0:
+        raise ValueError("Fusion head dropout must be between 0 and 1.")
+    model = FusionHead(
+        embeddings.shape[1], hidden_dim, targets.shape[1], dropout=dropout
+    ).to(device)
+    if resume_checkpoint is not None:
+        state = torch.load(resume_checkpoint, map_location="cpu", weights_only=False)
+        model.load_state_dict(state["state_dict"])
+        print(f"Resumed fusion head from {resume_checkpoint}", flush=True)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     best_state = None
     best_validation = float("inf")
+    bad_epochs = 0
     rng = np.random.default_rng(0)
     for epoch in range(epochs):
         model.train()
@@ -199,7 +269,15 @@ def _fit_head(
             x = torch.as_tensor(normalized_embeddings[batch], dtype=torch.float32, device=device)
             y = torch.as_tensor(normalized_targets[batch], dtype=torch.float32, device=device)
             optimizer.zero_grad()
-            loss = nn.functional.mse_loss(model(x), y)
+            elementwise = _elementwise_loss(
+                model(x),
+                y,
+                regression_loss,
+                huber_delta,
+                nll_scale,
+                gaussian_nll_variance,
+            )
+            loss = (elementwise.mean(dim=0) * task_weights).mean()
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
@@ -211,18 +289,36 @@ def _fit_head(
             validation_y = torch.as_tensor(
                 normalized_targets[splits["val"]], dtype=torch.float32, device=device
             )
-            validation_loss = float(
-                nn.functional.mse_loss(model(validation_x), validation_y).cpu()
+            validation_elementwise = _elementwise_loss(
+                model(validation_x),
+                validation_y,
+                regression_loss,
+                huber_delta,
+                nll_scale,
+                gaussian_nll_variance,
             )
-        if validation_loss < best_validation:
+            validation_loss = float(
+                (validation_elementwise.mean(dim=0) * task_weights).mean().cpu()
+            )
+        if validation_loss < best_validation - early_stopping_min_delta:
             best_validation = validation_loss
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
         if epoch == 0 or (epoch + 1) % max(1, epochs // 10) == 0:
             print(
                 f"Fusion epoch {epoch + 1}/{epochs}: "
                 f"train_loss={np.mean(losses):.6f}, val_loss={validation_loss:.6f}",
                 flush=True,
             )
+        if early_stopping_patience > 0 and bad_epochs >= early_stopping_patience:
+            print(
+                f"Fusion early stopping at epoch {epoch + 1} "
+                f"after {bad_epochs} unimproved epochs.",
+                flush=True,
+            )
+            break
     if best_state is not None:
         model.load_state_dict(best_state)
     metadata = {
@@ -231,6 +327,10 @@ def _fit_head(
         "target_mean": target_mean.tolist(),
         "target_scale": target_scale.tolist(),
         "best_validation_loss": best_validation,
+        "dropout": dropout,
+        "regression_loss": regression_loss,
+        "task_loss_weighting": task_loss_weighting,
+        "task_loss_weights": resolved_task_weights.tolist(),
     }
     return model.cpu(), metadata
 
@@ -244,20 +344,47 @@ class FusionTrainer:
             raw = tomllib.load(stream)
         self.base = raw.get("BaseConfig", {})
         self.dataset = raw.get("DatasetConfig", {})
-        self.fusion = raw.get("FusionConfig", {})
+        self.fusion_config = raw.get("FusionConfig", {})
+        self.fusion_training = raw.get(
+            "FusionTrainingConfig",
+            raw.get("TrainingConfig", {}),
+        )
+        # Keep the original single-section format working while supporting
+        # the same model/training split used by the other deep-learning models.
+        self.fusion = {**self.fusion_config, **self.fusion_training}
         self.config_dir = self.config_path.parent
 
     def train(self) -> Path:
         workdir = _resolve(self.base.get("workdir", "./fusion_run"), self.config_dir)
         workdir.mkdir(parents=True, exist_ok=True)
         frame = _read_table(_resolve(self.dataset["dataset_path"], self.config_dir))
+        test_path = self.dataset.get("test_dataset_path")
+        test_frame = _read_table(_resolve(test_path, self.config_dir)) if test_path else None
+        if test_frame is not None and float(self.dataset.get("test_fraction", 0.0)) != 0.0:
+            raise ValueError("test_fraction must be 0 when test_dataset_path is configured.")
         smiles_column = str(self.dataset.get("smiles_column", "SMILES"))
         target_columns = self.dataset.get("target_column", "target")
         target_columns = [target_columns] if isinstance(target_columns, str) else list(target_columns)
-        if smiles_column not in frame or any(column not in frame for column in target_columns):
-            raise KeyError("Fusion dataset is missing the configured SMILES or target columns.")
-        targets = frame[target_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-        valid_targets = np.isfinite(targets).all(axis=1)
+        for dataset_name, dataset_frame in (("training", frame), ("test", test_frame)):
+            if dataset_frame is not None and (
+                smiles_column not in dataset_frame
+                or any(column not in dataset_frame for column in target_columns)
+            ):
+                raise KeyError(
+                    f"Fusion {dataset_name} dataset is missing the configured "
+                    "SMILES or target columns."
+                )
+        train_count = len(frame)
+        extraction_frame = (
+            pd.concat([frame, test_frame], ignore_index=True)
+            if test_frame is not None
+            else frame
+        )
+        all_targets = extraction_frame[target_columns].apply(
+            pd.to_numeric, errors="coerce"
+        ).to_numpy(dtype=float)
+        train_targets = all_targets[:train_count]
+        valid_train_targets = np.isfinite(train_targets).all(axis=1)
         device = _device(self.fusion.get("device", "auto"))
         embedding_types = tuple(self.fusion.get("kermt_embedding_types", DEFAULT_KERMT_EMBEDDINGS))
         chemeleon_checkpoint = _require_checkpoint(
@@ -268,8 +395,8 @@ class FusionTrainer:
             _resolve(self.fusion["kermt_checkpoint"], self.config_dir),
             "KERMT",
         )
-        embeddings, valid_embeddings = _extract_embeddings(
-            frame,
+        all_embeddings, valid_embeddings = _extract_embeddings(
+            extraction_frame,
             smiles_column,
             chemeleon_checkpoint,
             kermt_checkpoint,
@@ -277,18 +404,48 @@ class FusionTrainer:
             int(self.fusion.get("batch_size", 64)),
             device,
         )
-        valid = valid_targets & valid_embeddings
-        if valid.sum() < 3:
+        valid_train = valid_train_targets & valid_embeddings[:train_count]
+        if valid_train.sum() < 3:
             raise ValueError("Fusion training requires at least three valid molecules.")
-        embeddings = embeddings[valid]
-        targets = targets[valid]
-        np.savez_compressed(workdir / "embeddings.npz", embeddings=embeddings, targets=targets)
+        embeddings = all_embeddings[:train_count][valid_train]
+        targets = train_targets[valid_train]
+        test_embeddings = None
+        test_targets = None
+        if test_frame is not None:
+            test_targets_all = all_targets[train_count:]
+            valid_test = np.isfinite(test_targets_all).all(axis=1) & valid_embeddings[train_count:]
+            test_embeddings = all_embeddings[train_count:][valid_test]
+            test_targets = test_targets_all[valid_test]
+            if len(test_embeddings) == 0:
+                raise ValueError("External test dataset has no valid molecules.")
+        np.savez_compressed(
+            workdir / "embeddings.npz",
+            embeddings=embeddings,
+            targets=targets,
+            test_embeddings=test_embeddings
+            if test_embeddings is not None
+            else np.empty((0, embeddings.shape[1]), dtype=np.float32),
+            test_targets=test_targets
+            if test_targets is not None
+            else np.empty((0, targets.shape[1]), dtype=np.float32),
+        )
         splits = _split_indices(
             len(embeddings),
             float(self.dataset.get("val_fraction", 0.1)),
             float(self.dataset.get("test_fraction", 0.1)),
             int(self.base.get("seed", 42)),
         )
+        resume_checkpoint = None
+        if bool(self.fusion.get("resume", False)):
+            resume_value = self.fusion.get("resume_checkpoint")
+            resume_checkpoint = _resolve(
+                resume_value or workdir / "fusion_head.pt",
+                self.config_dir,
+            )
+            if not resume_checkpoint.is_file():
+                raise FileNotFoundError(
+                    f"Fusion resume checkpoint does not exist: {resume_checkpoint}"
+                )
         model, metadata = _fit_head(
             embeddings,
             targets,
@@ -298,8 +455,55 @@ class FusionTrainer:
             batch_size=int(self.fusion.get("head_batch_size", 128)),
             learning_rate=float(self.fusion.get("learning_rate", 1e-3)),
             weight_decay=float(self.fusion.get("weight_decay", 1e-4)),
+            dropout=float(self.fusion.get("dropout", 0.0)),
+            early_stopping_patience=int(
+                self.fusion.get("early_stopping_patience", 10)
+            ),
+            early_stopping_min_delta=float(
+                self.fusion.get("early_stopping_min_delta", 0.0)
+            ),
+            resume_checkpoint=resume_checkpoint,
+            target_names=target_columns,
+            regression_loss=str(self.fusion.get("regression_loss", "mse")),
+            huber_delta=float(self.fusion.get("huber_delta", 1.0)),
+            nll_scale=float(self.fusion.get("nll_scale", 1.0)),
+            gaussian_nll_variance=float(
+                self.fusion.get("gaussian_nll_variance", 1.0)
+            ),
+            task_loss_weighting=str(
+                self.fusion.get("task_loss_weighting", "uniform")
+            ),
+            task_loss_weights=self.fusion.get("task_loss_weights"),
             device=device,
         )
+        evaluation_embeddings = (
+            test_embeddings
+            if test_embeddings is not None
+            else embeddings[splits["test"]]
+        )
+        evaluation_targets = (
+            test_targets
+            if test_targets is not None
+            else targets[splits["test"]]
+        )
+        if len(evaluation_embeddings):
+            model.eval()
+            with torch.inference_mode():
+                normalized = (
+                    evaluation_embeddings
+                    - np.asarray(metadata["embedding_mean"])
+                ) / np.asarray(metadata["embedding_scale"])
+                prediction = model(torch.as_tensor(normalized, dtype=torch.float32))
+                prediction = (
+                    prediction.numpy() * np.asarray(metadata["target_scale"])
+                    + np.asarray(metadata["target_mean"])
+                )
+            print(
+                "Fusion test metrics: "
+                f"MAE={np.mean(np.abs(prediction - evaluation_targets)):.6f}, "
+                f"RMSE={np.sqrt(np.mean((prediction - evaluation_targets) ** 2)):.6f}",
+                flush=True,
+            )
         checkpoint = workdir / "fusion_head.pt"
         torch.save(
             {
@@ -308,6 +512,11 @@ class FusionTrainer:
                 "kermt_embedding_types": list(embedding_types),
                 "input_dim": embeddings.shape[1],
                 "hidden_dim": int(self.fusion.get("hidden_dim", 512)),
+                "dropout": float(self.fusion.get("dropout", 0.0)),
+                "regression_loss": str(
+                    self.fusion.get("regression_loss", "mse")
+                ),
+                "resume": bool(self.fusion.get("resume", False)),
                 "encoders_frozen": True,
                 "embedding_projection": None,
                 "encoder_device": device,
