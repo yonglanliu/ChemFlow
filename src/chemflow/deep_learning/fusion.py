@@ -222,6 +222,8 @@ def _fit_head(
     gaussian_nll_variance: float,
     task_loss_weighting: str,
     task_loss_weights: list[float] | dict[str, float] | None,
+    lr_scheduler: str,
+    min_learning_rate: float,
     device: str,
 ) -> tuple[FusionHead, dict[str, Any]]:
     train_indices = splits["train"]
@@ -256,9 +258,25 @@ def _fit_head(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
+    lr_scheduler = str(lr_scheduler).strip().lower()
+    if lr_scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, epochs),
+            eta_min=min_learning_rate,
+        )
+    elif lr_scheduler == "exponential":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+    elif lr_scheduler in {"constant", "none"}:
+        scheduler = None
+    else:
+        raise ValueError(
+            "lr_scheduler must be 'constant', 'cosine', or 'exponential'."
+        )
     best_state = None
     best_validation = float("inf")
     bad_epochs = 0
+    history: list[dict[str, float]] = []
     rng = np.random.default_rng(0)
     for epoch in range(epochs):
         model.train()
@@ -306,6 +324,14 @@ def _fit_head(
             bad_epochs = 0
         else:
             bad_epochs += 1
+        history.append(
+            {
+                "epoch": float(epoch + 1),
+                "train_loss": float(np.mean(losses)),
+                "val_loss": float(validation_loss),
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            }
+        )
         if epoch == 0 or (epoch + 1) % max(1, epochs // 10) == 0:
             print(
                 f"Fusion epoch {epoch + 1}/{epochs}: "
@@ -319,6 +345,8 @@ def _fit_head(
                 flush=True,
             )
             break
+        if scheduler is not None:
+            scheduler.step()
     if best_state is not None:
         model.load_state_dict(best_state)
     metadata = {
@@ -331,8 +359,50 @@ def _fit_head(
         "regression_loss": regression_loss,
         "task_loss_weighting": task_loss_weighting,
         "task_loss_weights": resolved_task_weights.tolist(),
+        "lr_scheduler": lr_scheduler,
+        "min_learning_rate": min_learning_rate,
+        "history": history,
     }
     return model.cpu(), metadata
+
+
+def _predict_head(
+    model: FusionHead,
+    embeddings: np.ndarray,
+    metadata: dict[str, Any],
+    *,
+    mc_samples: int,
+    device: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if mc_samples == 1 or mc_samples < 0:
+        raise ValueError("test_mc_dropout_samples must be 0 or at least 2.")
+    normalized = (
+        embeddings - np.asarray(metadata["embedding_mean"])
+    ) / np.asarray(metadata["embedding_scale"])
+    model = model.to(device)
+    values = torch.as_tensor(normalized, dtype=torch.float32, device=device)
+    model.eval()
+    with torch.inference_mode():
+        direct = model(values).cpu().numpy()
+        if mc_samples >= 2:
+            draws = []
+            model.train()
+            for _ in range(mc_samples):
+                draws.append(model(values).cpu().numpy())
+            model.eval()
+            draws_array = np.stack(draws, axis=0)
+            mean = draws_array.mean(axis=0)
+            standard_deviation = draws_array.std(axis=0, ddof=1)
+        else:
+            mean = direct.copy()
+            standard_deviation = np.zeros_like(direct)
+    target_scale = np.asarray(metadata["target_scale"])
+    target_mean = np.asarray(metadata["target_mean"])
+    return (
+        direct * target_scale + target_mean,
+        mean * target_scale + target_mean,
+        standard_deviation * target_scale,
+    )
 
 
 class FusionTrainer:
@@ -474,8 +544,26 @@ class FusionTrainer:
                 self.fusion.get("task_loss_weighting", "uniform")
             ),
             task_loss_weights=self.fusion.get("task_loss_weights"),
+            lr_scheduler=str(self.fusion.get("lr_scheduler", "cosine")),
+            min_learning_rate=float(
+                self.fusion.get("min_learning_rate", 1e-5)
+            ),
             device=device,
         )
+        history = pd.DataFrame(metadata.pop("history", []))
+        history.to_csv(workdir / "training_history.csv", index=False)
+        if bool(self.fusion.get("plot_training_history", True)) and not history.empty:
+            import matplotlib.pyplot as plt
+
+            figure, axis = plt.subplots(figsize=(8, 5))
+            axis.plot(history["epoch"], history["train_loss"], label="Training")
+            axis.plot(history["epoch"], history["val_loss"], label="Validation")
+            axis.set(xlabel="Epoch", ylabel="Loss", title="Fusion head training")
+            axis.legend()
+            figure.tight_layout()
+            figure.savefig(workdir / "training_curve.png", dpi=160)
+            plt.close(figure)
+
         evaluation_embeddings = (
             test_embeddings
             if test_embeddings is not None
@@ -487,21 +575,60 @@ class FusionTrainer:
             else targets[splits["test"]]
         )
         if len(evaluation_embeddings):
-            model.eval()
-            with torch.inference_mode():
-                normalized = (
-                    evaluation_embeddings
-                    - np.asarray(metadata["embedding_mean"])
-                ) / np.asarray(metadata["embedding_scale"])
-                prediction = model(torch.as_tensor(normalized, dtype=torch.float32))
-                prediction = (
-                    prediction.numpy() * np.asarray(metadata["target_scale"])
-                    + np.asarray(metadata["target_mean"])
+            mc_samples = int(self.fusion.get("test_mc_dropout_samples", 30))
+            confidence = float(
+                self.fusion.get("test_calibration_confidence", 0.90)
+            )
+            if not 0.0 < confidence < 1.0:
+                raise ValueError("test_calibration_confidence must be between 0 and 1.")
+            direct, mc_mean, mc_std = _predict_head(
+                model,
+                evaluation_embeddings,
+                metadata,
+                mc_samples=mc_samples,
+                device=device,
+            )
+            validation_direct, _, _ = _predict_head(
+                model,
+                embeddings[splits["val"]],
+                metadata,
+                mc_samples=0,
+                device=device,
+            )
+            validation_targets = targets[splits["val"]]
+            coverage_label = int(round(confidence * 100))
+            output = pd.DataFrame()
+            if test_frame is not None:
+                output[smiles_column] = test_frame.loc[valid_test, smiles_column].to_numpy()
+            else:
+                valid_training_frame = frame.loc[valid_train].reset_index(drop=True)
+                output[smiles_column] = valid_training_frame.loc[splits["test"], smiles_column].to_numpy()
+            for index, name in enumerate(target_columns):
+                bias = float(np.median(validation_targets[:, index] - validation_direct[:, index]))
+                residuals = np.abs(validation_targets[:, index] - validation_direct[:, index] - bias)
+                radius = float(
+                    np.quantile(
+                        residuals,
+                        min(1.0, np.ceil((len(residuals) + 1) * confidence) / len(residuals)),
+                        method="higher",
+                    )
                 )
+                calibrated = mc_mean[:, index] + bias
+                output[f"{name}_truth"] = evaluation_targets[:, index]
+                output[f"direct_{name}"] = direct[:, index]
+                output[f"mc_mean_{name}"] = mc_mean[:, index]
+                output[f"mc_std_{name}"] = mc_std[:, index]
+                output[f"{name}_prediction"] = mc_mean[:, index]
+                output[f"calibrated_{name}"] = calibrated
+                output[f"{name}_lower_{coverage_label}"] = calibrated - radius
+                output[f"{name}_upper_{coverage_label}"] = calibrated + radius
+                output[f"{name}_error"] = mc_mean[:, index] - evaluation_targets[:, index]
+            output.to_csv(workdir / "test_predictions.csv", index=False)
             print(
                 "Fusion test metrics: "
-                f"MAE={np.mean(np.abs(prediction - evaluation_targets)):.6f}, "
-                f"RMSE={np.sqrt(np.mean((prediction - evaluation_targets) ** 2)):.6f}",
+                f"MAE={np.mean(np.abs(mc_mean - evaluation_targets)):.6f}, "
+                f"RMSE={np.sqrt(np.mean((mc_mean - evaluation_targets) ** 2)):.6f}; "
+                f"MC samples={mc_samples}",
                 flush=True,
             )
         checkpoint = workdir / "fusion_head.pt"
@@ -515,6 +642,9 @@ class FusionTrainer:
                 "dropout": float(self.fusion.get("dropout", 0.0)),
                 "regression_loss": str(
                     self.fusion.get("regression_loss", "mse")
+                ),
+                "lr_scheduler": str(
+                    self.fusion.get("lr_scheduler", "cosine")
                 ),
                 "resume": bool(self.fusion.get("resume", False)),
                 "encoders_frozen": True,
