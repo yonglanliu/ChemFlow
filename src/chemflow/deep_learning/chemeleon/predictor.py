@@ -181,6 +181,7 @@ class CheMeleonPredictor:
         batch_size: int = 64,
         num_workers: int = 0,
         task_names: list[str] | None = None,
+        return_embeddings: bool = False,
     ) -> dict[str, np.ndarray]:
         names = self.target_names if task_names is None else list(task_names)
         if len(names) != len(self.target_names):
@@ -268,6 +269,15 @@ class CheMeleonPredictor:
             valid_direct_predictions = np.empty((0, len(names)), dtype=np.float32)
 
         output: dict[str, np.ndarray] = {}
+        if return_embeddings:
+            embedding_output = np.full(
+                (len(smiles_list), valid_embeddings.shape[1]),
+                np.nan,
+                dtype=np.float32,
+            )
+            if valid_embeddings.size:
+                embedding_output[np.asarray(valid_indices)] = valid_embeddings
+            output["embedding"] = embedding_output
         for task_index, name in enumerate(names):
             values = predictions[:, task_index]
             direct = np.full(len(smiles_list), np.nan, dtype=np.float32)

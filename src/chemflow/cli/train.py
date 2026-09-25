@@ -70,6 +70,16 @@ def train_chemeleon(args):
     trainer.train()
 
 
+def train_fusion(args):
+    """Train a head over sequentially extracted CheMeleon and KERMT embeddings."""
+    from chemflow.deep_learning.fusion import FusionTrainer
+
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    FusionTrainer(config_path).train()
+
+
 def train_chemberta(args):
     """Fine-tune ChemBERTa for molecular-property prediction."""
     from chemflow.deep_learning.chemberta.trainer import ChemBERTaTrainer
@@ -194,6 +204,13 @@ def add_train_parser(subparsers):
     chemeleon_parser.set_defaults(
         func=train_chemeleon
     )
+
+    fusion_parser = model_subparsers.add_parser(
+        "fusion",
+        help="Train a head over frozen CheMeleon and KERMT embeddings",
+    )
+    fusion_parser.add_argument("config", type=str)
+    fusion_parser.set_defaults(func=train_fusion)
 
     # ========================================================
     # LSTM
