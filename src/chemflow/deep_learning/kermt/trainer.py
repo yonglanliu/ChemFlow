@@ -18,6 +18,8 @@ import pandas as pd
 from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
+from chemflow.deep_learning.task_weighting import resolve_task_loss_weights
+
 from .pretrained import (
     KERMT_CHECKPOINT,
     KERMT_REPO_ID,
@@ -597,6 +599,26 @@ class KERMTTrainer:
             raise ValueError(
                 "TrainingConfig.gaussian_nll_variance must be positive."
             )
+        train_frame = _read_table(paths["train"])
+        task_loss_weighting = str(
+            self.training_cfg.get("task_loss_weighting", "uniform")
+        ).strip().lower()
+        _, task_loss_weights = resolve_task_loss_weights(
+            train_frame[self.targets].to_numpy(),
+            self.targets,
+            strategy=task_loss_weighting,
+            configured=self.training_cfg.get("task_loss_weights"),
+        )
+        ratio_base = float(task_loss_weights.min())
+        print(
+            "KERMT task loss weights: "
+            + ", ".join(
+                f"{name}={float(weight):.6f} "
+                f"(ratio={float(weight) / ratio_base:.3f}x)"
+                for name, weight in zip(self.targets, task_loss_weights)
+            ),
+            flush=True,
+        )
         fine_tune_coefficient = 0.0 if freeze_encoder else encoder_lr_multiplier
         command = [
             python_executable,
@@ -622,6 +644,8 @@ class KERMTTrainer:
             "--huber_delta", str(huber_delta),
             "--nll_scale", str(nll_scale),
             "--gaussian_nll_variance", str(gaussian_nll_variance),
+            "--task_loss_weighting", task_loss_weighting,
+            "--task_loss_weights", *[str(float(weight)) for weight in task_loss_weights],
             "--dist_coff", str(float(self.model_cfg.get("dist_coff", 0.15))),
             "--init_lr", str(float(self.training_cfg.get("init_lr", 1e-5))),
             "--max_lr", str(float(self.training_cfg.get("max_lr", 1e-4))),

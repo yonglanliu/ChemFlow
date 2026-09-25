@@ -236,6 +236,19 @@ def add_finetune_args(parser: ArgumentParser):
                              'Note: Defaults to "auc" for classification and "rmse" for regression.')
     parser.add_argument('--use_mtl_loss', action='store_true', default=False,
                         help='Use MTL loss function')
+    parser.add_argument(
+        '--task_loss_weighting',
+        choices=['uniform', 'sqrt_inverse_frequency', 'inverse_frequency'],
+        default='uniform',
+        help='Task loss weighting strategy for partially labeled multitask data.',
+    )
+    parser.add_argument(
+        '--task_loss_weights',
+        type=float,
+        nargs='+',
+        default=None,
+        help='Explicit positive task loss weights in task-column order.',
+    )
     parser.add_argument('--show_individual_scores', action='store_true', default=False,
                         help='Show all scores for individual targets, not just average, at the end')
     parser.add_argument('--task_wise_checkpoint', action='store_true', default=False,

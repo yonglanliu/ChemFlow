@@ -290,6 +290,18 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
         optimizer.zero_grad()
         preds = model(batch, features_batch)
         loss = loss_func(preds, targets) * class_weights * mask
+        task_loss_weights = torch.as_tensor(
+            getattr(args, "task_loss_weights", None)
+            or [1.0] * loss.shape[1],
+            dtype=loss.dtype,
+            device=loss.device,
+        )
+        if task_loss_weights.numel() != loss.shape[1]:
+            raise ValueError(
+                "task_loss_weights must contain one value per prediction task."
+            )
+        weighted_mask = mask * task_loss_weights
+        loss = loss * task_loss_weights
 
         if mtl_loss is not None:
             # Per-task mean loss. Under DDP the normalization must use the GLOBAL per-task
@@ -309,7 +321,7 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
             loss = mtl_loss(task_losses)
         else:
             # Same global-count normalization for the single pooled loss (see the MTL branch).
-            mask_sum = mask.sum()
+            mask_sum = weighted_mask.sum()
             if world_size > 1 and dist.is_initialized():
                 dist.all_reduce(mask_sum, op=dist.ReduceOp.SUM)
             loss = world_size * loss.sum() / torch.clamp(mask_sum, min=1.0)
@@ -469,6 +481,24 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
         torch.cuda.set_device(args.gpu)
 
     features_scaler, scaler, shared_dict, test_data, train_data, val_data = load_data(args, debug, logger)
+
+    if is_main:
+        task_loss_weights = [
+            float(weight)
+            for weight in getattr(args, "task_loss_weights", [1.0] * args.num_tasks)
+        ]
+        ratio_base = min(task_loss_weights)
+        info(
+            "KERMT task loss weighting: "
+            f"strategy={getattr(args, 'task_loss_weighting', 'uniform')}; "
+            + ", ".join(
+                f"{name}={weight:.6f} (ratio={weight / ratio_base:.3f}x)"
+                for name, weight in zip(
+                    args.task_names,
+                    task_loss_weights,
+                )
+            )
+        )
 
     # Default return value; overwritten with real scores on rank 0 after test eval.
     ensemble_scores = [float('nan')] * args.num_tasks
