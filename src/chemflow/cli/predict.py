@@ -658,9 +658,6 @@ def predict_kermt(args) -> None:
     """Run inference with one or more trained KERMT checkpoints."""
     from chemflow.deep_learning.kermt.vendor.task import predict as kermt_predict
 
-    if not 0.0 < args.calibration_confidence < 1.0:
-        raise ValueError("calibration_confidence must be between 0 and 1.")
-
     input_frame = load_inference_input(
         smiles=args.smiles,
         input_path=args.input,
@@ -704,7 +701,6 @@ def predict_kermt(args) -> None:
         cuda=use_cuda,
         gpu=0 if use_cuda else None,
         batch_size=args.batch_size,
-        mc_dropout_samples=args.mc_dropout_samples,
         data_path=None,
         use_compound_names=False,
         fingerprint=False,
@@ -714,7 +710,6 @@ def predict_kermt(args) -> None:
         smiles=input_frame[args.structure_column].astype(str).tolist(),
     )
     checkpoint_task_names = list(vendor_args.task_names)
-    coverage_label = int(round(args.calibration_confidence * 100))
     uncertainty = getattr(vendor_args, "prediction_uncertainty", None)
     if uncertainty is None:
         prediction_frame = pd.DataFrame(
@@ -745,6 +740,7 @@ def predict_kermt(args) -> None:
                 },
             }
         )
+        coverage_label = int(round(args.calibration_confidence * 100))
         z_value = NormalDist().inv_cdf(
             0.5 + args.calibration_confidence / 2.0
         )
@@ -1079,8 +1075,9 @@ def add_kermt_predict_parser(model_subparsers) -> None:
     input_group.add_argument("--input", type=str, default=None)
     parser.add_argument("--structure-column", default="SMILES")
     checkpoint_group = parser.add_mutually_exclusive_group(required=True)
-    checkpoint_group.add_argument("--checkpoint-path")
+    checkpoint_group.add_argument("--model-checkpoint")
     checkpoint_group.add_argument("--checkpoint-dir")
+    checkpoint_group.add_argument("--checkpoint-path")
     parser.add_argument(
         "--task-names",
         nargs="+",
