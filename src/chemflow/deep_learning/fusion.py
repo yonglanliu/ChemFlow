@@ -201,6 +201,32 @@ def _elementwise_loss(
     )
 
 
+def _task_metrics(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    names: list[str],
+    prefix: str,
+) -> tuple[dict[str, float], str]:
+    metrics: dict[str, float] = {}
+    rendered = []
+    for index, name in enumerate(names):
+        error = prediction[:, index] - target[:, index]
+        mae = float(np.mean(np.abs(error)))
+        rmse = float(np.sqrt(np.mean(error ** 2)))
+        centered = target[:, index] - target[:, index].mean()
+        denominator = float(np.sum(centered ** 2))
+        r2 = float(1.0 - np.sum(error ** 2) / denominator) if denominator else float("nan")
+        metrics.update(
+            {
+                f"{prefix}_{name}_mae": mae,
+                f"{prefix}_{name}_rmse": rmse,
+                f"{prefix}_{name}_r2": r2,
+            }
+        )
+        rendered.append(f"{name}:MAE={mae:.4f},RMSE={rmse:.4f},R2={r2:.4f}")
+    return metrics, "; ".join(rendered)
+
+
 def _fit_head(
     embeddings: np.ndarray,
     targets: np.ndarray,
@@ -307,8 +333,9 @@ def _fit_head(
             validation_y = torch.as_tensor(
                 normalized_targets[splits["val"]], dtype=torch.float32, device=device
             )
+            validation_prediction = model(validation_x)
             validation_elementwise = _elementwise_loss(
-                model(validation_x),
+                validation_prediction,
                 validation_y,
                 regression_loss,
                 huber_delta,
@@ -318,24 +345,44 @@ def _fit_head(
             validation_loss = float(
                 (validation_elementwise.mean(dim=0) * task_weights).mean().cpu()
             )
+            train_x = torch.as_tensor(
+                normalized_embeddings[train_indices], dtype=torch.float32, device=device
+            )
+            train_prediction = model(train_x).cpu().numpy()
+            validation_prediction = validation_prediction.cpu().numpy()
+        target_scale_array = np.asarray(target_scale)
+        target_mean_array = np.asarray(target_mean)
+        train_metrics, _ = _task_metrics(
+            train_prediction * target_scale_array + target_mean_array,
+            targets[train_indices],
+            target_names,
+            "train",
+        )
+        validation_metrics, validation_text = _task_metrics(
+            validation_prediction * target_scale_array + target_mean_array,
+            targets[splits["val"]],
+            target_names,
+            "val",
+        )
         if validation_loss < best_validation - early_stopping_min_delta:
             best_validation = validation_loss
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
             bad_epochs = 0
         else:
             bad_epochs += 1
-        history.append(
-            {
+        history.append({
                 "epoch": float(epoch + 1),
                 "train_loss": float(np.mean(losses)),
                 "val_loss": float(validation_loss),
                 "learning_rate": float(optimizer.param_groups[0]["lr"]),
-            }
-        )
+                **train_metrics,
+                **validation_metrics,
+            })
         if epoch == 0 or (epoch + 1) % max(1, epochs // 10) == 0:
             print(
                 f"Fusion epoch {epoch + 1}/{epochs}: "
-                f"train_loss={np.mean(losses):.6f}, val_loss={validation_loss:.6f}",
+                f"train_loss={np.mean(losses):.6f}, val_loss={validation_loss:.6f}; "
+                f"validation metrics: {validation_text}",
                 flush=True,
             )
         if early_stopping_patience > 0 and bad_epochs >= early_stopping_patience:
