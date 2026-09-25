@@ -236,10 +236,22 @@ def _task_metrics(
     metrics: dict[str, float] = {}
     rendered = []
     for index, name in enumerate(names):
-        error = prediction[:, index] - target[:, index]
+        finite = np.isfinite(target[:, index]) & np.isfinite(prediction[:, index])
+        if not finite.any():
+            metrics.update(
+                {
+                    f"{prefix}_{name}_mae": float("nan"),
+                    f"{prefix}_{name}_rmse": float("nan"),
+                    f"{prefix}_{name}_r2": float("nan"),
+                }
+            )
+            rendered.append(f"{name}:no_labels")
+            continue
+        error = prediction[finite, index] - target[finite, index]
         mae = float(np.mean(np.abs(error)))
         rmse = float(np.sqrt(np.mean(error ** 2)))
-        centered = target[:, index] - target[:, index].mean()
+        finite_target = target[finite, index]
+        centered = finite_target - finite_target.mean()
         denominator = float(np.sum(centered ** 2))
         r2 = float(1.0 - np.sum(error ** 2) / denominator) if denominator else float("nan")
         metrics.update(
@@ -282,8 +294,10 @@ def _fit_head(
     embedding_mean = embeddings[train_indices].mean(axis=0)
     embedding_scale = embeddings[train_indices].std(axis=0)
     embedding_scale[embedding_scale < 1e-8] = 1.0
-    target_mean = targets[train_indices].mean(axis=0)
-    target_scale = targets[train_indices].std(axis=0)
+    target_mean = np.nanmean(targets[train_indices], axis=0)
+    target_scale = np.nanstd(targets[train_indices], axis=0)
+    if not np.isfinite(target_mean).all():
+        raise ValueError("Every fusion target needs at least one training label.")
     target_scale[target_scale < 1e-8] = 1.0
     regression_loss = str(regression_loss).strip().lower()
     if huber_delta <= 0.0 or nll_scale <= 0.0 or gaussian_nll_variance <= 0.0:
@@ -297,7 +311,11 @@ def _fit_head(
     task_weights = torch.as_tensor(resolved_task_weights, dtype=torch.float32, device=device)
 
     normalized_embeddings = (embeddings - embedding_mean) / embedding_scale
-    normalized_targets = (targets - target_mean) / target_scale
+    normalized_target_mask = np.isfinite(targets).astype(np.float32)
+    normalized_targets = np.nan_to_num(
+        (targets - target_mean) / target_scale,
+        nan=0.0,
+    )
     if not 0.0 <= dropout < 1.0:
         raise ValueError("Fusion head dropout must be between 0 and 1.")
     model = FusionHead(
@@ -338,6 +356,9 @@ def _fit_head(
             batch = order[start : start + batch_size]
             x = torch.as_tensor(normalized_embeddings[batch], dtype=torch.float32, device=device)
             y = torch.as_tensor(normalized_targets[batch], dtype=torch.float32, device=device)
+            mask = torch.as_tensor(
+                normalized_target_mask[batch], dtype=torch.float32, device=device
+            )
             optimizer.zero_grad()
             elementwise = _elementwise_loss(
                 model(x),
@@ -347,7 +368,12 @@ def _fit_head(
                 nll_scale,
                 gaussian_nll_variance,
             )
-            loss = (elementwise.mean(dim=0) * task_weights).mean()
+            counts = mask.sum(dim=0)
+            task_losses = (elementwise * mask).sum(dim=0) / counts.clamp_min(1.0)
+            active = counts > 0
+            loss = (task_losses * task_weights * active).sum() / (
+                task_weights * active
+            ).sum().clamp_min(1.0)
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
@@ -359,6 +385,11 @@ def _fit_head(
             validation_y = torch.as_tensor(
                 normalized_targets[splits["val"]], dtype=torch.float32, device=device
             )
+            validation_mask = torch.as_tensor(
+                normalized_target_mask[splits["val"]],
+                dtype=torch.float32,
+                device=device,
+            )
             validation_prediction = model(validation_x)
             validation_elementwise = _elementwise_loss(
                 validation_prediction,
@@ -368,8 +399,19 @@ def _fit_head(
                 nll_scale,
                 gaussian_nll_variance,
             )
+            validation_counts = validation_mask.sum(dim=0)
+            validation_task_losses = (
+                validation_elementwise * validation_mask
+            ).sum(dim=0) / validation_counts.clamp_min(1.0)
+            validation_active = validation_counts > 0
             validation_loss = float(
-                (validation_elementwise.mean(dim=0) * task_weights).mean().cpu()
+                (
+                    validation_task_losses
+                    * task_weights
+                    * validation_active
+                ).sum()
+                / (task_weights * validation_active).sum().clamp_min(1.0)
+            .cpu()
             )
             train_x = torch.as_tensor(
                 normalized_embeddings[train_indices], dtype=torch.float32, device=device
@@ -527,7 +569,7 @@ class FusionTrainer:
             pd.to_numeric, errors="coerce"
         ).to_numpy(dtype=float)
         train_targets = all_targets[:train_count]
-        valid_train_targets = np.isfinite(train_targets).all(axis=1)
+        valid_train_targets = np.isfinite(train_targets).any(axis=1)
         device = _device(self.fusion.get("device", "auto"))
         embedding_types = tuple(self.fusion.get("kermt_embedding_types", DEFAULT_KERMT_EMBEDDINGS))
         chemeleon_checkpoint = _require_checkpoint(
@@ -549,14 +591,19 @@ class FusionTrainer:
         )
         valid_train = valid_train_targets & valid_embeddings[:train_count]
         if valid_train.sum() < 3:
-            raise ValueError("Fusion training requires at least three valid molecules.")
+            label_counts = np.isfinite(train_targets[valid_train]).sum(axis=0)
+            raise ValueError(
+                "Fusion training requires at least three encoder-valid molecules. "
+                f"Valid rows={int(valid_train.sum())}; label counts by task="
+                f"{dict(zip(target_columns, label_counts.astype(int)))}."
+            )
         embeddings = all_embeddings[:train_count][valid_train]
         targets = train_targets[valid_train]
         test_embeddings = None
         test_targets = None
         if test_frame is not None:
             test_targets_all = all_targets[train_count:]
-            valid_test = np.isfinite(test_targets_all).all(axis=1) & valid_embeddings[train_count:]
+            valid_test = np.isfinite(test_targets_all).any(axis=1) & valid_embeddings[train_count:]
             test_embeddings = all_embeddings[train_count:][valid_test]
             test_targets = test_targets_all[valid_test]
             if len(test_embeddings) == 0:
@@ -700,15 +747,31 @@ class FusionTrainer:
                 valid_training_frame = frame.loc[valid_train].reset_index(drop=True)
                 output[smiles_column] = valid_training_frame.loc[splits["test"], smiles_column].to_numpy()
             for index, name in enumerate(target_columns):
-                bias = float(np.median(validation_targets[:, index] - validation_direct[:, index]))
-                residuals = np.abs(validation_targets[:, index] - validation_direct[:, index] - bias)
-                radius = float(
-                    np.quantile(
-                        residuals,
-                        min(1.0, np.ceil((len(residuals) + 1) * confidence) / len(residuals)),
-                        method="higher",
-                    )
+                validation_finite = (
+                    np.isfinite(validation_targets[:, index])
+                    & np.isfinite(validation_direct[:, index])
                 )
+                if validation_finite.any():
+                    validation_error = (
+                        validation_targets[validation_finite, index]
+                        - validation_direct[validation_finite, index]
+                    )
+                    bias = float(np.median(validation_error))
+                    residuals = np.abs(validation_error - bias)
+                    radius = float(
+                        np.quantile(
+                            residuals,
+                            min(
+                                1.0,
+                                np.ceil((len(residuals) + 1) * confidence)
+                                / len(residuals),
+                            ),
+                            method="higher",
+                        )
+                    )
+                else:
+                    bias = 0.0
+                    radius = float("nan")
                 calibrated = mc_mean[:, index] + bias
                 output[f"{name}_truth"] = evaluation_targets[:, index]
                 output[f"direct_{name}"] = direct[:, index]
@@ -720,11 +783,15 @@ class FusionTrainer:
                 output[f"{name}_upper_{coverage_label}"] = calibrated + radius
                 output[f"{name}_error"] = mc_mean[:, index] - evaluation_targets[:, index]
             output.to_csv(workdir / "test_predictions.csv", index=False)
+            _, test_metrics_text = _task_metrics(
+                mc_mean,
+                evaluation_targets,
+                target_columns,
+                "test",
+            )
             print(
                 "Fusion test metrics: "
-                f"MAE={np.mean(np.abs(mc_mean - evaluation_targets)):.6f}, "
-                f"RMSE={np.sqrt(np.mean((mc_mean - evaluation_targets) ** 2)):.6f}; "
-                f"MC samples={mc_samples}",
+                f"{test_metrics_text}; MC samples={mc_samples}",
                 flush=True,
             )
         checkpoint = workdir / "fusion_head.pt"
