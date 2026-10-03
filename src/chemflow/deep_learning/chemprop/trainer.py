@@ -144,6 +144,17 @@ class ChempropTrainer:
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
         with self.config_path.open("rb") as stream:
             raw = tomllib.load(stream)
+        chemeleon_sections = {
+            "CheMeleonConfig", "CheMeleonTrainingConfig"
+        }.intersection(raw)
+        if chemeleon_sections and not {
+            "ChempropConfig", "TrainingConfig"
+        }.intersection(raw):
+            raise ValueError(
+                "This is a CheMeleon configuration, not a Chemprop configuration. "
+                "Run `chemflow train chemeleon <config>` instead of "
+                "`chemflow train chemprop <config>`."
+            )
         self.base_cfg = dict(raw.get("BaseConfig", {}))
         self.data_cfg = dict(raw.get("DatasetConfig", {}))
         self.model_cfg = dict(raw.get("ChempropConfig", {}))
@@ -253,6 +264,9 @@ class ChempropTrainer:
             )
         self.checkpoint_interval = int(
             self.training_cfg.get("checkpoint_every_n_epochs", 0)
+        )
+        self.inspect_task_metrics = bool(
+            self.training_cfg.get("inspect_task_metrics", False)
         )
         if self.checkpoint_interval < 0:
             raise ValueError(
@@ -470,14 +484,14 @@ class ChempropTrainer:
         resume_checkpoints: list[Path] | None = None,
     ) -> list[str]:
         executable = str(self.training_cfg.get("executable", "chemprop")).strip()
-        if self.checkpoint_interval > 0:
+        if self.checkpoint_interval > 0 or self.inspect_task_metrics:
             command = [
                 sys.executable,
                 "-m",
                 "chemflow.deep_learning.chemprop.periodic_cli",
                 "train",
             ]
-        elif self.regression_loss in _CUSTOM_REGRESSION_LOSSES:
+        elif self.has_censored_targets or self.regression_loss in _CUSTOM_REGRESSION_LOSSES:
             command = [
                 sys.executable,
                 "-m",
@@ -637,7 +651,19 @@ class ChempropTrainer:
                     frame = frame.merge(values, on="step", how="outer")
             if "step" in frame:
                 frame = frame.sort_values("step").groupby("step", as_index=False).first()
-                frame.insert(0, "epoch", frame["step"].astype(int) + 1)
+                if "completed_epoch" in frame:
+                    frame["completed_epoch"] = frame["completed_epoch"].ffill().bfill()
+                    frame = frame.groupby("completed_epoch", as_index=False).last()
+                    if "epoch" in frame:
+                        frame = frame.drop(columns="epoch")
+                    frame = frame.rename(columns={"completed_epoch": "epoch"})
+                    frame["epoch"] = frame["epoch"].astype(int)
+                elif "epoch" in frame:
+                    frame["epoch"] = frame["epoch"].ffill().bfill()
+                    frame = frame.groupby("epoch", as_index=False).last()
+                    frame["epoch"] = frame["epoch"].round().astype(int) + 1
+                else:
+                    frame.insert(0, "epoch", frame["step"].astype(int) + 1)
             frame.insert(0, "model", model_index)
             histories.append(frame)
         if not histories:
@@ -678,6 +704,14 @@ class ChempropTrainer:
             "--devices",
             str(self.training_cfg.get("devices", "auto")),
         ]
+        featurizers = _items(
+            self.model_cfg.get("molecule_featurizers", []),
+            name="ChempropConfig.molecule_featurizers",
+        )
+        if featurizers:
+            command.extend(["--molecule-featurizers", *featurizers])
+        if bool(self.model_cfg.get("no_descriptor_scaling", False)):
+            command.append("--no-descriptor-scaling")
         subprocess.run(
             command,
             cwd=self.workdir,
@@ -856,9 +890,12 @@ class ChempropTrainer:
         resume_checkpoints = self._resolve_resume_checkpoints()
         command = self.build_command(data_paths, resume_checkpoints)
         version = self._chemprop_version()
-        resolved_executable = self._resolve_executable(command[0])
-        if resolved_executable is not None:
-            command[0] = resolved_executable
+        training_executable = self._resolve_executable(command[0])
+        if training_executable is not None:
+            command[0] = training_executable
+        prediction_executable = self._resolve_executable(
+            str(self.training_cfg.get("executable", "chemprop")).strip()
+        )
         process_environment = os.environ.copy()
         process_environment.update(
             {
@@ -873,6 +910,10 @@ class ChempropTrainer:
             process_environment["CHEMFLOW_CHECKPOINT_EVERY_N_EPOCHS"] = str(
                 self.checkpoint_interval
             )
+        process_environment["CHEMFLOW_INSPECT_TASK_METRICS"] = (
+            "1" if self.inspect_task_metrics else "0"
+        )
+        process_environment["CHEMFLOW_TARGET_NAMES"] = json.dumps(self.targets)
         compatibility_environment: dict[str, str] = {}
         if _version_tuple(version) < (2, 3):
             # Chemprop 2.2 asks Lightning to reload the checkpoint it just
@@ -965,7 +1006,11 @@ class ChempropTrainer:
         if self.dry_run:
             print("Dry run requested; Chemprop was not launched.", flush=True)
             return
-        if version == "not installed" or resolved_executable is None:
+        if (
+            version == "not installed"
+            or training_executable is None
+            or prediction_executable is None
+        ):
             raise RuntimeError(
                 "Chemprop v2 is not installed in this environment. Install the "
                 "project dependencies, then rerun this command."
@@ -992,7 +1037,7 @@ class ChempropTrainer:
             )
         if self.has_test_data:
             prediction_path, metrics_path = self._evaluate_best_models(
-                command[0], process_environment
+                prediction_executable, process_environment
             )
             print(f"Chemprop best-model test predictions: {prediction_path}", flush=True)
             print(f"Chemprop best-model test metrics: {metrics_path}", flush=True)

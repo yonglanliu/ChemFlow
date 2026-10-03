@@ -31,11 +31,12 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from rdkit import Chem
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import kendalltau, pearsonr, spearmanr
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
     balanced_accuracy_score,
+    brier_score_loss,
     f1_score,
     matthews_corrcoef,
     mean_absolute_error,
@@ -109,6 +110,7 @@ class DatasetConfig:
 
 @dataclass
 class TrainingConfig:
+    seeds: list[int] | None = None
     batch_size: int = 64
     num_workers: int = 0
     num_epochs: int = 30
@@ -128,6 +130,7 @@ class TrainingConfig:
     gradient_clip_value: float = 1.0
     early_stopping: bool = True
     early_stopping_patience: int = 10
+    tracking_metric: str = "val_loss"
     class_balance: bool = False
     evaluate_test: bool = True
     plot_training_history: bool = True
@@ -246,6 +249,14 @@ class TrainingTaskMetricsCallback(Callback):
                 [item["targets"] for item in val_records], dtype=np.float32
             ),
         }
+        self.split_relations = {
+            "train": np.asarray(
+                [item["relations"] for item in train_records], dtype=np.int8
+            ),
+            "validation": np.asarray(
+                [item["relations"] for item in val_records], dtype=np.int8
+            ),
+        }
         self.target_names = list(target_names)
         self.task = str(task)
         self.task_types = list(task_types)
@@ -257,18 +268,24 @@ class TrainingTaskMetricsCallback(Callback):
             return
         epoch = int(trainer.current_epoch) + 1
         metric_names = (
-            ("loss", "mae", "rmse", "median_ae", "r2", "pearson", "spearman")
+            (
+                "loss", "mae", "rmse", "median_ae", "r2", "pearson",
+                "spearman", "kendall", "bounded_mae", "bounded_rmse",
+                "censored_bound_satisfaction_rate",
+            )
             if self.task == "regression"
             else (
                 "loss", "accuracy", "balanced_accuracy", "precision", "recall",
-                "f1", "mcc", "roc_auc", "pr_auc",
+                "f1", "mcc", "roc_auc", "pr_auc", "brier_score",
             )
         )
         if self.task == "mixed":
             metric_names = (
                 "loss", "mae", "rmse", "median_ae", "r2", "pearson", "spearman",
+                "kendall", "bounded_mae", "bounded_rmse",
+                "censored_bound_satisfaction_rate",
                 "accuracy", "balanced_accuracy", "precision", "recall", "f1", "mcc",
-                "roc_auc", "pr_auc",
+                "roc_auc", "pr_auc", "brier_score",
             )
         logged: dict[str, float] = {}
         # Replace an epoch if Lightning reruns it after resuming.
@@ -277,7 +294,12 @@ class TrainingTaskMetricsCallback(Callback):
             targets = self.split_targets[split_name]
             predictions = _predict_checkpoint_predictions(pl_module, loader)
             metrics = _evaluate(
-                self.task, predictions, targets, self.target_names, self.task_types
+                self.task,
+                predictions,
+                targets,
+                self.target_names,
+                self.task_types,
+                self.split_relations[split_name],
             )
             log_prefix = "train" if split_name == "train" else "val"
             print(f"{split_name.title()} metrics by task — epoch {epoch}:")
@@ -382,6 +404,17 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
         raise ValueError("val_fraction + test_fraction must be less than 1.")
     if int(training.num_epochs) < 1:
         raise ValueError("num_epochs must be at least 1.")
+    if training.seeds is not None:
+        training.seeds = [int(seed) for seed in training.seeds]
+        if not training.seeds:
+            raise ValueError("seeds must contain at least one integer.")
+        if len(set(training.seeds)) != len(training.seeds):
+            raise ValueError("seeds must not contain duplicates.")
+        if bool(training.resume):
+            raise ValueError(
+                "resume=true is not supported with multiseed training; resume "
+                "an individual seed configuration instead."
+            )
     if int(training.checkpoint_every_n_epochs) < 0:
         raise ValueError("checkpoint_every_n_epochs cannot be negative.")
     if not math.isfinite(float(training.weight_decay)) or float(
@@ -392,6 +425,19 @@ def load_config(path: str | Path) -> CheMeleonRunConfig:
     if training.regression_loss not in REGRESSION_LOSSES:
         raise ValueError(
             f"regression_loss must be one of {list(REGRESSION_LOSSES)}."
+        )
+    training.tracking_metric = str(training.tracking_metric).strip().lower()
+    if training.tracking_metric not in {"val_loss", "mae", "bounded-mae"}:
+        raise ValueError(
+            "tracking_metric must be 'val_loss', 'mae', or 'bounded-mae'."
+        )
+    if training.tracking_metric in {"mae", "bounded-mae"} and (
+        training.regression_loss != "mae"
+    ):
+        raise ValueError(
+            "tracking_metric='mae' or 'bounded-mae' requires "
+            "regression_loss='mae' because CheMeleon early stopping monitors "
+            "the validation objective."
         )
     for name in ("huber_delta", "nll_scale", "gaussian_nll_variance"):
         value = float(getattr(training, name))
@@ -845,6 +891,7 @@ def _evaluate(
     targets: np.ndarray,
     target_names: list[str] | None = None,
     task_types: list[str] | None = None,
+    relations: np.ndarray | None = None,
 ) -> dict[str, float]:
     predictions = np.asarray(predictions, dtype=np.float32)
     targets = np.asarray(targets, dtype=np.float32)
@@ -855,10 +902,16 @@ def _evaluate(
     if target_names is None:
         target_names = [f"task_{index}" for index in range(predictions.shape[1])]
     task_types = task_types or [task] * len(target_names)
+    relations = (
+        np.zeros(targets.shape, dtype=np.int8)
+        if relations is None else np.asarray(relations, dtype=np.int8)
+    )
     if predictions.shape != targets.shape:
         raise ValueError(
             f"Prediction and target shapes differ: {predictions.shape} and {targets.shape}."
         )
+    if relations.shape != targets.shape:
+        raise ValueError("Relation and target shapes must match.")
     if predictions.shape[1] != len(target_names):
         raise ValueError(
             "Prediction task count does not match target names: "
@@ -881,9 +934,16 @@ def _evaluate(
         ).reshape(-1, 1)
 
         if task_types[task_index] == "regression":
-            loss = functional.mse_loss(prediction_tensor, target_tensor).item()
-            prediction_values = prediction_tensor.numpy().reshape(-1)
-            target_values = target_tensor.numpy().reshape(-1)
+            relation_values = relations[valid, task_index]
+            bounded_prediction = prediction_tensor.numpy().reshape(-1)
+            bounded_target = target_tensor.numpy().reshape(-1)
+            residual = bounded_prediction - bounded_target
+            residual = np.where(relation_values < 0, np.maximum(residual, 0), residual)
+            residual = np.where(relation_values > 0, np.minimum(residual, 0), residual)
+            exact = relation_values == 0
+            prediction_values = bounded_prediction[exact]
+            target_values = bounded_target[exact]
+            loss = float(np.mean(np.square(residual)))
             pearson = (
                 float(pearsonr(target_values, prediction_values).statistic)
                 if target_values.size > 1
@@ -898,17 +958,32 @@ def _evaluate(
                 and np.unique(prediction_values).size > 1
                 else float("nan")
             )
+            kendall = (
+                float(kendalltau(target_values, prediction_values).statistic)
+                if target_values.size > 1
+                and np.unique(target_values).size > 1
+                and np.unique(prediction_values).size > 1
+                else float("nan")
+            )
+            censored = relation_values != 0
             task_metrics = {
                 "test_loss": float(loss),
-                "test_mae": float(mean_absolute_error(target_values, prediction_values)),
-                "test_rmse": float(mean_squared_error(target_values, prediction_values) ** 0.5),
-                "test_median_ae": float(median_absolute_error(target_values, prediction_values)),
+                "test_mae": float(mean_absolute_error(target_values, prediction_values)) if exact.any() else float("nan"),
+                "test_rmse": float(mean_squared_error(target_values, prediction_values) ** 0.5) if exact.any() else float("nan"),
+                "test_median_ae": float(median_absolute_error(target_values, prediction_values)) if exact.any() else float("nan"),
                 "test_r2": (
                     float(r2_score(target_values, prediction_values))
                     if target_values.size > 1 else float("nan")
                 ),
                 "test_pearson": pearson,
                 "test_spearman": spearman,
+                "test_kendall": kendall,
+                "test_bounded_mae": float(np.mean(np.abs(residual))),
+                "test_bounded_rmse": float(np.sqrt(np.mean(np.square(residual)))),
+                "test_censored_bound_satisfaction_rate": (
+                    float(np.mean(np.abs(residual[censored]) == 0.0))
+                    if censored.any() else float("nan")
+                ),
             }
         else:
             probabilities = prediction_tensor.clamp(1e-7, 1.0 - 1e-7)
@@ -931,6 +1006,9 @@ def _evaluate(
                 ),
                 "test_f1": float(f1_score(target_values, predicted_values, zero_division=0)),
                 "test_mcc": float(matthews_corrcoef(target_values, predicted_values)),
+                "test_brier_score": float(
+                    brier_score_loss(target_values, probability_values)
+                ),
                 "test_roc_auc": (
                     float(roc_auc_score(target_values, probability_values))
                     if has_both_classes else float("nan")
@@ -1312,7 +1390,53 @@ class CheMeleonTrainer:
         self.workdir = _resolved_path(self.config.base.workdir)
         self.checkpoint_dir = self.workdir / "checkpoints"
 
-    def train(self) -> dict[str, float] | None:
+    def train(self) -> dict[str, Any] | None:
+        seeds = self.config.training.seeds
+        if seeds is None:
+            return self._train_single()
+
+        parent_workdir = self.workdir
+        parent_workdir.mkdir(parents=True, exist_ok=True)
+        original_seed = self.config.base.seed
+        original_config_workdir = self.config.base.workdir
+        results: dict[str, Any] = {}
+        runs: list[dict[str, Any]] = []
+        try:
+            for seed in seeds:
+                seed_workdir = parent_workdir / f"seed_{seed}"
+                self.config.base.seed = int(seed)
+                self.config.base.workdir = str(seed_workdir)
+                self.workdir = seed_workdir
+                self.checkpoint_dir = seed_workdir / "checkpoints"
+                print(
+                    f"CheMeleon multiseed run: seed={seed}, "
+                    f"workdir={seed_workdir}",
+                    flush=True,
+                )
+                metrics = self._train_single()
+                results[str(seed)] = metrics
+                runs.append({
+                    "seed": int(seed),
+                    "workdir": str(seed_workdir),
+                    "metrics": metrics,
+                })
+        finally:
+            self.config.base.seed = original_seed
+            self.config.base.workdir = original_config_workdir
+            self.workdir = parent_workdir
+            self.checkpoint_dir = parent_workdir / "checkpoints"
+
+        save_json(
+            {
+                "backend": "CheMeleon",
+                "seeds": [int(seed) for seed in seeds],
+                "runs": runs,
+            },
+            parent_workdir / "multiseed_summary.json",
+        )
+        return results
+
+    def _train_single(self) -> dict[str, float] | None:
         set_seed(int(self.config.base.seed))
         pl.seed_everything(int(self.config.base.seed), workers=True)
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -1499,10 +1623,19 @@ class CheMeleonTrainer:
             else None
         )
 
+        # ``mae`` and ``bounded-mae`` are explicit user-facing aliases for
+        # val_loss when the configured regression objective is MAE. Lightning
+        # receives the actual logged key.
+        tracking_monitor = "val_loss"
+        print(
+            "CheMeleon checkpoint/early-stopping metric: "
+            f"{self.config.training.tracking_metric} "
+            f"(Lightning monitor={tracking_monitor})"
+        )
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.checkpoint_dir,
             filename="best",
-            monitor="val_loss",
+            monitor=tracking_monitor,
             mode="min",
             save_top_k=1,
             save_last=True,
@@ -1545,7 +1678,7 @@ class CheMeleonTrainer:
         if self.config.training.early_stopping:
             callbacks.append(
                 EarlyStopping(
-                    monitor="val_loss",
+                    monitor=tracking_monitor,
                     mode="min",
                     patience=int(self.config.training.early_stopping_patience),
                 )

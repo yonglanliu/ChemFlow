@@ -53,7 +53,11 @@ from typing import List
 import numpy as np
 import pandas as pd
 from scipy.stats import kendalltau, pearsonr, spearmanr
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import (
+    accuracy_score, average_precision_score, balanced_accuracy_score,
+    brier_score_loss, f1_score, matthews_corrcoef, mean_absolute_error,
+    mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score,
+)
 try:
     import wandb
 except ImportError:
@@ -391,7 +395,9 @@ def _write_epoch_history(path: str | Path, row: dict) -> None:
     pd.DataFrame(rows).sort_values("epoch").to_csv(output_path, index=False)
 
 
-def _regression_metrics_by_task(preds, targets, task_names) -> dict[str, dict]:
+def _regression_metrics_by_task(
+    preds, targets, task_names, relations=None
+) -> dict[str, dict]:
     """Calculate ChemFlow's standard regression metrics for each KERMT task."""
     predictions = np.asarray(preds, dtype=float)
     observed = np.asarray(targets, dtype=float)
@@ -399,22 +405,38 @@ def _regression_metrics_by_task(preds, targets, task_names) -> dict[str, dict]:
         predictions = predictions.reshape(-1, 1)
     if observed.ndim == 1:
         observed = observed.reshape(-1, 1)
+    relation_codes = (
+        np.zeros(observed.shape, dtype=np.int8)
+        if relations is None else np.asarray(relations, dtype=np.int8)
+    )
 
     result: dict[str, dict] = {}
     for task_index, task_name in enumerate(task_names):
         valid = np.isfinite(observed[:, task_index]) & np.isfinite(
             predictions[:, task_index]
         )
-        y_true = observed[valid, task_index]
-        y_pred = predictions[valid, task_index]
+        task_relations = relation_codes[valid, task_index]
+        residual = predictions[valid, task_index] - observed[valid, task_index]
+        residual = np.where(task_relations < 0, np.maximum(residual, 0.0), residual)
+        residual = np.where(task_relations > 0, np.minimum(residual, 0.0), residual)
+        exact = task_relations == 0
+        y_true = observed[valid, task_index][exact]
+        y_pred = predictions[valid, task_index][exact]
+        censored = task_relations != 0
         metrics = {
-            "n": int(valid.sum()),
+            "n": int(exact.sum()),
             "rmse": float("nan"),
             "mae": float("nan"),
             "r2": float("nan"),
             "pearson": float("nan"),
             "spearman": float("nan"),
             "kendall": float("nan"),
+            "bounded_rmse": float(np.sqrt(np.mean(np.square(residual)))),
+            "bounded_mae": float(np.mean(np.abs(residual))),
+            "censored_bound_satisfaction_rate": (
+                float(np.mean(np.abs(residual[censored]) == 0.0))
+                if censored.any() else float("nan")
+            ),
         }
         if y_true.size:
             metrics["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
@@ -432,6 +454,36 @@ def _regression_metrics_by_task(preds, targets, task_names) -> dict[str, dict]:
                     except (ValueError, FloatingPointError):
                         pass
         result[str(task_name)] = metrics
+    return result
+
+
+def _classification_metrics_by_task(preds, targets, task_names) -> dict[str, dict]:
+    predictions = np.asarray(preds, dtype=float)
+    observed = np.asarray(targets, dtype=float)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape(-1, 1)
+    if observed.ndim == 1:
+        observed = observed.reshape(-1, 1)
+    result = {}
+    for task_index, task_name in enumerate(task_names):
+        valid = np.isfinite(observed[:, task_index]) & np.isfinite(predictions[:, task_index])
+        truth = observed[valid, task_index].astype(int)
+        probability = np.clip(predictions[valid, task_index], 1e-7, 1 - 1e-7)
+        predicted = (probability >= 0.5).astype(int)
+        both = np.unique(truth).size == 2
+        result[str(task_name)] = {
+            "n": int(valid.sum()),
+            "log_loss": float(-np.mean(truth * np.log(probability) + (1-truth) * np.log(1-probability))) if len(truth) else float("nan"),
+            "accuracy": float(accuracy_score(truth, predicted)) if len(truth) else float("nan"),
+            "balanced_accuracy": float(balanced_accuracy_score(truth, predicted)) if len(truth) else float("nan"),
+            "precision": float(precision_score(truth, predicted, zero_division=0)) if len(truth) else float("nan"),
+            "recall": float(recall_score(truth, predicted, zero_division=0)) if len(truth) else float("nan"),
+            "f1": float(f1_score(truth, predicted, zero_division=0)) if len(truth) else float("nan"),
+            "mcc": float(matthews_corrcoef(truth, predicted)) if len(truth) else float("nan"),
+            "brier_score": float(brier_score_loss(truth, probability)) if len(truth) else float("nan"),
+            "roc_auc": float(roc_auc_score(truth, probability)) if both else float("nan"),
+            "pr_auc": float(average_precision_score(truth, probability)) if both else float("nan"),
+        }
     return result
 
 
@@ -536,6 +588,14 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
         scaler.inverse_transform(scaled_val_targets).astype(float)
         if scaler is not None else scaled_val_targets
     )
+    train_relations = np.asarray([
+        [(-1 if lt else 1 if gt else 0) for lt, gt in zip(item.lt_mask, item.gt_mask)]
+        for item in train_data
+    ], dtype=np.int8)
+    val_relations = np.asarray([
+        [(-1 if lt else 1 if gt else 0) for lt, gt in zip(item.lt_mask, item.gt_mask)]
+        for item in val_data
+    ], dtype=np.int8)
     sum_val_preds = np.zeros((len(val_smiles), args.num_tasks))
     mc_test_draws = []
     mc_val_draws = []
@@ -860,12 +920,20 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                     return_predictions=True,
                 )
                 train_eval_time = time.time() - train_eval_start
-                train_metrics = _regression_metrics_by_task(
-                    train_preds, train_targets, args.task_names
-                )
-                val_metrics = _regression_metrics_by_task(
-                    val_preds, val_targets, args.task_names
-                )
+                if args.dataset_type == 'classification':
+                    train_metrics = _classification_metrics_by_task(
+                        train_preds, train_targets, args.task_names
+                    )
+                    val_metrics = _classification_metrics_by_task(
+                        val_preds, val_targets, args.task_names
+                    )
+                else:
+                    train_metrics = _regression_metrics_by_task(
+                        train_preds, train_targets, args.task_names, train_relations
+                    )
+                    val_metrics = _regression_metrics_by_task(
+                        val_preds, val_targets, args.task_names, val_relations
+                    )
             if is_distributed:
                 # Non-zero ranks wait while rank zero evaluates the complete
                 # training set with the unwrapped model. This prevents them
@@ -892,14 +960,12 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                 ):
                     print(f"{split_label} metrics by task — epoch {epoch + 1}:")
                     for task_name, values in split_metrics.items():
-                        print(
-                            f"  {task_name} (n={values['n']}): "
-                            f"RMSE={values['rmse']:.4f}, MAE={values['mae']:.4f}, "
-                            f"R2={values['r2']:.4f}, Pearson={values['pearson']:.4f}, "
-                            f"Spearman={values['spearman']:.4f}, "
-                            f"Kendall={values['kendall']:.4f}",
-                            flush=True,
+                        shown = ", ".join(
+                            f"{name}={value:.4f}"
+                            for name, value in values.items()
+                            if name != "n" and np.isfinite(value)
                         )
+                        print(f"  {task_name} (n={values['n']}): {shown}", flush=True)
                 epoch_row = {
                     "epoch": epoch + 1,
                     "train_loss": float(train_loss),

@@ -20,11 +20,12 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from rdkit import Chem
 from scipy.special import expit
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import kendalltau, pearsonr, spearmanr
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
     balanced_accuracy_score,
+    brier_score_loss,
     f1_score,
     matthews_corrcoef,
     mean_absolute_error,
@@ -233,7 +234,9 @@ def _tensorboard_writer(
 
 def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     if len(y_true) == 0:
-        return {name: float("nan") for name in ("loss", "rmse", "mae", "r2", "pearson", "spearman")}
+        return {name: float("nan") for name in (
+            "loss", "rmse", "mae", "r2", "pearson", "spearman", "kendall"
+        )}
     result = {
         "loss": float(mean_squared_error(y_true, y_pred)),
         "rmse": float(math.sqrt(mean_squared_error(y_true, y_pred))),
@@ -242,6 +245,7 @@ def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     }
     result["pearson"] = float(pearsonr(y_true, y_pred).statistic) if len(y_true) > 1 else float("nan")
     result["spearman"] = float(spearmanr(y_true, y_pred).statistic) if len(y_true) > 1 else float("nan")
+    result["kendall"] = float(kendalltau(y_true, y_pred).statistic) if len(y_true) > 1 else float("nan")
     return result
 
 
@@ -264,6 +268,7 @@ def _classification_metrics(
         "mcc",
         "roc_auc",
         "pr_auc",
+        "brier_score",
     )
     if y_true.size == 0:
         return {name: float("nan") for name in metric_names}
@@ -281,6 +286,7 @@ def _classification_metrics(
         "recall": float(recall_score(y_true, predicted, zero_division=0)),
         "f1": float(f1_score(y_true, predicted, zero_division=0)),
         "mcc": float(matthews_corrcoef(y_true, predicted)),
+        "brier_score": float(brier_score_loss(y_true, clipped)),
         "roc_auc": (
             float(roc_auc_score(y_true, clipped))
             if has_both_classes
@@ -1081,24 +1087,29 @@ class HuggingFaceGraphormerTrainer:
                         finite_relations > 0, np.minimum(residual, 0.0), residual
                     )
                     bounded_mse = float(np.mean(np.square(residual)))
+                    bounded_mae = float(np.mean(np.abs(residual)))
+                    censored = finite_relations != 0
+                    bound_satisfaction = (
+                        float(np.mean(np.abs(residual[censored]) == 0.0))
+                        if censored.any() else float("nan")
+                    )
                     mask &= relation == 0
                 metrics[target] = _metrics(true_values[mask], predictions[mask])
                 if relation_column in frame:
                     metrics[target]["loss"] = bounded_mse
-                    metrics[target]["rmse"] = math.sqrt(bounded_mse)
+                    metrics[target]["bounded_rmse"] = math.sqrt(bounded_mse)
+                    metrics[target]["bounded_mae"] = bounded_mae
+                    metrics[target][
+                        "censored_bound_satisfaction_rate"
+                    ] = bound_satisfaction
                 # Mixed-task checkpoint selection must not be dominated by the
                 # physical units of one regression endpoint. Keep the reported
                 # RMSE/MAE in original units, but define loss in the same
                 # standardized target space used for optimization.
                 scale = max(float(stds[task_index]), 1e-12)
+                standardized_residual = residual / scale
                 metrics[target]["loss"] = float(
-                    np.mean(
-                        (
-                            (predictions[mask] - true_values[mask])
-                            / scale
-                        )
-                        ** 2
-                    )
+                    np.mean(np.square(standardized_residual))
                 )
             metrics[target]["n"] = int(mask.sum())
         return metrics, frame
@@ -1650,7 +1661,9 @@ class HuggingFaceGraphormerTrainer:
         configured_resume_path = self.train_cfg.get("resume_checkpoint")
         if configured_resume_path:
             last_checkpoint = Path(str(configured_resume_path)).expanduser().resolve()
-        selection_metric_name = "loss" if self.task != "regression" else "rmse"
+        selection_metric_name = (
+            "loss" if self.task != "regression" else "bounded_rmse"
+        )
         best_metric = float("inf")
         bad_epochs = 0
         history: list[dict[str, Any]] = []

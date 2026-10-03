@@ -52,8 +52,11 @@ def train_hf_graphormer(args):
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    trainer = HuggingFaceGraphormerTrainer(config_path)
-    trainer.train()
+    from chemflow.deep_learning.multiseed import run_multiseed
+
+    run_multiseed(
+        config_path, HuggingFaceGraphormerTrainer, backend="hf-graphormer"
+    )
 
 
 def train_chemeleon(args):
@@ -87,7 +90,9 @@ def train_chemberta(args):
     config_path = Path(args.config).expanduser().resolve()
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    ChemBERTaTrainer(config_path).train()
+    from chemflow.deep_learning.multiseed import run_multiseed
+
+    run_multiseed(config_path, ChemBERTaTrainer, backend="chemberta")
 
 
 def train_kermt(args):
@@ -97,7 +102,9 @@ def train_kermt(args):
     config_path = Path(args.config).expanduser().resolve()
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    KERMTTrainer(config_path).train()
+    from chemflow.deep_learning.multiseed import run_multiseed
+
+    run_multiseed(config_path, KERMTTrainer, backend="kermt")
 
 
 def train_chemprop(args):

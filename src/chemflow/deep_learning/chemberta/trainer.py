@@ -19,11 +19,11 @@ import torch.distributed as dist
 from chemprop import data as chemprop_data
 from rdkit import Chem
 from sklearn.metrics import (
-    accuracy_score, average_precision_score, balanced_accuracy_score, f1_score,
-    matthews_corrcoef, mean_absolute_error, mean_squared_error, precision_score,
+    accuracy_score, average_precision_score, balanced_accuracy_score, brier_score_loss,
+    f1_score, matthews_corrcoef, mean_absolute_error, mean_squared_error, precision_score,
     r2_score, recall_score, roc_auc_score,
 )
-from scipy.stats import spearmanr
+from scipy.stats import kendalltau, pearsonr, spearmanr
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset
@@ -513,20 +513,39 @@ class ChemBERTaTrainer:
             observed = frame[f"{target}_true"].to_numpy(float)
             predicted = frame[f"{target}_prediction"].to_numpy(float)
             valid = np.isfinite(observed) & np.isfinite(predicted)
+            relation = np.zeros(len(frame), dtype=np.int8)
             if task_type == "regression" and f"{target}_relation" in frame:
-                valid &= frame[f"{target}_relation"].to_numpy(dtype=np.int8) == 0
-            y, p = observed[valid], predicted[valid]
-            values: dict[str, float] = {"n": int(valid.sum())}
+                relation = frame[f"{target}_relation"].to_numpy(dtype=np.int8)
+            exact = valid & (relation == 0)
+            y, p = observed[exact], predicted[exact]
+            values: dict[str, float] = {"n": int(exact.sum())}
             if not len(y):
-                result[target] = values
-                continue
+                if task_type != "regression":
+                    result[target] = values
+                    continue
             if task_type == "regression":
+                residual = predicted[valid] - observed[valid]
+                valid_relations = relation[valid]
+                residual = np.where(
+                    valid_relations < 0, np.maximum(residual, 0.0), residual
+                )
+                residual = np.where(
+                    valid_relations > 0, np.minimum(residual, 0.0), residual
+                )
+                censored = valid_relations != 0
                 values.update({
-                    "rmse": float(mean_squared_error(y, p) ** 0.5),
-                    "mae": float(mean_absolute_error(y, p)),
+                    "rmse": float(mean_squared_error(y, p) ** 0.5) if len(y) else float("nan"),
+                    "mae": float(mean_absolute_error(y, p)) if len(y) else float("nan"),
                     "r2": float(r2_score(y, p)) if len(y) > 1 else float("nan"),
-                    "pearson": float(np.corrcoef(y, p)[0, 1]) if len(y) > 1 else float("nan"),
+                    "pearson": float(pearsonr(y, p).statistic) if len(y) > 1 else float("nan"),
                     "spearman": float(spearmanr(y, p).statistic) if len(y) > 1 else float("nan"),
+                    "kendall": float(kendalltau(y, p).statistic) if len(y) > 1 else float("nan"),
+                    "bounded_rmse": float(np.sqrt(np.mean(np.square(residual)))),
+                    "bounded_mae": float(np.mean(np.abs(residual))),
+                    "censored_bound_satisfaction_rate": (
+                        float(np.mean(np.abs(residual[censored]) == 0.0))
+                        if censored.any() else float("nan")
+                    ),
                 })
             else:
                 clipped = np.clip(p, 1e-7, 1 - 1e-7)
@@ -540,6 +559,7 @@ class ChemBERTaTrainer:
                     "recall": float(recall_score(truth, classes, zero_division=0)),
                     "f1": float(f1_score(truth, classes, zero_division=0)),
                     "mcc": float(matthews_corrcoef(truth, classes)),
+                    "brier_score": float(brier_score_loss(truth, clipped)),
                     "roc_auc": float(roc_auc_score(truth, clipped)) if np.unique(truth).size > 1 else float("nan"),
                     "pr_auc": float(average_precision_score(truth, clipped)) if np.unique(truth).size > 1 else float("nan"),
                 })
