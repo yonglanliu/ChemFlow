@@ -295,11 +295,21 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
         # would miss it, letting the MTL task-weight gradient accumulate.
         optimizer.zero_grad()
         preds = model(batch, features_batch)
-        bounded_preds = torch.where(
-            (lt_mask & (preds <= targets)) | (gt_mask & (preds >= targets)),
-            targets,
-            preds,
-        )
+
+        def _apply_bounds(task_preds):
+            return torch.where(
+                (lt_mask & (task_preds <= targets))
+                | (gt_mask & (task_preds >= targets)),
+                targets,
+                task_preds,
+            )
+
+        # In train mode KERMT returns an (atom-from-atom, atom-from-bond) tuple;
+        # keep the tuple so loss_func still adds the disagreement term.
+        if isinstance(preds, tuple):
+            bounded_preds = tuple(_apply_bounds(p) for p in preds)
+        else:
+            bounded_preds = _apply_bounds(preds)
         loss = loss_func(bounded_preds, targets) * class_weights * mask
         task_loss_weights = torch.as_tensor(
             getattr(args, "task_loss_weights", None)
