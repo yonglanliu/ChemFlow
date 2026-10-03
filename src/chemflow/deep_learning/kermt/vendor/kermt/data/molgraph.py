@@ -613,6 +613,8 @@ class MolCollator(object):
             features_batch = [d.features for d in batch]
 
         target_batch = [d.targets for d in batch]
+        lt_mask = torch.tensor([d.lt_mask for d in batch], dtype=torch.bool)
+        gt_mask = torch.tensor([d.gt_mask for d in batch], dtype=torch.bool)
         if self.args.use_cuikmolmaker_featurization:
             batch_mol_graph = mol2graph(smiles_batch, self.shared_dict, self.args, cmm_feature_range=self.cmm_feature_range, cmm_tensors=self.cmm_feature_arrays)
         else:
@@ -621,4 +623,4 @@ class MolCollator(object):
 
         mask = torch.Tensor([[x is not None for x in tb] for tb in target_batch])
         targets = torch.Tensor([[0 if x is None else x for x in tb] for tb in target_batch])
-        return smiles_batch, batch, features_batch, mask, targets
+        return smiles_batch, batch, features_batch, mask, targets, lt_mask, gt_mask

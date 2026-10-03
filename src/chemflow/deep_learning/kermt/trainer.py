@@ -19,6 +19,11 @@ from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 from chemflow.deep_learning.task_weighting import resolve_task_loss_weights
+from chemflow.deep_learning.censoring import (
+    prefixed_targets,
+    relation_codes,
+    resolve_relation_columns,
+)
 
 from .pretrained import (
     KERMT_CHECKPOINT,
@@ -356,14 +361,23 @@ class KERMTTrainer:
         selected = selected.rename(columns={self.smiles_column: "smiles"})
         return selected
 
+    def _encode_censored_targets(self, frame: pd.DataFrame) -> pd.DataFrame:
+        columns = resolve_relation_columns(
+            frame, self.targets, self.data_cfg.get("relation_column")
+        )
+        codes = relation_codes(frame, self.targets, columns)
+        return prefixed_targets(frame, self.targets, codes)
+
     def prepare_data(self) -> dict[str, Path]:
         frame = _read_table(self.dataset_path)
+        frame = self._encode_censored_targets(frame)
         selected = self._select(frame, self.dataset_path)
         external_test = None
         if self.test_dataset_path is not None:
-            external_test = self._select(
-                _read_table(self.test_dataset_path), self.test_dataset_path
+            test_source = self._encode_censored_targets(
+                _read_table(self.test_dataset_path)
             )
+            external_test = self._select(test_source, self.test_dataset_path)
 
         if self.split_type == "predefined":
             column = str(self.data_cfg["split_column"])
@@ -391,7 +405,7 @@ class KERMTTrainer:
         else:
             val_fraction = float(self.data_cfg.get("val_fraction", 0.1))
             test_fraction = 0.0 if external_test is not None else float(
-                self.data_cfg.get("test_fraction", 0.1)
+                self.data_cfg.get("test_fraction", 0.0)
             )
             seed = int(self.training_cfg.get("seed", 42))
             if self.split_type == "random":
@@ -492,8 +506,6 @@ class KERMTTrainer:
 
         if split_frames["train"].empty or split_frames["val"].empty:
             raise ValueError("KERMT requires non-empty training and validation sets.")
-        if split_frames["test"].empty:
-            raise ValueError("KERMT requires an internal or independent test set.")
         for split_name in ("train", "val"):
             missing_targets = [
                 target
@@ -511,6 +523,8 @@ class KERMTTrainer:
         paths: dict[str, Path] = {}
         manifest_frames = []
         for name, split_frame in split_frames.items():
+            if name == "test" and split_frame.empty:
+                continue
             destination = data_dir / f"{name}.csv"
             split_frame.to_csv(destination, index=False)
             paths[name] = destination
@@ -600,11 +614,18 @@ class KERMTTrainer:
                 "TrainingConfig.gaussian_nll_variance must be positive."
             )
         train_frame = _read_table(paths["train"])
+        numeric_train_targets = train_frame[self.targets].apply(
+            lambda column: pd.to_numeric(
+                column.astype(str).str.strip().str.lstrip("<>")
+                .replace({"nan": np.nan, "": np.nan}),
+                errors="coerce",
+            )
+        )
         task_loss_weighting = str(
             self.training_cfg.get("task_loss_weighting", "uniform")
         ).strip().lower()
         _, task_loss_weights = resolve_task_loss_weights(
-            train_frame[self.targets].to_numpy(),
+            numeric_train_targets.to_numpy(),
             self.targets,
             strategy=task_loss_weighting,
             configured=self.training_cfg.get("task_loss_weights"),
@@ -627,7 +648,6 @@ class KERMTTrainer:
             "finetune",
             "--data_path", str(paths["train"]),
             "--separate_val_path", str(paths["val"]),
-            "--separate_test_path", str(paths["test"]),
             "--save_dir", str(output_dir),
             "--checkpoint_path", str(self.checkpoint_path),
             "--dataset_type", "regression",
@@ -666,7 +686,11 @@ class KERMTTrainer:
                 float(self.training_cfg.get("test_calibration_confidence", 0.90))
             ),
         ]
+        if "test" in paths:
+            command.extend(["--separate_test_path", str(paths["test"])])
         if (
+            "test" in paths
+            and
             int(self.training_cfg.get("test_mc_dropout_samples", 0)) >= 2
             and float(self.model_cfg.get("dropout", 0.0)) <= 0.0
         ):

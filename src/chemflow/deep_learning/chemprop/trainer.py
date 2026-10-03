@@ -21,7 +21,14 @@ from scipy.stats import kendalltau, pearsonr, spearmanr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from chemflow.deep_learning.test_evaluation import (
     fingerprint_local_predictions,
+    regression_metrics,
     save_test_evaluation,
+)
+from chemflow.deep_learning.censoring import (
+    parse_prefixed_targets,
+    prefixed_targets,
+    relation_codes,
+    resolve_relation_columns,
 )
 
 
@@ -143,6 +150,8 @@ class ChempropTrainer:
         self.training_cfg = dict(raw.get("TrainingConfig", {}))
         self.config_dir = self.config_path.parent
         self._validate_config()
+        self.has_censored_targets = False
+        self.has_test_data = False
 
     def _validate_config(self) -> None:
         self.task = str(self.base_cfg.get("task", "regression")).strip().lower()
@@ -175,7 +184,7 @@ class ChempropTrainer:
             )
 
         self.val_fraction = float(self.data_cfg.get("val_fraction", 0.1))
-        self.test_fraction = float(self.data_cfg.get("test_fraction", 0.1))
+        self.test_fraction = float(self.data_cfg.get("test_fraction", 0.0))
         if not 0.0 < self.val_fraction < 1.0:
             raise ValueError("DatasetConfig.val_fraction must be between 0 and 1.")
         if not 0.0 <= self.test_fraction < 1.0:
@@ -301,6 +310,14 @@ class ChempropTrainer:
         if frame[self.targets].notna().sum().sum() == 0:
             raise ValueError(f"Dataset {path} contains no finite target labels.")
 
+    def _encode_censored_targets(self, frame: pd.DataFrame) -> pd.DataFrame:
+        columns = resolve_relation_columns(
+            frame, self.targets, self.data_cfg.get("relation_column")
+        )
+        codes = relation_codes(frame, self.targets, columns)
+        self.has_censored_targets = self.has_censored_targets or bool(np.any(codes))
+        return prefixed_targets(frame, self.targets, codes)
+
     def _prepare_predefined_files(
         self, frame: pd.DataFrame, test_frame: pd.DataFrame | None
     ) -> list[Path]:
@@ -339,17 +356,14 @@ class ChempropTrainer:
             partition.to_csv(path, index=False)
             partition["split"] = "test"
             partitions.append(partition)
+            self.has_test_data = True
         elif counts.get("test", 0):
             path = prepared / "test.csv"
             partition = frame.loc[labels.eq("test"), columns].copy()
             partition.to_csv(path, index=False)
             partition["split"] = "test"
             partitions.append(partition)
-        else:
-            raise ValueError(
-                "Chemprop requires a test partition. Supply test_dataset_path or "
-                "include test rows in the predefined split."
-            )
+            self.has_test_data = True
         combined_path = prepared / "data_with_splits.csv"
         pd.concat(partitions, ignore_index=True).to_csv(combined_path, index=False)
         return [combined_path]
@@ -402,12 +416,7 @@ class ChempropTrainer:
             external = test_frame[columns].copy()
             external["split"] = "test"
             partitions.append(external)
-        if not any(partition["split"].eq("test").any() for partition in partitions):
-            raise ValueError(
-                "Chemprop requires a test partition. Increase test_fraction or "
-                "supply test_dataset_path."
-            )
-
+        self.has_test_data = bool(test_indices) or test_frame is not None
         prepared = self.workdir / "prepared_data"
         prepared.mkdir(parents=True, exist_ok=True)
         combined = pd.concat(partitions, ignore_index=True)
@@ -420,14 +429,17 @@ class ChempropTrainer:
         return [combined_path]
 
     def prepare_data(self) -> tuple[list[Path], dict[str, Any]]:
+        self.has_test_data = False
         frame = _read_csv(self.dataset_path)
         self._validate_frame(
             frame, self.dataset_path, split=self.split_type == "predefined"
         )
+        frame = self._encode_censored_targets(frame)
         test_frame = None
         if self.test_dataset_path is not None:
             test_frame = _read_csv(self.test_dataset_path)
             self._validate_frame(test_frame, self.test_dataset_path, split=False)
+            test_frame = self._encode_censored_targets(test_frame)
 
         if self.split_type == "predefined":
             data_paths = self._prepare_predefined_files(frame, test_frame)
@@ -446,6 +458,7 @@ class ChempropTrainer:
             "target_label_counts": {
                 target: int(frame[target].notna().sum()) for target in self.targets
             },
+            "censored_training": self.has_censored_targets,
             "split_type": self.split_type,
             "prepared_data_paths": [str(path) for path in data_paths],
         }
@@ -478,13 +491,16 @@ class ChempropTrainer:
         command.extend(["--smiles-columns", self.smiles_column])
         command.extend(["--target-columns", *self.targets])
         command.extend(["--task-type", self.task])
+        loss_name = {
+            "l2": "mse",
+            "gaussian_nll": "gaussian-nll",
+        }.get(self.regression_loss, self.regression_loss)
+        if self.has_censored_targets:
+            loss_name = f"bounded-{loss_name}"
         command.extend(
             [
                 "--loss-function",
-                {
-                    "l2": "mse",
-                    "gaussian_nll": "gaussian-nll",
-                }.get(self.regression_loss, self.regression_loss),
+                loss_name,
             ]
         )
         if resume_checkpoints:
@@ -543,7 +559,13 @@ class ChempropTrainer:
         }
         for option, value in scalar_options.items():
             command.extend([option, str(value)])
-        command.extend(["--metrics", *self.metrics])
+        metrics = [
+            f"bounded-{metric}"
+            if self.has_censored_targets and metric in {"mse", "mae", "rmse"}
+            else metric
+            for metric in self.metrics
+        ]
+        command.extend(["--metrics", *metrics])
         command.extend(["--tracking-metric", self.tracking_metric])
         command.append("--show-individual-scores")
         if bool(training.get("save_data_splits", True)):
@@ -672,6 +694,7 @@ class ChempropTrainer:
         direct_matrix = np.column_stack(
             [pd.to_numeric(predicted[target], errors="coerce") for target in self.targets]
         )
+        test_truths, test_relations = parse_prefixed_targets(truth, self.targets)
         official_output = self.workdir / "model_0" / "test_predictions.csv"
         if official_output.is_file():
             shutil.copy2(
@@ -690,29 +713,40 @@ class ChempropTrainer:
             )
 
         if samples == 0:
-            results = pd.DataFrame({self.smiles_column: truth[self.smiles_column]})
-            direct_metrics: dict[str, Any] = {}
-            for task_index, target in enumerate(self.targets):
-                true_values = pd.to_numeric(truth[target], errors="coerce")
-                predicted_values = direct_matrix[:, task_index]
-                results[f"{target}_true"] = true_values
-                results[f"{target}_prediction"] = predicted_values
-                results[f"{target}_direct_prediction"] = predicted_values
-                direct_metrics[target] = _regression_metrics(
-                    true_values, predicted_values
-                )
             prediction_path = self.workdir / "test_predictions.csv"
             metrics_path = self.workdir / "metrics.json"
-            results.to_csv(prediction_path, index=False)
-            metrics_path.write_text(json.dumps({
-                "backend": "Chemprop v2",
-                "selection": "best_validation_checkpoint",
-                "models": [str(path) for path in best_models],
-                "targets": direct_metrics,
-                "target_names": self.targets,
-                "test_metrics": {"direct_prediction": direct_metrics},
-                "mc_dropout_evaluation": "disabled",
-            }, indent=2) + "\n", encoding="utf-8")
+            prediction_output = {
+                f"direct_{target}_prediction": direct_matrix[:, index]
+                for index, target in enumerate(self.targets)
+            }
+            direct_metrics = {
+                target: regression_metrics(
+                    test_truths[:, index],
+                    direct_matrix[:, index],
+                    test_relations[:, index],
+                )
+                for index, target in enumerate(self.targets)
+            }
+            save_test_evaluation(
+                workdir=self.workdir,
+                smiles=truth[self.smiles_column].astype(str).tolist(),
+                truths=test_truths,
+                relations=test_relations,
+                targets=self.targets,
+                task_types=["regression"] * len(self.targets),
+                predictions=prediction_output,
+                summary={
+                    "backend": "Chemprop v2",
+                    "selection": "best_validation_checkpoint",
+                    "models": [str(path) for path in best_models],
+                    "targets": direct_metrics,
+                    "target_names": self.targets,
+                    "mc_dropout_evaluation": "disabled",
+                },
+                confidence=float(
+                    self.training_cfg.get("test_calibration_confidence", 0.90)
+                ),
+            )
             shutil.copy2(metrics_path, self.workdir / "test_metrics.json")
             return prediction_path, metrics_path
 
@@ -752,9 +786,12 @@ class ChempropTrainer:
         validation_mc_matrix = np.column_stack([
             pd.to_numeric(mc_validation[target], errors="coerce") for target in self.targets
         ])
-        validation_truths = validation[self.targets].apply(
-            pd.to_numeric, errors="coerce"
-        ).to_numpy(float)
+        validation_truths, validation_relations = parse_prefixed_targets(
+            validation, self.targets
+        )
+        # A bound is not an observed point value, so it must not be used as an
+        # exact residual when calibrating post-training uncertainty intervals.
+        validation_truths[validation_relations != 0] = np.nan
         training = pd.read_csv(self.workdir / "prepared_data" / "train.csv")
         prediction_output = fingerprint_local_predictions(
             train_smiles=training[self.smiles_column].astype(str).tolist(),
@@ -779,7 +816,8 @@ class ChempropTrainer:
         _, summary = save_test_evaluation(
             workdir=self.workdir,
             smiles=truth[self.smiles_column].astype(str).tolist(),
-            truths=truth[self.targets].apply(pd.to_numeric, errors="coerce").to_numpy(float),
+            truths=test_truths,
+            relations=test_relations,
             targets=self.targets,
             task_types=["regression"] * len(self.targets),
             predictions=prediction_output,
@@ -952,8 +990,15 @@ class ChempropTrainer:
                 self.workdir / "plots" / "training_history.png",
                 title="Chemprop training",
             )
-        prediction_path, metrics_path = self._evaluate_best_models(
-            command[0], process_environment
-        )
-        print(f"Chemprop best-model test predictions: {prediction_path}", flush=True)
-        print(f"Chemprop best-model test metrics: {metrics_path}", flush=True)
+        if self.has_test_data:
+            prediction_path, metrics_path = self._evaluate_best_models(
+                command[0], process_environment
+            )
+            print(f"Chemprop best-model test predictions: {prediction_path}", flush=True)
+            print(f"Chemprop best-model test metrics: {metrics_path}", flush=True)
+        else:
+            print(
+                "No Chemprop test partition was configured; skipping post-training "
+                "test evaluation.",
+                flush=True,
+            )

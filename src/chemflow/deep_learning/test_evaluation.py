@@ -257,25 +257,72 @@ def uncertainty_toolbox_metrics(
     }
 
 
-def regression_metrics(truth: np.ndarray, prediction: np.ndarray) -> dict[str, Any]:
+def regression_metrics(
+    truth: np.ndarray,
+    prediction: np.ndarray,
+    relations: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Calculate exact-label and one-sided-bound regression metrics.
+
+    Conventional metrics use exact observations only. ``bounded_*`` metrics
+    use every observation, assigning zero error when a prediction satisfies a
+    reported upper or lower bound.
+    """
     truth = np.asarray(truth, dtype=float)
     prediction = np.asarray(prediction, dtype=float)
+    relation = (
+        np.zeros(truth.shape, dtype=np.int8)
+        if relations is None
+        else np.asarray(relations, dtype=np.int8)
+    )
+    if relation.shape != truth.shape:
+        raise ValueError("Regression relation shape must match truth shape.")
     valid = np.isfinite(truth) & np.isfinite(prediction)
-    truth, prediction = truth[valid], prediction[valid]
-    if not len(truth):
-        return {name: None for name in (
+    bounded_residual = prediction[valid] - truth[valid]
+    valid_relations = relation[valid]
+    bounded_residual = np.where(
+        valid_relations < 0, np.maximum(bounded_residual, 0.0), bounded_residual
+    )
+    bounded_residual = np.where(
+        valid_relations > 0, np.minimum(bounded_residual, 0.0), bounded_residual
+    )
+    exact = valid & (relation == 0)
+    exact_truth, exact_prediction = truth[exact], prediction[exact]
+    empty = {name: None for name in (
             "mse", "rmse", "mae", "median_ae", "r2", "pearson", "spearman", "kendall"
-        )} | {"n": 0}
+        )}
+    point_metrics = empty if not len(exact_truth) else {
+        "mse": float(mean_squared_error(exact_truth, exact_prediction)),
+        "rmse": float(np.sqrt(mean_squared_error(exact_truth, exact_prediction))),
+        "mae": float(mean_absolute_error(exact_truth, exact_prediction)),
+        "median_ae": float(median_absolute_error(exact_truth, exact_prediction)),
+        "r2": float(r2_score(exact_truth, exact_prediction)) if len(exact_truth) >= 2 else None,
+        "pearson": _finite_statistic(pearsonr, exact_truth, exact_prediction),
+        "spearman": _finite_statistic(spearmanr, exact_truth, exact_prediction),
+        "kendall": _finite_statistic(kendalltau, exact_truth, exact_prediction),
+    }
+    censored = valid_relations != 0
+    violations = np.abs(bounded_residual[censored])
     return {
-        "n": int(len(truth)),
-        "mse": float(mean_squared_error(truth, prediction)),
-        "rmse": float(np.sqrt(mean_squared_error(truth, prediction))),
-        "mae": float(mean_absolute_error(truth, prediction)),
-        "median_ae": float(median_absolute_error(truth, prediction)),
-        "r2": float(r2_score(truth, prediction)) if len(truth) >= 2 else None,
-        "pearson": _finite_statistic(pearsonr, truth, prediction),
-        "spearman": _finite_statistic(spearmanr, truth, prediction),
-        "kendall": _finite_statistic(kendalltau, truth, prediction),
+        "n": int(len(exact_truth)),
+        **point_metrics,
+        "n_total": int(valid.sum()),
+        "n_exact": int(exact.sum()),
+        "n_censored": int(censored.sum()),
+        "n_upper_bound": int((valid_relations < 0).sum()),
+        "n_lower_bound": int((valid_relations > 0).sum()),
+        "bounded_mse": float(np.mean(np.square(bounded_residual))) if valid.any() else None,
+        "bounded_rmse": float(np.sqrt(np.mean(np.square(bounded_residual)))) if valid.any() else None,
+        "bounded_mae": float(np.mean(np.abs(bounded_residual))) if valid.any() else None,
+        "bounded_median_ae": float(np.median(np.abs(bounded_residual))) if valid.any() else None,
+        "censored_bound_satisfaction_rate": (
+            float(np.mean(violations == 0.0)) if censored.any() else None
+        ),
+        "censored_mean_violation": float(np.mean(violations)) if censored.any() else None,
+        "censored_rmse_violation": (
+            float(np.sqrt(np.mean(np.square(violations)))) if censored.any() else None
+        ),
+        "n_bound_violations": int((violations > 0.0).sum()),
     }
 
 
@@ -315,6 +362,7 @@ def save_test_evaluation(
     task_types: Sequence[str],
     predictions: dict[str, np.ndarray],
     summary: dict[str, Any],
+    relations: np.ndarray | None = None,
     confidence: float = 0.90,
     threshold: float = 0.5,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -325,6 +373,13 @@ def save_test_evaluation(
         truths = truths.reshape(-1, 1)
     if truths.shape != (len(smiles), len(targets)):
         raise ValueError("Test truth shape does not match SMILES and target metadata.")
+    relations = (
+        np.zeros(truths.shape, dtype=np.int8)
+        if relations is None
+        else np.asarray(relations, dtype=np.int8)
+    )
+    if relations.shape != truths.shape:
+        raise ValueError("Test relation shape does not match test truth shape.")
     coverage_label = int(round(float(confidence) * 100))
     frame = pd.DataFrame({"SMILES": list(smiles)})
     variants: dict[str, dict[str, Any]] = {
@@ -337,6 +392,7 @@ def save_test_evaluation(
     for index, (target, task_type) in enumerate(zip(targets, task_types)):
         output_name = f"{target}_prediction"
         truth = truths[:, index]
+        relation = relations[:, index]
         direct = np.asarray(
             predictions.get(f"direct_{output_name}", np.full(len(frame), np.nan)),
             dtype=float,
@@ -366,6 +422,9 @@ def save_test_evaluation(
             dtype=float,
         )
         frame[f"{target}_true"] = truth
+        frame[f"{target}_relation"] = np.asarray(
+            [{-1: "<", 0: "=", 1: ">"}[int(value)] for value in relation]
+        )
         # Keep the historical prediction name for downstream scripts while
         # exposing the explicit direct/MC/calibrated contract.
         frame[f"{target}_prediction"] = direct
@@ -393,10 +452,10 @@ def save_test_evaluation(
                 truth, calibrated, threshold
             )
         else:
-            variants["direct_prediction"][target] = metric_function(truth, direct)
-            variants["mc_dropout_prediction"][target] = metric_function(truth, mc)
+            variants["direct_prediction"][target] = metric_function(truth, direct, relation)
+            variants["mc_dropout_prediction"][target] = metric_function(truth, mc, relation)
             variants["locally_calibrated_prediction"][target] = metric_function(
-                truth, calibrated
+                truth, calibrated, relation
             )
 
         diagnostic_names = (
@@ -425,6 +484,7 @@ def save_test_evaluation(
             & np.isfinite(lower)
             & np.isfinite(upper)
             & np.isfinite(calibrated)
+            & (relation == 0)
         )
         covered = np.full(len(frame), np.nan)
         covered[finite_interval] = (
@@ -432,6 +492,12 @@ def save_test_evaluation(
             & (truth[finite_interval] <= upper[finite_interval])
         ).astype(float)
         frame[f"{target}_interval_covered"] = covered
+        bound_compatible = np.full(len(frame), np.nan)
+        upper_bound = np.isfinite(truth) & np.isfinite(lower) & (relation < 0)
+        lower_bound = np.isfinite(truth) & np.isfinite(upper) & (relation > 0)
+        bound_compatible[upper_bound] = (lower[upper_bound] <= truth[upper_bound]).astype(float)
+        bound_compatible[lower_bound] = (upper[lower_bound] >= truth[lower_bound]).astype(float)
+        frame[f"{target}_interval_bound_compatible"] = bound_compatible
         observed_coverage = (
             float(np.nanmean(covered)) if np.isfinite(covered).any() else None
         )
@@ -443,7 +509,10 @@ def save_test_evaluation(
             assessment = "underconfident"
         else:
             assessment = "approximately_calibrated"
-        valid_uq = np.isfinite(mc_sd) & np.isfinite(truth) & np.isfinite(calibrated)
+        valid_uq = (
+            np.isfinite(mc_sd) & np.isfinite(truth) & np.isfinite(calibrated)
+            & (relation == 0)
+        )
         uncertainty_error_spearman = (
             _finite_statistic(
                 spearmanr,
@@ -478,7 +547,11 @@ def save_test_evaluation(
                 if f"{target}_local_calibration_weak" in frame else None
             ),
             "uncertainty_toolbox": uncertainty_toolbox_metrics(
-                truth, mc, mc_sd
+                truth[relation == 0], mc[relation == 0], mc_sd[relation == 0]
+            ),
+            "censored_interval_bound_compatibility": (
+                float(np.nanmean(bound_compatible))
+                if np.isfinite(bound_compatible).any() else None
             ),
         }
 

@@ -83,6 +83,7 @@ from chemflow.deep_learning.task_weighting import (
     resolve_task_types,
 )
 from chemflow.deep_learning.test_evaluation import save_test_evaluation
+from chemflow.deep_learning.censoring import relation_codes, resolve_relation_columns
 
 
 @dataclass
@@ -99,10 +100,11 @@ class DatasetConfig:
     smiles_column: str = "SMILES"
     target_column: str | list[str] = "target"
     task_types: list[str] | dict[str, str] | None = None
+    relation_column: str | list[str] | dict[str, str] | None = None
     split_column: str | None = None
     split_type: str = "random"
     val_fraction: float = 0.1
-    test_fraction: float = 0.1
+    test_fraction: float = 0.0
 
 
 @dataclass
@@ -481,7 +483,11 @@ def _target_columns(config: DatasetConfig) -> list[str]:
     return columns
 
 
-def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dict], list[dict]]:
+def _valid_records(
+    frame: pd.DataFrame,
+    config: DatasetConfig,
+    task_types: list[str] | None = None,
+) -> tuple[list[dict], list[dict]]:
     target_columns = _target_columns(config)
     smiles_column = config.smiles_column
     if (
@@ -497,10 +503,16 @@ def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dic
     missing = [column for column in required if column not in frame.columns]
     if missing:
         raise KeyError(f"Dataset is missing required columns: {missing}")
+    relation_columns = resolve_relation_columns(
+        frame, target_columns, config.relation_column
+    )
+    relations = relation_codes(
+        frame, target_columns, relation_columns, task_types=task_types
+    )
 
     records: list[dict] = []
     rejected: list[dict] = []
-    for row_index, row in frame.iterrows():
+    for row_position, (row_index, row) in enumerate(frame.iterrows()):
         smiles = str(row[smiles_column]).strip()
         targets = pd.to_numeric(row[target_columns], errors="coerce").to_numpy(
             dtype=np.float32
@@ -523,6 +535,7 @@ def _valid_records(frame: pd.DataFrame, config: DatasetConfig) -> tuple[list[dic
                 "original_index": row_index,
                 "smiles": smiles,
                 "targets": targets,
+                "relations": relations[row_position],
                 "mol": molecule,
                 "split": (
                     str(row[config.split_column]).strip().lower()
@@ -607,6 +620,8 @@ def _datapoints(records: list[dict]) -> list[data.MoleculeDatapoint]:
         data.MoleculeDatapoint.from_smi(
             item["smiles"],
             np.asarray(item["targets"], dtype=np.float32),
+            lt_mask=np.asarray(item["relations"] < 0, dtype=bool),
+            gt_mask=np.asarray(item["relations"] > 0, dtype=bool),
         )
         for item in records
     ]
@@ -627,6 +642,12 @@ def _save_split_manifest(
                 "SMILES": item["smiles"],
                 **{
                     target_name: float(item["targets"][task_index])
+                    for task_index, target_name in enumerate(target_columns)
+                },
+                **{
+                    f"{target_name}_relation": {-1: "<", 0: "=", 1: ">"}[
+                        int(item.get("relations", np.zeros(len(target_columns)))[task_index])
+                    ]
                     for task_index, target_name in enumerate(target_columns)
                 },
                 "split": split_name,
@@ -1301,12 +1322,14 @@ class CheMeleonTrainer:
         if not dataset_path.is_file():
             raise FileNotFoundError(f"Dataset does not exist: {dataset_path}")
         frame = pd.read_csv(dataset_path)
-        records, rejected = _valid_records(frame, self.config.dataset)
         target_columns = _target_columns(self.config.dataset)
         task_types = resolve_task_types(
             self.config.base.task,
             target_columns,
             self.config.dataset.task_types,
+        )
+        records, rejected = _valid_records(
+            frame, self.config.dataset, task_types
         )
 
         train_records, val_records, test_records = _split_records(
@@ -1330,7 +1353,9 @@ class CheMeleonTrainer:
                 )
             test_frame = pd.read_csv(test_dataset_path)
             test_config = replace(self.config.dataset, split_column=None)
-            test_records, test_rejected = _valid_records(test_frame, test_config)
+            test_records, test_rejected = _valid_records(
+                test_frame, test_config, task_types
+            )
             for item in rejected:
                 item["dataset"] = "training"
             for item in test_rejected:
@@ -1761,6 +1786,7 @@ class CheMeleonTrainer:
             workdir=self.workdir,
             smiles=[item["smiles"] for item in test_records],
             truths=targets,
+            relations=np.stack([item["relations"] for item in test_records]),
             targets=target_columns,
             task_types=task_types,
             predictions=prediction_output,

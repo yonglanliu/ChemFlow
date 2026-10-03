@@ -73,6 +73,7 @@ from chemflow.deep_learning.test_evaluation import (
 )
 
 from chemflow.deep_learning.kermt.vendor.kermt.data import MolCollator
+from chemflow.deep_learning.kermt.vendor.kermt.data import MoleculeDataset
 from chemflow.deep_learning.kermt.vendor.kermt.data import StandardScaler
 from chemflow.deep_learning.kermt.vendor.kermt.util.loss import MTLLoss
 from chemflow.deep_learning.kermt.vendor.kermt.util.metrics import get_metric_func
@@ -275,9 +276,10 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
         disable=not is_main,
     )
     for item in progress:
-        _, batch, features_batch, mask, targets = item
+        _, batch, features_batch, mask, targets, lt_mask, gt_mask = item
         if next(model.parameters()).is_cuda:
             mask, targets = mask.cuda(), targets.cuda()
+            lt_mask, gt_mask = lt_mask.cuda(), gt_mask.cuda()
         class_weights = torch.ones(targets.shape)
 
         if args.cuda:
@@ -289,7 +291,12 @@ def train(epoch, model, data, loss_func, mtl_loss, optimizer, scheduler,
         # would miss it, letting the MTL task-weight gradient accumulate.
         optimizer.zero_grad()
         preds = model(batch, features_batch)
-        loss = loss_func(preds, targets) * class_weights * mask
+        bounded_preds = torch.where(
+            (lt_mask & (preds <= targets)) | (gt_mask & (preds >= targets)),
+            targets,
+            preds,
+        )
+        loss = loss_func(bounded_preds, targets) * class_weights * mask
         task_loss_weights = torch.as_tensor(
             getattr(args, "task_loss_weights", None)
             or [1.0] * loss.shape[1],
@@ -507,6 +514,21 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
 
     # Set up test set evaluation
     test_smiles, test_targets = test_data.smiles(), test_data.targets()
+    has_test_data = len(test_data) > 0
+    test_relations = np.asarray([
+        [(-1 if lt else 1 if gt else 0) for lt, gt in zip(item.lt_mask, item.gt_mask)]
+        for item in test_data
+    ], dtype=np.int8)
+
+    def bound_adjusted_test_predictions(values):
+        """Use zero violation for predictions satisfying censored test bounds."""
+        predictions = np.asarray(values, dtype=float)
+        bounds = np.asarray(test_targets, dtype=float)
+        satisfied = ((test_relations < 0) & (predictions <= bounds)) | (
+            (test_relations > 0) & (predictions >= bounds)
+        )
+        return np.where(satisfied, bounds, predictions).tolist()
+
     sum_test_preds = np.zeros((len(test_smiles), args.num_tasks))
     val_smiles = val_data.smiles()
     scaled_val_targets = np.asarray(val_data.targets(), dtype=float)
@@ -1077,6 +1099,12 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             else:
                 info(f'Model {model_idx} best validation {args.metric} = {best_score:.6f} on epoch {best_epoch}')
 
+        if not has_test_data:
+            info('No test set was configured; skipping post-training test evaluation.')
+            if args.tensorboard:
+                writer.close()
+            continue
+
         if args.task_wise_checkpoint:
             test_preds = np.zeros((len(test_data), args.num_tasks))
             test_scores = []
@@ -1147,7 +1175,7 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                 mc_val_draws.append(np.asarray(mc_val, dtype=float))
             if not is_blinded_test:
                 test_scores = evaluate_predictions(
-                    preds=test_preds,
+                    preds=bound_adjusted_test_predictions(test_preds),
                     targets=test_targets,
                     num_tasks=args.num_tasks,
                     metric_func=metric_func,
@@ -1160,7 +1188,7 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
 
         if not is_blinded_test and not args.task_wise_checkpoint:
             test_scores = evaluate_predictions(
-                preds=test_preds,
+                preds=bound_adjusted_test_predictions(test_preds),
                 targets=test_targets,
                 num_tasks=args.num_tasks,
                 metric_func=metric_func,
@@ -1185,7 +1213,7 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
 
         if not is_blinded_test:
             ensemble_scores = evaluate_predictions(
-                preds=avg_test_preds,
+                preds=bound_adjusted_test_predictions(avg_test_preds),
                 targets=test_targets,
                 num_tasks=args.num_tasks,
                 metric_func=metric_func,
@@ -1223,7 +1251,7 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             writer.close()
 
     if (
-        is_main and not is_blinded_test and not args.task_wise_checkpoint
+        is_main and has_test_data and not is_blinded_test and not args.task_wise_checkpoint
         and int(getattr(args, 'test_mc_dropout_samples', 0)) >= 2
     ):
         direct_test = sum_test_preds / args.ensemble_size
@@ -1259,6 +1287,7 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             workdir=output_root,
             smiles=test_smiles,
             truths=np.asarray(test_targets, dtype=float),
+            relations=test_relations,
             targets=args.task_names,
             task_types=['regression'] * len(args.task_names),
             predictions=prediction_output,
@@ -1306,8 +1335,8 @@ def load_data(args, debug, logger):
     if args.separate_val_path and args.separate_test_path:
         train_data = data
     elif args.separate_val_path:
-        train_data, _, test_data = split_data(data=data, split_type=args.split_type,
-                                              sizes=(0.8, 0.2, 0.0), seed=args.seed, args=args, logger=logger)
+        train_data = data
+        test_data = MoleculeDataset([])
     elif args.separate_test_path:
         train_data, val_data, _ = split_data(data=data, split_type=args.split_type,
                                              sizes=(0.8, 0.2, 0.0), seed=args.seed, args=args, logger=logger)
@@ -1327,7 +1356,8 @@ def load_data(args, debug, logger):
     if args.features_scaling:
         features_scaler = train_data.normalize_features(replace_nan_token=0)
         val_data.normalize_features(features_scaler)
-        test_data.normalize_features(features_scaler)
+        if len(test_data):
+            test_data.normalize_features(features_scaler)
     else:
         features_scaler = None
     args.train_data_size = len(train_data)

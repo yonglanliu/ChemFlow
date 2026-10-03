@@ -45,6 +45,11 @@ from chemflow.deep_learning.task_weighting import (
     resolve_task_loss_weights,
     resolve_task_types,
 )
+from chemflow.deep_learning.censoring import (
+    censor_predictions,
+    relation_codes,
+    resolve_relation_columns,
+)
 from chemflow.deep_learning.utils import move_optimizer_state_to_device
 from chemflow.deep_learning.test_evaluation import save_test_evaluation
 from chemflow.deep_learning.chemeleon.applicability import (
@@ -134,6 +139,7 @@ class Record:
     name: str
     smiles: str
     targets: np.ndarray
+    relations: np.ndarray
     split: str | None
 
 
@@ -380,6 +386,12 @@ class HuggingFaceGraphormerTrainer:
         frame = pd.read_csv(path)
         smiles_column = str(self.data_cfg.get("smiles_column", "SMILES"))
         target_columns = self._target_columns()
+        relation_columns = resolve_relation_columns(
+            frame, target_columns, self.data_cfg.get("relation_column")
+        )
+        relations = relation_codes(
+            frame, target_columns, relation_columns, task_types=self.task_types
+        )
         split_column = self.data_cfg.get("split_column")
         name_column = self.data_cfg.get("name_column")
         required = {smiles_column, *target_columns}
@@ -391,7 +403,7 @@ class HuggingFaceGraphormerTrainer:
 
         records: list[Record] = []
         rejected: list[dict[str, Any]] = []
-        for index, row in frame.iterrows():
+        for row_position, (index, row) in enumerate(frame.iterrows()):
             smiles = "" if pd.isna(row[smiles_column]) else str(row[smiles_column]).strip()
             targets = pd.to_numeric(row[target_columns], errors="coerce").to_numpy(dtype=float)
             split = _normalise_split(row[split_column]) if split_column else None
@@ -426,6 +438,7 @@ class HuggingFaceGraphormerTrainer:
                     name=name,
                     smiles=smiles,
                     targets=targets,
+                    relations=relations[row_position],
                     split=split,
                 )
             )
@@ -443,6 +456,15 @@ class HuggingFaceGraphormerTrainer:
                     f"Test dataset does not exist: {resolved_test_path}"
                 )
             test_frame = pd.read_csv(resolved_test_path)
+            test_relation_columns = resolve_relation_columns(
+                test_frame, target_columns, self.data_cfg.get("relation_column")
+            )
+            test_relations = relation_codes(
+                test_frame,
+                target_columns,
+                test_relation_columns,
+                task_types=self.task_types,
+            )
             missing_test = sorted(
                 {smiles_column, *target_columns} - set(test_frame.columns)
             )
@@ -453,7 +475,7 @@ class HuggingFaceGraphormerTrainer:
                 )
             offset = len(frame)
             external_count = 0
-            for position, row in test_frame.iterrows():
+            for row_position, (position, row) in enumerate(test_frame.iterrows()):
                 smiles = (
                     ""
                     if pd.isna(row[smiles_column])
@@ -491,6 +513,7 @@ class HuggingFaceGraphormerTrainer:
                         name=name,
                         smiles=smiles,
                         targets=targets,
+                        relations=test_relations[row_position],
                         split="test",
                     )
                 )
@@ -537,7 +560,7 @@ class HuggingFaceGraphormerTrainer:
             test_fraction = (
                 0.0
                 if external_test
-                else float(self.data_cfg.get("test_fraction", 0.1))
+                else float(self.data_cfg.get("test_fraction", 0.0))
             )
             split_type = str(self.data_cfg.get("split_type", "scaffold_balanced"))
             indices = chemprop_data.make_split_indices(
@@ -560,6 +583,10 @@ class HuggingFaceGraphormerTrainer:
             for record in values:
                 row = {"Name": record.name, "SMILES": record.smiles, "split": split_name}
                 row.update(dict(zip(target_columns, record.targets)))
+                for task_index, target in enumerate(target_columns):
+                    row[f"{target}_relation"] = {-1: "<", 0: "=", 1: ">"}[
+                        int(record.relations[task_index])
+                    ]
                 rows.append(row)
         if self.is_main_process:
             pd.DataFrame(rows).to_csv(self.workdir / "data_splits.csv", index=False)
@@ -599,6 +626,7 @@ class HuggingFaceGraphormerTrainer:
                 "smiles": record.smiles,
                 "original_index": record.original_index,
                 "raw_targets": record.targets.astype(float),
+                "relations": record.relations.astype(np.int8),
             }
             try:
                 items.append(self.preprocess_item(item))
@@ -690,13 +718,14 @@ class HuggingFaceGraphormerTrainer:
                 "smiles": [item["smiles"] for item in items],
                 "original_indices": [item["original_index"] for item in items],
                 "raw_targets": [item["raw_targets"] for item in items],
+                "relations": [item["relations"] for item in items],
             }
             model_items = [
                 {
                     key: value
                     for key, value in item.items()
                     if key
-                    not in {"name", "smiles", "original_index", "raw_targets"}
+                    not in {"name", "smiles", "original_index", "raw_targets", "relations"}
                 }
                 for item in items
             ]
@@ -931,6 +960,7 @@ class HuggingFaceGraphormerTrainer:
         huber_delta: float = 1.0,
         nll_scale: float = 1.0,
         gaussian_nll_variance: float = 1.0,
+        relations: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return a weighted mean over the finite labels in a batch."""
         mask = torch.isfinite(labels)
@@ -947,6 +977,10 @@ class HuggingFaceGraphormerTrainer:
             else:
                 predictions = logits[:, index]
                 targets = finite_labels[:, index]
+                if relations is not None:
+                    predictions = censor_predictions(
+                        predictions, targets, relations[:, index]
+                    )
                 if regression_loss in {"l2", "mse"}:
                     values = (predictions - targets).square()
                 elif regression_loss == "mae":
@@ -993,6 +1027,13 @@ class HuggingFaceGraphormerTrainer:
                 names, smiles = batch.pop("names"), batch.pop("smiles")
                 batch.pop("original_indices")
                 raw_targets = np.asarray(batch.pop("raw_targets"), dtype=float)
+                relations = np.asarray(
+                    batch.pop(
+                        "relations",
+                        np.zeros_like(raw_targets, dtype=np.int8),
+                    ),
+                    dtype=np.int8,
+                )
                 batch.pop("labels", None)
                 inputs = {key: value.to(self.device) for key, value in batch.items()}
                 logits = model(**inputs).logits.detach().cpu().numpy()
@@ -1001,13 +1042,14 @@ class HuggingFaceGraphormerTrainer:
                 for index, task_type in enumerate(self.task_types):
                     if task_type == "classification":
                         predictions[:, index] = expit(logits[:, index])
-                for name, smiles_value, truth, prediction in zip(
-                    names, smiles, raw_targets, predictions
+                for name, smiles_value, truth, prediction, relation in zip(
+                    names, smiles, raw_targets, predictions, relations
                 ):
                     row: dict[str, Any] = {"Name": name, "SMILES": smiles_value}
                     for task_index, target in enumerate(target_columns):
                         row[f"{target}_true"] = truth[task_index]
                         row[f"{target}_prediction"] = prediction[task_index]
+                        row[f"{target}_relation"] = int(relation[task_index])
                         if self.task_types[task_index] == "classification":
                             row[f"{target}_probability"] = prediction[task_index]
                             row[f"{target}_class"] = int(
@@ -1027,7 +1069,23 @@ class HuggingFaceGraphormerTrainer:
                     threshold=self.threshold,
                 )
             else:
+                relation_column = f"{target}_relation"
+                if relation_column in frame:
+                    relation = frame[relation_column].to_numpy(dtype=np.int8)
+                    residual = predictions[mask] - true_values[mask]
+                    finite_relations = relation[mask]
+                    residual = np.where(
+                        finite_relations < 0, np.maximum(residual, 0.0), residual
+                    )
+                    residual = np.where(
+                        finite_relations > 0, np.minimum(residual, 0.0), residual
+                    )
+                    bounded_mse = float(np.mean(np.square(residual)))
+                    mask &= relation == 0
                 metrics[target] = _metrics(true_values[mask], predictions[mask])
+                if relation_column in frame:
+                    metrics[target]["loss"] = bounded_mse
+                    metrics[target]["rmse"] = math.sqrt(bounded_mse)
                 # Mixed-task checkpoint selection must not be dominated by the
                 # physical units of one regression endpoint. Keep the reported
                 # RMSE/MAE in original units, but define loss in the same
@@ -1066,6 +1124,7 @@ class HuggingFaceGraphormerTrainer:
                 smiles.extend(str(value) for value in batch.pop("smiles"))
                 original_indices.extend(int(value) for value in batch.pop("original_indices"))
                 targets.extend(np.asarray(batch.pop("raw_targets"), dtype=np.float32))
+                batch.pop("relations", None)
                 batch.pop("labels", None)
                 inputs = {key: value.to(self.device) for key, value in batch.items()}
                 encoder_output = model.encoder(**inputs, return_dict=True)
@@ -1428,6 +1487,12 @@ class HuggingFaceGraphormerTrainer:
                     name=str(row["Name"]),
                     smiles=str(row["SMILES"]),
                     targets=targets,
+                    relations=np.asarray([
+                        {"<": -1, "=": 0, ">": 1}.get(
+                            str(row.get(f"{target}_relation", "=")).strip(), 0
+                        )
+                        for target in target_names
+                    ], dtype=np.int8),
                     split=split,
                 )
             )
@@ -1669,6 +1734,9 @@ class HuggingFaceGraphormerTrainer:
                 batch.pop("smiles")
                 batch.pop("original_indices")
                 batch.pop("raw_targets")
+                relations = torch.as_tensor(
+                    batch.pop("relations"), dtype=torch.int8, device=self.device
+                )
                 labels = batch.pop("labels").to(self.device).float()
                 inputs = {key: value.to(self.device) for key, value in batch.items()}
                 optimizer.zero_grad(set_to_none=True)
@@ -1684,6 +1752,7 @@ class HuggingFaceGraphormerTrainer:
                     huber_delta=self.huber_delta,
                     nll_scale=self.nll_scale,
                     gaussian_nll_variance=self.gaussian_nll_variance,
+                    relations=relations,
                 )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.train_cfg.get("gradient_clip", 1.0)))
@@ -1980,10 +2049,15 @@ class HuggingFaceGraphormerTrainer:
             truths = np.column_stack(
                 [predictions[f"{target}_true"].to_numpy(float) for target in target_columns]
             )
+            relations = np.column_stack([
+                predictions[f"{target}_relation"].to_numpy(np.int8)
+                for target in target_columns
+            ])
             save_test_evaluation(
                 workdir=self.workdir,
                 smiles=predictions["SMILES"].astype(str).tolist(),
                 truths=truths,
+                relations=relations,
                 targets=target_columns,
                 task_types=self.task_types,
                 predictions=prediction_output,

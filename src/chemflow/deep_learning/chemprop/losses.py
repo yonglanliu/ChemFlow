@@ -7,6 +7,7 @@ import math
 
 import torch
 from chemprop.nn.metrics import ChempropMetric, LossFunctionRegistry
+from chemflow.deep_learning.censoring import censor_predictions_from_masks
 
 
 def _positive_environment(name: str, default: float) -> float:
@@ -61,3 +62,26 @@ class GaussianNLLLoss(ChempropMetric):
             full=True,
             reduction="none",
         )
+
+
+class _BoundedLossMixin:
+    """Apply Chemprop inequality masks before a symmetric point loss."""
+
+    def _calc_unreduced_loss(self, preds, targets, mask, weights, lt_mask, gt_mask):
+        preds = censor_predictions_from_masks(preds, targets, lt_mask, gt_mask)
+        return super()._calc_unreduced_loss(preds, targets, mask, weights)
+
+
+@LossFunctionRegistry.register("bounded-huber")
+class BoundedHuberLoss(_BoundedLossMixin, HuberLoss):
+    pass
+
+
+@LossFunctionRegistry.register("bounded-nll")
+class BoundedLaplaceNLLLoss(_BoundedLossMixin, LaplaceNLLLoss):
+    pass
+
+
+@LossFunctionRegistry.register("bounded-gaussian-nll")
+class BoundedGaussianNLLLoss(_BoundedLossMixin, GaussianNLLLoss):
+    pass

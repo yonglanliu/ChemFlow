@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from chemprop.nn.metrics import ChempropMetric
 from chemprop.nn.predictors import _FFNPredictorBase
+from chemflow.deep_learning.censoring import censor_predictions_from_masks
 
 
 REGRESSION_LOSSES = ("l2", "mse", "mae", "huber", "nll", "gaussian_nll")
@@ -60,6 +61,9 @@ class RegressionLoss(ChempropMetric):
         self.gaussian_nll_variance = float(gaussian_nll_variance)
 
     def _calc_unreduced_loss(self, preds, targets, *args):
+        lt_mask = args[-2] if len(args) >= 4 else None
+        gt_mask = args[-1] if len(args) >= 4 else None
+        preds = censor_predictions_from_masks(preds, targets, lt_mask, gt_mask)
         return _regression_loss_values(
             preds,
             targets,
@@ -101,6 +105,8 @@ class MixedTaskLoss(ChempropMetric):
         self.gaussian_nll_variance = float(gaussian_nll_variance)
 
     def _calc_unreduced_loss(self, preds, targets, *args):
+        lt_mask = args[-2] if len(args) >= 4 else None
+        gt_mask = args[-1] if len(args) >= 4 else None
         loss = torch.zeros_like(preds)
         for index, task_type in enumerate(self.task_types):
             if task_type == "classification":
@@ -108,8 +114,14 @@ class MixedTaskLoss(ChempropMetric):
                     preds[:, index], targets[:, index], reduction="none"
                 )
             else:
-                loss[:, index] = _regression_loss_values(
+                regression_preds = censor_predictions_from_masks(
                     preds[:, index],
+                    targets[:, index],
+                    None if lt_mask is None else lt_mask[:, index],
+                    None if gt_mask is None else gt_mask[:, index],
+                )
+                loss[:, index] = _regression_loss_values(
+                    regression_preds,
                     targets[:, index],
                     name=self.regression_loss,
                     huber_delta=self.huber_delta,
@@ -139,6 +151,8 @@ class MixedTaskMetric(ChempropMetric):
         self.gaussian_nll_variance = float(gaussian_nll_variance)
 
     def _calc_unreduced_loss(self, preds, targets, *args):
+        lt_mask = args[-2] if len(args) >= 4 else None
+        gt_mask = args[-1] if len(args) >= 4 else None
         loss = torch.zeros_like(preds)
         for index, task_type in enumerate(self.task_types):
             if task_type == "classification":
@@ -148,8 +162,14 @@ class MixedTaskMetric(ChempropMetric):
                     reduction="none",
                 )
             else:
-                loss[:, index] = _regression_loss_values(
+                regression_preds = censor_predictions_from_masks(
                     preds[:, index],
+                    targets[:, index],
+                    None if lt_mask is None else lt_mask[:, index],
+                    None if gt_mask is None else gt_mask[:, index],
+                )
+                loss[:, index] = _regression_loss_values(
+                    regression_preds,
                     targets[:, index],
                     name=self.regression_loss,
                     huber_delta=self.huber_delta,

@@ -34,6 +34,11 @@ from chemflow.deep_learning.task_weighting import (
     resolve_task_loss_weights,
     resolve_task_types,
 )
+from chemflow.deep_learning.censoring import (
+    censor_predictions,
+    relation_codes,
+    resolve_relation_columns,
+)
 from chemflow.deep_learning.chemeleon.applicability import (
     APPLICABILITY_VERSION, DEFAULT_CALIBRATION_CONFIDENCE,
     DEFAULT_LOCAL_MAX_SAMPLES, DEFAULT_LOCAL_MIN_EMBEDDING_SIMILARITY,
@@ -223,6 +228,7 @@ class Record:
     name: str
     smiles: str
     targets: np.ndarray
+    relations: np.ndarray
     split: str | None
 
 
@@ -241,6 +247,7 @@ class SmilesDataset(Dataset):
             "name": record.name,
             "index": record.index,
             "raw_targets": record.targets,
+            "relations": record.relations,
             "labels": self.labels[index],
         }
 
@@ -325,9 +332,15 @@ class ChemBERTaTrainer:
         if missing:
             raise KeyError(f"Dataset is missing required columns: {missing}")
         aliases = {"train": "train", "training": "train", "val": "val", "valid": "val", "validation": "val", "test": "test"}
+        relation_columns = resolve_relation_columns(
+            frame, self.targets, self.data_cfg.get("relation_column")
+        )
+        relations = relation_codes(
+            frame, self.targets, relation_columns, task_types=self.task_types
+        )
         records: list[Record] = []
         rejected: list[dict[str, Any]] = []
-        for index, row in frame.iterrows():
+        for row_position, (index, row) in enumerate(frame.iterrows()):
             smiles = "" if pd.isna(row[smiles_column]) else str(row[smiles_column]).strip()
             molecule = Chem.MolFromSmiles(smiles) if smiles else None
             values = pd.to_numeric(row[self.targets], errors="coerce").to_numpy(float)
@@ -340,17 +353,28 @@ class ChemBERTaTrainer:
                 rejected.append({"index": index, "smiles": smiles})
                 continue
             name = str(row[name_column]) if name_column and pd.notna(row[name_column]) else str(index)
-            records.append(Record(int(index), name, canonical, values, split))
+            records.append(
+                Record(int(index), name, canonical, values, relations[row_position], split)
+            )
         external_test = self.data_cfg.get("test_dataset_path")
         if external_test:
             if float(self.data_cfg.get("test_fraction", 0.0)) != 0.0:
                 raise ValueError("test_dataset_path requires test_fraction = 0.0.")
             test_frame = pd.read_csv(Path(external_test).expanduser().resolve())
+            test_relation_columns = resolve_relation_columns(
+                test_frame, self.targets, self.data_cfg.get("relation_column")
+            )
+            test_relations = relation_codes(
+                test_frame,
+                self.targets,
+                test_relation_columns,
+                task_types=self.task_types,
+            )
             missing_test = sorted({smiles_column, *self.targets} - set(test_frame.columns))
             if missing_test:
                 raise KeyError(f"External test dataset is missing columns: {missing_test}")
             offset = len(frame)
-            for position, row in test_frame.iterrows():
+            for row_position, (position, row) in enumerate(test_frame.iterrows()):
                 smiles = "" if pd.isna(row[smiles_column]) else str(row[smiles_column]).strip()
                 molecule = Chem.MolFromSmiles(smiles) if smiles else None
                 values = pd.to_numeric(row[self.targets], errors="coerce").to_numpy(float)
@@ -360,7 +384,8 @@ class ChemBERTaTrainer:
                 name = str(row[name_column]) if name_column and name_column in test_frame and pd.notna(row[name_column]) else f"test:{position}"
                 records.append(Record(
                     offset + int(position), name,
-                    Chem.MolToSmiles(molecule, canonical=True), values, "test",
+                    Chem.MolToSmiles(molecule, canonical=True), values,
+                    test_relations[row_position], "test",
                 ))
         if self.is_main_process:
             pd.DataFrame(rejected).to_csv(self.workdir / "rejected_rows.csv", index=False)
@@ -375,7 +400,7 @@ class ChemBERTaTrainer:
             external_test = [record for record in records if record.split == "test"]
             split_pool = [record for record in records if record.split != "test"]
             val_fraction = float(self.data_cfg.get("val_fraction", 0.1))
-            test_fraction = 0.0 if external_test else float(self.data_cfg.get("test_fraction", 0.1))
+            test_fraction = 0.0 if external_test else float(self.data_cfg.get("test_fraction", 0.0))
             split_type = str(self.data_cfg.get("split_type", "scaffold_balanced"))
             indices = chemprop_data.make_split_indices(
                 [Chem.MolFromSmiles(r.smiles) for r in split_pool],
@@ -394,13 +419,18 @@ class ChemBERTaTrainer:
         rows = []
         for split, values in splits.items():
             for record in values:
-                rows.append({"Name": record.name, "SMILES": record.smiles, **dict(zip(self.targets, record.targets)), "split": split})
+                row = {"Name": record.name, "SMILES": record.smiles, **dict(zip(self.targets, record.targets)), "split": split}
+                for task_index, target in enumerate(self.targets):
+                    row[f"{target}_relation"] = {-1: "<", 0: "=", 1: ">"}[
+                        int(record.relations[task_index])
+                    ]
+                rows.append(row)
         if self.is_main_process:
             pd.DataFrame(rows).to_csv(self.workdir / "data_splits.csv", index=False)
         return splits
 
     @staticmethod
-    def _loss(logits, labels, weights, task_types):
+    def _loss(logits, labels, weights, task_types, relations=None):
         total = logits.new_tensor(0.0)
         denominator = logits.new_tensor(0.0)
         for index, task_type in enumerate(task_types):
@@ -412,9 +442,13 @@ class ChemBERTaTrainer:
                     logits[valid, index], labels[valid, index], reduction="sum"
                 )
             else:
-                values = nn.functional.mse_loss(
-                    logits[valid, index], labels[valid, index], reduction="sum"
-                )
+                predictions = logits[valid, index]
+                targets = labels[valid, index]
+                if relations is not None:
+                    predictions = censor_predictions(
+                        predictions, targets, relations[valid, index]
+                    )
+                values = nn.functional.mse_loss(predictions, targets, reduction="sum")
             total = total + values * weights[index]
             denominator = denominator + valid.sum() * weights[index]
         return total / denominator.clamp_min(1.0)
@@ -430,6 +464,9 @@ class ChemBERTaTrainer:
                 np.stack([item["labels"] for item in items]), dtype=torch.float32
             )
             tokens["raw_targets"] = np.stack([item["raw_targets"] for item in items])
+            tokens["relations"] = torch.as_tensor(
+                np.stack([item["relations"] for item in items]), dtype=torch.int8
+            )
             tokens["names"] = [item["name"] for item in items]
             tokens["smiles"] = [item["smiles"] for item in items]
             tokens["indices"] = [item["index"] for item in items]
@@ -445,10 +482,15 @@ class ChemBERTaTrainer:
                 names, smiles = batch.pop("names"), batch.pop("smiles")
                 batch.pop("indices", None)
                 raw_targets = np.asarray(batch.pop("raw_targets"), dtype=float)
+                relations = batch.pop(
+                    "relations", torch.zeros(raw_targets.shape, dtype=torch.int8)
+                ).to(self.device)
                 labels = batch.pop("labels").to(self.device)
                 tokens = {key: value.to(self.device) for key, value in batch.items()}
                 logits, _ = model(**tokens)
-                losses.append(float(self._loss(logits, labels, self.task_weights, self.task_types)))
+                losses.append(float(self._loss(
+                    logits, labels, self.task_weights, self.task_types, relations
+                )))
                 values = logits.float().cpu().numpy()
                 for index, task_type in enumerate(self.task_types):
                     values[:, index] = (
@@ -461,6 +503,7 @@ class ChemBERTaTrainer:
                     for task_index, target in enumerate(self.targets):
                         row[f"{target}_true"] = raw_targets[row_index, task_index]
                         row[f"{target}_prediction"] = values[row_index, task_index]
+                        row[f"{target}_relation"] = int(relations[row_index, task_index])
                     rows.append(row)
         return float(np.mean(losses)), pd.DataFrame(rows)
 
@@ -470,6 +513,8 @@ class ChemBERTaTrainer:
             observed = frame[f"{target}_true"].to_numpy(float)
             predicted = frame[f"{target}_prediction"].to_numpy(float)
             valid = np.isfinite(observed) & np.isfinite(predicted)
+            if task_type == "regression" and f"{target}_relation" in frame:
+                valid &= frame[f"{target}_relation"].to_numpy(dtype=np.int8) == 0
             y, p = observed[valid], predicted[valid]
             values: dict[str, float] = {"n": int(valid.sum())}
             if not len(y):
@@ -510,6 +555,7 @@ class ChemBERTaTrainer:
                 names.extend(batch.pop("names")); smiles.extend(batch.pop("smiles"))
                 original_indices.extend(int(value) for value in batch.pop("indices"))
                 targets.extend(np.asarray(batch.pop("raw_targets"), dtype=np.float32))
+                batch.pop("relations", None)
                 batch.pop("labels", None)
                 tokens = {key: value.to(self.device) for key, value in batch.items()}
                 logits, pooled = model(**tokens)
@@ -832,11 +878,14 @@ class ChemBERTaTrainer:
             )
             for batch in progress:
                 batch.pop("names"); batch.pop("smiles"); batch.pop("raw_targets"); batch.pop("indices")
+                relations = batch.pop("relations").to(self.device)
                 labels = batch.pop("labels").to(self.device)
                 tokens = {key: value.to(self.device) for key, value in batch.items()}
                 optimizer.zero_grad(set_to_none=True)
                 logits, _ = model(**tokens)
-                loss = self._loss(logits, labels, self.task_weights, self.task_types)
+                loss = self._loss(
+                    logits, labels, self.task_weights, self.task_types, relations
+                )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.train_cfg.get("gradient_clip", 1.0)))
                 optimizer.step()
@@ -1001,10 +1050,15 @@ class ChemBERTaTrainer:
             truths = np.column_stack(
                 [predictions[f"{target}_true"].to_numpy(float) for target in self.targets]
             )
+            relations = np.column_stack([
+                predictions[f"{target}_relation"].to_numpy(np.int8)
+                for target in self.targets
+            ])
             save_test_evaluation(
                 workdir=self.workdir,
                 smiles=predictions["SMILES"].astype(str).tolist(),
                 truths=truths,
+                relations=relations,
                 targets=self.targets,
                 task_types=self.task_types,
                 predictions=prediction_output,

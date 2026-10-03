@@ -72,8 +72,14 @@ class MoleculeDatapoint:
             replace_token = 0
             self.features = np.where(np.isnan(self.features), replace_token, self.features)
 
-        # Create targets
-        self.targets = [float(x) if x != '' else None for x in line[1:]]
+        # Create targets. A leading inequality is retained as a mask while the
+        # numeric limit is scaled and trained like any other regression value.
+        self.lt_mask = [str(x).strip().startswith('<') for x in line[1:]]
+        self.gt_mask = [str(x).strip().startswith('>') for x in line[1:]]
+        self.targets = [
+            float(str(x).strip().lstrip('<>').strip()) if x != '' else None
+            for x in line[1:]
+        ]
 
     def set_features(self, features: np.ndarray):
         """

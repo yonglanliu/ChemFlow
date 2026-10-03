@@ -107,11 +107,12 @@ def predict(model: nn.Module,
     mol_loader = DataLoader(data, batch_size=batch_size, shuffle=False, num_workers=num_workers,
                             collate_fn=mol_collator)
     for _, item in enumerate(mol_loader):
-        _, batch, features_batch, mask, targets = item
+        _, batch, features_batch, mask, targets, lt_mask, gt_mask = item
         class_weights = torch.ones(targets.shape)
         if next(model.parameters()).is_cuda:
             targets = targets.cuda()
             mask = mask.cuda()
+            lt_mask, gt_mask = lt_mask.cuda(), gt_mask.cuda()
             class_weights = class_weights.cuda()
         with torch.no_grad():
             batch_preds = model(batch, features_batch)
@@ -131,7 +132,13 @@ def predict(model: nn.Module,
                     loss = torch.nn.functional.binary_cross_entropy(
                         probs, targets, reduction='none') * class_weights * mask
                 else:
-                    loss = loss_func(batch_preds, targets) * class_weights * mask
+                    bounded_preds = torch.where(
+                        (lt_mask & (batch_preds <= targets))
+                        | (gt_mask & (batch_preds >= targets)),
+                        targets,
+                        batch_preds,
+                    )
+                    loss = loss_func(bounded_preds, targets) * class_weights * mask
                 loss_batch = loss.sum(axis=0) / torch.clamp(mask.sum(axis=0), min=1.0)
                 loss_batch = loss_batch.cpu().numpy()
                 loss_sum += loss_batch

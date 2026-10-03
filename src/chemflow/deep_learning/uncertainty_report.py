@@ -161,16 +161,25 @@ def generate_uncertainty_report(
                 skipped[target] = f"Missing report columns: {missing}"
                 continue
 
+            evaluation_predictions = predictions
+            relation_column = f"{target}_relation"
+            if relation_column in predictions:
+                # Calibration coverage requires an observed point value. A
+                # censoring limit is evaluated separately as a bound and must
+                # not be plotted as though it were the true response.
+                exact = predictions[relation_column].astype(str).eq("=")
+                evaluation_predictions = predictions.loc[exact]
+
             truth, mc_mean, mc_sd, mc_floor, mc_floor_count = _finite_distribution(
-                predictions[f"{target}_true"].to_numpy(float),
-                predictions[f"{target}_mc_prediction"].to_numpy(float),
-                predictions[f"{target}_mc_sd"].to_numpy(float),
+                evaluation_predictions[f"{target}_true"].to_numpy(float),
+                evaluation_predictions[f"{target}_mc_prediction"].to_numpy(float),
+                evaluation_predictions[f"{target}_mc_sd"].to_numpy(float),
             )
             if len(truth) < 5:
                 skipped[target] = "Fewer than five finite test predictions."
                 continue
             calibrated_truth, calibrated_mean, calibrated_radius = (
-                predictions[column].to_numpy(float)
+                evaluation_predictions[column].to_numpy(float)
                 for column in (
                     f"{target}_true",
                     f"{target}_calibrated_prediction",
@@ -258,6 +267,7 @@ def generate_uncertainty_report(
             report_columns = [
                 "SMILES",
                 f"{target}_true",
+                f"{target}_relation",
                 f"{target}_direct_prediction",
                 f"{target}_mc_prediction",
                 f"{target}_mc_sd",
@@ -267,6 +277,7 @@ def generate_uncertainty_report(
                 f"{target}_ood_flag",
                 f"{target}_uncertainty_flag",
                 f"{target}_interval_covered",
+                f"{target}_interval_bound_compatible",
             ]
             predictions[
                 [column for column in report_columns if column in predictions]

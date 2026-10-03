@@ -80,7 +80,7 @@ def do_generate(model: nn.Module,
                             num_workers=num_workers,
                             collate_fn=mol_collator)
     for item in mol_loader:
-        _, batch, features_batch, _, _ = item
+        _, batch, features_batch, *_ = item
         with torch.no_grad():
             batch_preds = model(batch, features_batch)
             preds.extend(batch_preds.data.cpu().numpy())

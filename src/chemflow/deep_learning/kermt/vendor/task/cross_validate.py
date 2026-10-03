@@ -110,6 +110,18 @@ def cross_validate(args: Namespace, logger: Logger = None,
         all_scores.append(model_scores)
     all_scores = np.array(all_scores)
 
+    has_test_data = bool(getattr(args, "separate_test_path", None)) or (
+        not bool(getattr(args, "separate_val_path", None))
+        and len(getattr(args, "split_sizes", ())) >= 3
+        and float(args.split_sizes[2]) > 0.0
+    )
+    if not has_test_data:
+        info(
+            f"Completed {args.num_folds} training fold(s) with validation-only "
+            "model selection; no test set was configured."
+        )
+        return float("nan"), float("nan")
+
     # Report scores for each fold
     info(f'{args.num_folds}-fold cross validation')
 
