@@ -1083,11 +1083,6 @@ def add_kermt_predict_parser(model_subparsers) -> None:
         "--model-checkpoint",
         dest="checkpoint_path",
     )
-    checkpoint_group.add_argument("--checkpoint-dir")
-    checkpoint_group.add_argument(
-        "--checkpoint-path",
-        dest="checkpoint_path",
-    )
     parser.add_argument(
         "--task-names",
         nargs="+",
