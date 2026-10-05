@@ -519,6 +519,65 @@ def _write_task_metrics(path: str | Path, epoch: int, metrics_by_split) -> None:
     )
 
 
+def _distributed_training_predictions(
+    model,
+    data,
+    loss_func,
+    batch_size,
+    scaler,
+    shared_dict,
+    logger,
+    args,
+    rank,
+    world_size,
+):
+    """Evaluate one contiguous training-data shard per rank and restore row order.
+
+    Full-training metrics are diagnostic and do not participate in optimization.
+    Evaluating the complete set on rank zero made every other rank wait at a
+    collective; for sufficiently large datasets that wait exceeded NCCL's
+    default 10-minute watchdog timeout.  Sharding keeps all ranks doing useful
+    work and preserves the exact prediction/target alignment needed by the
+    censored-regression metrics.
+    """
+    shard_indices = np.array_split(np.arange(len(data)), world_size)[rank].tolist()
+    shard_data = MoleculeDataset([data[index] for index in shard_indices])
+    if shard_indices:
+        shard_preds, _ = predict(
+            model=model,
+            data=shard_data,
+            loss_func=loss_func,
+            batch_size=batch_size,
+            scaler=scaler,
+            shared_dict=shared_dict,
+            logger=logger,
+            args=args,
+        )
+        shard_targets = shard_data.targets()
+        if scaler is not None:
+            shard_targets = scaler.inverse_transform(shard_targets).tolist()
+    else:
+        shard_preds, shard_targets = [], []
+
+    gathered = [None] * world_size
+    dist.all_gather_object(
+        gathered,
+        (shard_indices, shard_preds, shard_targets),
+    )
+    if rank != 0:
+        return None, None
+
+    predictions = [None] * len(data)
+    targets = [None] * len(data)
+    for indices, rank_preds, rank_targets in gathered:
+        for index, prediction, target in zip(indices, rank_preds, rank_targets):
+            predictions[index] = prediction
+            targets[index] = target
+    if any(value is None for value in predictions + targets):
+        raise RuntimeError("DDP training evaluation did not return every row.")
+    return predictions, targets
+
+
 def run_training(args: Namespace, logger: Logger = None, return_val=False,
                  rank: int = 0, world_size: int = 1) -> List[float]:
     """
@@ -912,9 +971,21 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             if isinstance(scheduler, ExponentialLR):
                 scheduler.step()
 
-            train_eval_time = 0.0
-            if is_main:
-                train_eval_start = time.time()
+            train_eval_start = time.time()
+            if is_distributed:
+                train_preds, train_targets = _distributed_training_predictions(
+                    model=core_model,
+                    data=train_data,
+                    loss_func=loss_func,
+                    batch_size=args.batch_size,
+                    scaler=scaler,
+                    shared_dict=shared_dict,
+                    logger=logger,
+                    args=args,
+                    rank=rank,
+                    world_size=world_size,
+                )
+            elif is_main:
                 _, _, train_preds, train_targets = evaluate(
                     model=core_model,
                     data=train_data,
@@ -929,7 +1000,8 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                     args=args,
                     return_predictions=True,
                 )
-                train_eval_time = time.time() - train_eval_start
+            train_eval_time = time.time() - train_eval_start
+            if is_main:
                 if args.dataset_type == 'classification':
                     train_metrics = _classification_metrics_by_task(
                         train_preds, train_targets, args.task_names
@@ -944,11 +1016,6 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                     val_metrics = _regression_metrics_by_task(
                         val_preds, val_targets, args.task_names, val_relations
                     )
-            if is_distributed:
-                # Non-zero ranks wait while rank zero evaluates the complete
-                # training set with the unwrapped model. This prevents them
-                # from entering the next DDP epoch early.
-                dist.barrier()
 
             if args.show_individual_scores:
                 # Individual validation scores
@@ -1140,6 +1207,10 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
                     f"{early_stopping_bad_epochs}/{early_stopping_patience}",
                     flush=True,
                 )
+            if is_distributed:
+                # Keep non-zero ranks from starting the next DDP epoch while
+                # rank zero is still writing metrics and checkpoints.
+                dist.barrier()
             if should_stop:
                 if is_main:
                     info(
