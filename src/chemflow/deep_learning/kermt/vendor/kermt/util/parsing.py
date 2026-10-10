@@ -160,6 +160,13 @@ def add_finetune_args(parser: ArgumentParser):
                              '(walks directory and ensembles all models that are found)')
     parser.add_argument('--checkpoint_path', type=str, default=None,
                         help='Path to model checkpoint (.pt file)')
+    parser.add_argument(
+        '--transfer_encoder_only',
+        action='store_true',
+        default=False,
+        help='Load only kermt.* encoder weights from checkpoint_path and initialize '
+             'a new readout/prediction head for the current targets.',
+    )
     parser.add_argument('--resume', action='store_true', default=False,
                         help='Resume model, optimizer, scheduler, and epoch from last_checkpoint.pt')
     parser.add_argument('--resume_checkpoint', type=str, default=None,

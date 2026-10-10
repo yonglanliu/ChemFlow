@@ -270,6 +270,9 @@ class KERMTTrainer:
             self.model_cfg.get("local_files_only", False)
         )
         self.resume = bool(self.training_cfg.get("resume", False))
+        self.transfer_encoder_only = bool(
+            self.model_cfg.get("transfer_encoder_only", True)
+        )
         resume_value = str(self.training_cfg.get("resume_checkpoint", "")).strip()
         self.resume_checkpoint = _path(resume_value, base) if resume_value else None
         if self.test_dataset_path is not None and float(
@@ -686,6 +689,8 @@ class KERMTTrainer:
                 float(self.training_cfg.get("test_calibration_confidence", 0.90))
             ),
         ]
+        if self.transfer_encoder_only and not self.resume:
+            command.append("--transfer_encoder_only")
         if "test" in paths:
             command.extend(["--separate_test_path", str(paths["test"])])
         if (
@@ -762,6 +767,7 @@ class KERMTTrainer:
             "checkpoint_sha256": _sha256(self.checkpoint_path),
             "pretrained_weight_audit": self.pretrained_audit,
             "targets": self.targets,
+            "transfer_encoder_only": self.transfer_encoder_only,
             "command": command,
         }
         (self.workdir / "kermt_run_manifest.json").write_text(
@@ -771,6 +777,11 @@ class KERMTTrainer:
         print(f"Pretrained checkpoint: {self.checkpoint_path}", flush=True)
         print(f"Checkpoint SHA256: {audit['checkpoint_sha256']}", flush=True)
         print(f"Targets: {', '.join(self.targets)}", flush=True)
+        print(
+            "Transfer encoder only: "
+            f"{'yes' if self.transfer_encoder_only and not self.resume else 'no'}",
+            flush=True,
+        )
         print(f"Resume training: {'yes' if self.resume else 'no'}", flush=True)
         if self.resume:
             print(

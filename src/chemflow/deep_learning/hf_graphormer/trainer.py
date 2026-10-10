@@ -759,7 +759,7 @@ class HuggingFaceGraphormerTrainer:
                 )
 
             encoder_only = bool(
-                self.model_cfg.get("transfer_encoder_only", False)
+                self.model_cfg.get("transfer_encoder_only", True)
             )
             model = self.GraphormerForGraphClassification.from_pretrained(
                 transfer_path,

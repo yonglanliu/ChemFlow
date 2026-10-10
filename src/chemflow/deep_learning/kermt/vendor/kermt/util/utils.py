@@ -770,7 +770,8 @@ def load_checkpoint(path: str,
                     current_args: Namespace = None,
                     cuda: bool = None,
                     logger: logging.Logger = None,
-                    strict_shape_check: bool = False):
+                    strict_shape_check: bool = False,
+                    encoder_only: bool = False):
     """
     Loads a model checkpoint. This function can change the values of current_args according to args present in the checkpoint.
 
@@ -782,6 +783,8 @@ def load_checkpoint(path: str,
         does not match the current model. If False (default, required for CMIM-style
         workflows where pretrain checkpoints may have extra/partial params), log and
         skip the mismatched parameter.
+    :param encoder_only: Load only ``kermt.*`` encoder parameters. The target
+        readout and prediction head remain freshly initialized.
     :return: The loaded MPNN and loaded checkpoint state
     """
     debug = logger.debug if logger is not None else print
@@ -805,8 +808,32 @@ def load_checkpoint(path: str,
     model_ralated_args = get_model_args()
 
     if current_args is not None:
+        # The task count belongs to the target dataset, never to the source
+        # checkpoint. Copying num_tasks from a single-task checkpoint into a
+        # multitask run builds a one-output head and silently broadcasts it
+        # during training before validation fails on the loss-vector shape.
+        target_num_tasks = getattr(current_args, 'num_tasks', None)
+        target_head_args = {
+            key: getattr(current_args, key)
+            for key in (
+                'ffn_hidden_size',
+                'ffn_num_layers',
+                'ffn_task_specific_hidden_size',
+                'ffn_num_task_specific_layers',
+                'self_attention',
+                'attn_hidden',
+                'attn_out',
+                'dense',
+            )
+            if hasattr(current_args, key)
+        }
         for key, value in vars(args).items():
-            if key in model_ralated_args:
+            if key in model_ralated_args and key != 'num_tasks':
+                setattr(current_args, key, value)
+        if target_num_tasks is not None:
+            current_args.num_tasks = target_num_tasks
+        if encoder_only:
+            for key, value in target_head_args.items():
                 setattr(current_args, key, value)
     else:
         current_args = args
@@ -821,6 +848,8 @@ def load_checkpoint(path: str,
     pretrained_state_dict = {}
     for param_name in loaded_state_dict.keys():
         new_param_name = param_name
+        if encoder_only and not new_param_name.startswith('kermt.'):
+            continue
         if new_param_name not in model_state_dict:
             debug(f'Pretrained parameter "{param_name}" cannot be found in model parameters.')
         elif model_state_dict[new_param_name].shape != loaded_state_dict[param_name].shape:
@@ -841,6 +870,11 @@ def load_checkpoint(path: str,
             'with the configured KERMT model.'
         )
     loaded_elements = sum(value.numel() for value in pretrained_state_dict.values())
+    if encoder_only:
+        debug(
+            'Encoder-only transfer enabled: prediction head/readout weights '
+            'were not loaded from the source checkpoint.'
+        )
     debug(
         'Checkpoint weight load summary: '
         f'{len(pretrained_state_dict):,}/{len(loaded_state_dict):,} compatible '

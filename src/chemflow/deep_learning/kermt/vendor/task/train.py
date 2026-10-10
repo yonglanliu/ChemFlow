@@ -687,7 +687,10 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             selected_checkpoint = _resolve_resume_checkpoint(args, model_idx, save_dir)
             info(f'Resuming model {model_idx} from {selected_checkpoint}')
             model, loaded_ckpt_state = load_checkpoint(
-                selected_checkpoint, current_args=args, logger=logger
+                selected_checkpoint,
+                current_args=args,
+                logger=logger,
+                encoder_only=False,
             )
             required_resume_state = {"state_dict", "optimizer", "scheduler", "epoch"}
             missing_resume_state = sorted(
@@ -707,7 +710,10 @@ def run_training(args: Namespace, logger: Logger = None, return_val=False,
             selected_checkpoint = args.checkpoint_paths[cur_model]
             debug(f'Loading model {cur_model} from {selected_checkpoint}')
             model, loaded_ckpt_state = load_checkpoint(
-                selected_checkpoint, current_args=args, logger=logger
+                selected_checkpoint,
+                current_args=args,
+                logger=logger,
+                encoder_only=bool(getattr(args, "transfer_encoder_only", False)),
             )
         else:
             debug(f'Building model {model_idx}')
