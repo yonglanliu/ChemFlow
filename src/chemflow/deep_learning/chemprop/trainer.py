@@ -53,6 +53,34 @@ _REGRESSION_LOSSES = {"l2", "mse", "mae", "huber", "nll", "gaussian_nll"}
 _CUSTOM_REGRESSION_LOSSES = {"huber", "nll", "gaussian_nll"}
 
 
+def _internal_ddp_environment(
+    environment: dict[str, str], devices: Any
+) -> tuple[dict[str, str], list[str]]:
+    """Remove external-launch rank metadata when Lightning must spawn locally."""
+    try:
+        device_count = int(str(devices).strip())
+    except ValueError:
+        device_count = 1
+    result = environment.copy()
+    removed: list[str] = []
+    if device_count <= 1:
+        return result, removed
+    rank_keys = {
+        "WORLD_SIZE",
+        "RANK",
+        "LOCAL_RANK",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "GROUP_RANK",
+        "LOCAL_WORLD_SIZE",
+    }
+    for key in list(result):
+        if key in rank_keys or key.startswith("SLURM_"):
+            removed.append(key)
+            result.pop(key)
+    return result, sorted(removed)
+
+
 def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
     """Calculate independent-test metrics on finite, paired observations."""
     truth = np.asarray(y_true, dtype=float)
@@ -990,7 +1018,9 @@ class ChempropTrainer:
         prediction_executable = self._resolve_executable(
             str(self.training_cfg.get("executable", "chemprop")).strip()
         )
-        process_environment = os.environ.copy()
+        process_environment, removed_launcher_environment = _internal_ddp_environment(
+            os.environ.copy(), self.training_cfg.get("devices", "auto")
+        )
         process_environment.update(
             {
                 "CHEMFLOW_HUBER_DELTA": str(self.huber_delta),
@@ -1028,6 +1058,7 @@ class ChempropTrainer:
             "command": command,
             "command_text": shlex.join(command),
             "compatibility_environment": compatibility_environment,
+            "removed_external_launcher_environment": removed_launcher_environment,
             "early_stopping": {
                 "implementation": "Chemprop v2 native Lightning callback",
                 "monitor": self.tracking_metric,
@@ -1108,6 +1139,12 @@ class ChempropTrainer:
             print(
                 "  Compatibility: TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 "
                 "for Chemprop 2.2 checkpoint reload",
+                flush=True,
+            )
+        if removed_launcher_environment:
+            print(
+                "  Distributed launcher: internal Lightning DDP "
+                "(external Slurm rank metadata removed)",
                 flush=True,
             )
         print(f"  Command: {shlex.join(command)}", flush=True)
