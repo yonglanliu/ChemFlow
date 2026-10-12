@@ -311,6 +311,34 @@ class ChempropTrainer:
         self.resume_checkpoints = [
             _path(value, self.config_dir) for value in resume_values
         ]
+        transfer_value = str(
+            self.model_cfg.get("transfer_checkpoint", "")
+        ).strip()
+        self.transfer_checkpoint = (
+            _path(transfer_value, self.config_dir) if transfer_value else None
+        )
+        self.freeze_transferred_encoder = bool(
+            self.model_cfg.get("freeze_encoder", False)
+        )
+        if self.transfer_checkpoint is not None and self.resume:
+            raise ValueError(
+                "Chemprop encoder transfer and resume are separate modes; "
+                "set TrainingConfig.resume = false when "
+                "ChempropConfig.transfer_checkpoint is supplied."
+            )
+        if (
+            self.transfer_checkpoint is not None
+            and not self.transfer_checkpoint.is_file()
+        ):
+            raise FileNotFoundError(
+                "Chemprop transfer checkpoint not found: "
+                f"{self.transfer_checkpoint}"
+            )
+        if self.freeze_transferred_encoder and self.transfer_checkpoint is None:
+            raise ValueError(
+                "ChempropConfig.freeze_encoder requires "
+                "ChempropConfig.transfer_checkpoint."
+            )
         epochs = int(self.training_cfg.get("num_epochs", 100))
         warmup_epochs = int(self.training_cfg.get("warmup_epochs", 2))
         if epochs <= warmup_epochs:
@@ -678,6 +706,13 @@ class ChempropTrainer:
         )
         if resume_checkpoints:
             command.extend(["--checkpoint", *(str(path) for path in resume_checkpoints)])
+        elif self.transfer_checkpoint is not None:
+            # Chemprop's foundation-model path imports the message-passing
+            # encoder and constructs a new task-specific FFN. This deliberately
+            # avoids transferring a source task's prediction head.
+            command.extend(["--from-foundation", str(self.transfer_checkpoint)])
+            if self.freeze_transferred_encoder:
+                command.append("--freeze-encoder")
 
         if data_paths[0].name == "data_with_splits.csv":
             command.extend(["--splits-column", "split"])
@@ -1137,6 +1172,24 @@ class ChempropTrainer:
                 ],
                 "optimizer_scheduler_epoch_restored": False,
             },
+            "transfer_learning": {
+                "enabled": self.transfer_checkpoint is not None,
+                "mode": (
+                    "encoder_only" if self.transfer_checkpoint is not None else None
+                ),
+                "checkpoint": (
+                    {
+                        "path": str(self.transfer_checkpoint),
+                        "sha256": _sha256(self.transfer_checkpoint),
+                    }
+                    if self.transfer_checkpoint is not None
+                    else None
+                ),
+                "encoder_frozen": self.freeze_transferred_encoder,
+                "prediction_head_initialized_fresh": (
+                    self.transfer_checkpoint is not None
+                ),
+            },
         }
         manifest_path = self.workdir / "chemprop_launch_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -1209,6 +1262,29 @@ class ChempropTrainer:
             )
         else:
             print("  Resume: disabled", flush=True)
+        if self.transfer_checkpoint is not None:
+            print("  Transfer learning: enabled (encoder only)", flush=True)
+            print(
+                f"  Transfer checkpoint: {self.transfer_checkpoint}",
+                flush=True,
+            )
+            print(
+                f"  Transfer checkpoint SHA-256: "
+                f"{_sha256(self.transfer_checkpoint)}",
+                flush=True,
+            )
+            print(
+                "  Transfer state: message-passing encoder restored; "
+                "prediction head initialized fresh",
+                flush=True,
+            )
+            print(
+                "  Transferred encoder: "
+                + ("frozen" if self.freeze_transferred_encoder else "trainable"),
+                flush=True,
+            )
+        else:
+            print("  Transfer learning: disabled", flush=True)
         if compatibility_environment:
             print(
                 "  Compatibility: TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 "

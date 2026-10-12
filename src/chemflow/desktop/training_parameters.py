@@ -205,6 +205,8 @@ CHEMPROP = ModelParameters(
         boolean("ChempropConfig.batch_norm", False, "Apply batch normalization after molecular aggregation."),
         items("ChempropConfig.molecule_featurizers", [], "Optional extra features: morgan_binary, morgan_count, rdkit_2d, v1_rdkit_2d, or v1_rdkit_2d_normalized."),
         boolean("ChempropConfig.no_descriptor_scaling", False, "Disable scaling of optional molecule-level descriptors."),
+        text("ChempropConfig.transfer_checkpoint", "", "Optional Chemprop best.pt model whose message-passing encoder initializes encoder-only transfer learning; the prediction head is new."),
+        boolean("ChempropConfig.freeze_encoder", False, "Keep the transferred message-passing encoder fixed and train only the new prediction head."),
         integer("TrainingConfig.seed", 42, "Dataset-splitting seed."),
         integer("TrainingConfig.pytorch_seed", 42, "Model initialization and PyTorch seed."),
         boolean("TrainingConfig.resume", False, "Continue from model_*/checkpoints/last.ckpt using Chemprop's weights-only checkpoint loading."),
