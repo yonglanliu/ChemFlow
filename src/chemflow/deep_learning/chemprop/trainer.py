@@ -24,6 +24,7 @@ from chemflow.deep_learning.test_evaluation import (
     regression_metrics,
     save_test_evaluation,
 )
+from chemflow.deep_learning.task_weighting import resolve_task_loss_weights
 from chemflow.deep_learning.censoring import (
     parse_prefixed_targets,
     prefixed_targets,
@@ -338,6 +339,36 @@ class ChempropTrainer:
         ).strip()
         if not self.tracking_metric:
             raise ValueError("TrainingConfig.tracking_metric cannot be empty.")
+        self.task_loss_weighting = str(
+            self.training_cfg.get("task_loss_weighting", "uniform")
+        ).strip().lower()
+        self.task_label_counts: np.ndarray | None = None
+        self.task_loss_weights: np.ndarray | None = None
+
+    def _resolve_task_loss_weights(self, data_path: Path) -> None:
+        """Resolve multitask loss weights from the prepared training partition."""
+        prepared = pd.read_csv(data_path)
+        if "split" in prepared.columns:
+            prepared = prepared.loc[
+                prepared["split"].astype(str).str.strip().str.lower().eq("train")
+            ]
+        numeric_targets = prepared[self.targets].apply(
+            lambda column: pd.to_numeric(
+                column.astype(str)
+                .str.strip()
+                .str.lstrip("<>")
+                .replace({"nan": np.nan, "": np.nan}),
+                errors="coerce",
+            )
+        )
+        counts, weights = resolve_task_loss_weights(
+            numeric_targets.to_numpy(),
+            self.targets,
+            strategy=self.task_loss_weighting,
+            configured=self.training_cfg.get("task_loss_weights"),
+        )
+        self.task_label_counts = counts
+        self.task_loss_weights = weights
 
     def _resolve_resume_checkpoints(self) -> list[Path]:
         """Resolve checkpoints for Chemprop's weights-only continuation mode."""
@@ -564,6 +595,8 @@ class ChempropTrainer:
         else:
             data_paths = self._prepare_generated_split(frame, test_frame)
 
+        self._resolve_task_loss_weights(data_paths[0])
+
         prepared_split_counts: dict[str, int] = {}
         if data_paths[0].name == "data_with_splits.csv":
             prepared_splits = pd.read_csv(data_paths[0], usecols=["split"])
@@ -587,6 +620,15 @@ class ChempropTrainer:
             "descriptor_columns": self.descriptor_columns,
             "target_label_counts": {
                 target: int(frame[target].notna().sum()) for target in self.targets
+            },
+            "training_task_label_counts": {
+                target: int(count)
+                for target, count in zip(self.targets, self.task_label_counts)
+            },
+            "task_loss_weighting": self.task_loss_weighting,
+            "task_loss_weights": {
+                target: float(weight)
+                for target, weight in zip(self.targets, self.task_loss_weights)
             },
             "censored_training": self.has_censored_targets,
             "split_type": self.split_type,
@@ -700,6 +742,14 @@ class ChempropTrainer:
         ]
         command.extend(["--metrics", *metrics])
         command.extend(["--tracking-metric", self.tracking_metric])
+        if self.task_loss_weights is None:
+            self._resolve_task_loss_weights(data_paths[0])
+        command.extend(
+            [
+                "--task-weights",
+                *[str(float(weight)) for weight in self.task_loss_weights],
+            ]
+        )
         command.append("--show-individual-scores")
         if bool(training.get("save_data_splits", True)):
             version = self._chemprop_version()
@@ -1106,6 +1156,25 @@ class ChempropTrainer:
             )
             print(f"  Prepared labeled rows: {shown_counts}", flush=True)
         print(f"  Targets: {', '.join(self.targets)}", flush=True)
+        ratio_base = float(self.task_loss_weights.min())
+        print(
+            f"  Task loss weighting: {self.task_loss_weighting}",
+            flush=True,
+        )
+        print(
+            "  Task loss weights: "
+            + ", ".join(
+                f"{name}={float(weight):.6f} "
+                f"(labels={int(count):,}, "
+                f"ratio={float(weight) / ratio_base:.3f}x)"
+                for name, count, weight in zip(
+                    self.targets,
+                    self.task_label_counts,
+                    self.task_loss_weights,
+                )
+            ),
+            flush=True,
+        )
         print(f"  Split: {self.split_type}", flush=True)
         print(f"  Output: {self.workdir}", flush=True)
         print(f"  Manifest: {manifest_path}", flush=True)

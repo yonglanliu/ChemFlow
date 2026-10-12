@@ -226,6 +226,8 @@ CHEMPROP = ModelParameters(
         number("TrainingConfig.huber_delta", 1.0, "Huber quadratic-to-linear transition.", 1e-8, 1e6),
         number("TrainingConfig.nll_scale", 1.0, "Fixed Laplace scale for NLL loss.", 1e-8, 1e6),
         number("TrainingConfig.gaussian_nll_variance", 1.0, "Fixed variance for Gaussian NLL loss.", 1e-8, 1e6),
+        choice("TrainingConfig.task_loss_weighting", "uniform", WEIGHTING, "Policy balancing multitask losses with different training-label counts."),
+        items("TrainingConfig.task_loss_weights", [], "Optional explicit positive weights in target-column order; blank uses the weighting policy."),
         text("TrainingConfig.tracking_metric", "val_loss", "Metric used for early stopping and checkpoint selection."),
         boolean("TrainingConfig.save_data_splits", True, "Save reproducible partition records (SMILES split files in Chemprop 2.2; full split files in 2.3+)."),
         text("TrainingConfig.executable", "chemprop", "Chemprop v2 executable in the active environment."),
