@@ -300,6 +300,14 @@ class KERMTTrainer:
                 "KERMTConfig.nonfinite_descriptor_policy must be 'drop' or 'error'."
             )
         self.nonfinite_descriptor_policy = descriptor_policy
+        self.strategy = str(
+            self.training_cfg.get("strategy", "auto")
+        ).strip().lower()
+        if self.strategy not in {"auto", "ddp"}:
+            raise ValueError("TrainingConfig.strategy must be 'auto' or 'ddp'.")
+        self.devices = int(self.training_cfg.get("devices", 1))
+        if self.devices < 1:
+            raise ValueError("TrainingConfig.devices must be at least 1.")
         workdir_value = str(self.base_cfg.get("workdir", "./kermt_run"))
         self.workdir = _path(workdir_value, base)
 
@@ -768,6 +776,8 @@ class KERMTTrainer:
             "pretrained_weight_audit": self.pretrained_audit,
             "targets": self.targets,
             "transfer_encoder_only": self.transfer_encoder_only,
+            "strategy": self.strategy,
+            "devices": self.devices,
             "command": command,
         }
         (self.workdir / "kermt_run_manifest.json").write_text(
@@ -797,7 +807,20 @@ class KERMTTrainer:
         if bool(self.training_cfg.get("dry_run", False)):
             print("Dry run requested; KERMT was not launched.", flush=True)
             return
-        subprocess.run(command, cwd=self.workdir, check=True)
+        environment = os.environ.copy()
+        if self.strategy == "ddp":
+            environment["WORLD_SIZE"] = str(self.devices)
+            print(
+                f"KERMT DDP: spawning {self.devices} GPU processes; "
+                "batch_size is per GPU.",
+                flush=True,
+            )
+        subprocess.run(
+            command,
+            cwd=self.workdir,
+            check=True,
+            env=environment,
+        )
         history_paths = sorted(
             (self.workdir / "kermt_output").glob(
                 "fold_*/model_*/training_history.csv"

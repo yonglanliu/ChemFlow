@@ -173,6 +173,10 @@ class ChempropTrainer:
             str(self.base_cfg.get("workdir", "./chemprop_run")), self.config_dir
         )
         self.dataset_path = _path(str(self.data_cfg["dataset_path"]), self.config_dir)
+        val_value = str(self.data_cfg.get("val_dataset_path", "")).strip()
+        self.val_dataset_path = (
+            _path(val_value, self.config_dir) if val_value else None
+        )
         test_value = str(self.data_cfg.get("test_dataset_path", "")).strip()
         self.test_dataset_path = (
             _path(test_value, self.config_dir) if test_value else None
@@ -181,17 +185,39 @@ class ChempropTrainer:
             self.data_cfg.get("smiles_column", "SMILES")
         ).strip()
         self.targets = _targets(self.data_cfg.get("target_column"))
+        self.descriptor_columns = _items(
+            self.model_cfg.get("descriptor_columns", []),
+            name="ChempropConfig.descriptor_columns",
+        )
+        reserved = {self.smiles_column, *self.targets}
+        duplicated_descriptors = sorted(reserved.intersection(self.descriptor_columns))
+        if duplicated_descriptors:
+            raise ValueError(
+                "ChempropConfig.descriptor_columns overlap SMILES/targets: "
+                f"{duplicated_descriptors}"
+            )
         self.split_type = str(
             self.data_cfg.get("split_type", "scaffold_balanced")
         ).strip().lower()
         self.split_column = str(self.data_cfg.get("split_column", "")).strip()
         if self.split_column:
             self.split_type = "predefined"
+        if self.val_dataset_path is not None:
+            self.split_type = "predefined"
         if self.split_type not in {*_GENERATED_SPLITS, "predefined"}:
             raise ValueError(f"Unsupported Chemprop split_type: {self.split_type!r}.")
-        if self.split_type == "predefined" and not self.split_column:
+        if (
+            self.split_type == "predefined"
+            and not self.split_column
+            and self.val_dataset_path is None
+        ):
             raise ValueError(
-                "split_type='predefined' requires DatasetConfig.split_column."
+                "split_type='predefined' requires DatasetConfig.split_column "
+                "or val_dataset_path."
+            )
+        if self.val_dataset_path is not None and self.split_column:
+            raise ValueError(
+                "Use either DatasetConfig.val_dataset_path or split_column, not both."
             )
 
         self.val_fraction = float(self.data_cfg.get("val_fraction", 0.1))
@@ -305,7 +331,7 @@ class ChempropTrainer:
         return checkpoints
 
     def _validate_frame(self, frame: pd.DataFrame, path: Path, *, split: bool) -> None:
-        required = {self.smiles_column, *self.targets}
+        required = {self.smiles_column, *self.targets, *self.descriptor_columns}
         if split:
             required.add(self.split_column)
         missing = sorted(required - set(frame.columns))
@@ -323,6 +349,17 @@ class ChempropTrainer:
             )
         if frame[self.targets].notna().sum().sum() == 0:
             raise ValueError(f"Dataset {path} contains no finite target labels.")
+        if self.descriptor_columns:
+            descriptors = frame[self.descriptor_columns].apply(
+                pd.to_numeric, errors="coerce"
+            )
+            invalid = ~np.isfinite(descriptors.to_numpy(dtype=float))
+            if invalid.any():
+                raise ValueError(
+                    f"Dataset {path} contains {int(invalid.sum())} missing or "
+                    "non-numeric descriptor values in "
+                    f"{self.descriptor_columns}."
+                )
 
     def _encode_censored_targets(self, frame: pd.DataFrame) -> pd.DataFrame:
         columns = resolve_relation_columns(
@@ -356,7 +393,7 @@ class ChempropTrainer:
 
         prepared = self.workdir / "prepared_data"
         prepared.mkdir(parents=True, exist_ok=True)
-        columns = [self.smiles_column, *self.targets]
+        columns = [self.smiles_column, *self.targets, *self.descriptor_columns]
         partitions: list[pd.DataFrame] = []
         for name in ("train", "val"):
             path = prepared / f"{name}.csv"
@@ -374,6 +411,36 @@ class ChempropTrainer:
         elif counts.get("test", 0):
             path = prepared / "test.csv"
             partition = frame.loc[labels.eq("test"), columns].copy()
+            partition.to_csv(path, index=False)
+            partition["split"] = "test"
+            partitions.append(partition)
+            self.has_test_data = True
+        combined_path = prepared / "data_with_splits.csv"
+        pd.concat(partitions, ignore_index=True).to_csv(combined_path, index=False)
+        return [combined_path]
+
+    def _prepare_external_files(
+        self,
+        frame: pd.DataFrame,
+        val_frame: pd.DataFrame,
+        test_frame: pd.DataFrame | None,
+    ) -> list[Path]:
+        """Prepare explicitly supplied train, validation, and optional test CSVs."""
+        prepared = self.workdir / "prepared_data"
+        prepared.mkdir(parents=True, exist_ok=True)
+        columns = [self.smiles_column, *self.targets, *self.descriptor_columns]
+        partitions: list[pd.DataFrame] = []
+        for name, source in (("train", frame), ("val", val_frame)):
+            path = prepared / f"{name}.csv"
+            labeled = source[self.targets].notna().any(axis=1)
+            partition = source.loc[labeled, columns].copy()
+            partition.to_csv(path, index=False)
+            partition["split"] = name
+            partitions.append(partition)
+        if test_frame is not None:
+            path = prepared / "test.csv"
+            labeled = test_frame[self.targets].notna().any(axis=1)
+            partition = test_frame.loc[labeled, columns].copy()
             partition.to_csv(path, index=False)
             partition["split"] = "test"
             partitions.append(partition)
@@ -414,7 +481,7 @@ class ChempropTrainer:
         if not train_indices or not val_indices:
             raise ValueError("Generated split produced an empty train or val partition.")
 
-        columns = [self.smiles_column, *self.targets]
+        columns = [self.smiles_column, *self.targets, *self.descriptor_columns]
         partitions = []
         for name, indices in (
             ("train", train_indices),
@@ -446,34 +513,56 @@ class ChempropTrainer:
         self.has_test_data = False
         frame = _read_csv(self.dataset_path)
         self._validate_frame(
-            frame, self.dataset_path, split=self.split_type == "predefined"
+            frame,
+            self.dataset_path,
+            split=self.split_type == "predefined" and self.val_dataset_path is None,
         )
         frame = self._encode_censored_targets(frame)
+        val_frame = None
+        if self.val_dataset_path is not None:
+            val_frame = _read_csv(self.val_dataset_path)
+            self._validate_frame(val_frame, self.val_dataset_path, split=False)
+            val_frame = self._encode_censored_targets(val_frame)
         test_frame = None
         if self.test_dataset_path is not None:
             test_frame = _read_csv(self.test_dataset_path)
             self._validate_frame(test_frame, self.test_dataset_path, split=False)
             test_frame = self._encode_censored_targets(test_frame)
 
-        if self.split_type == "predefined":
+        if val_frame is not None:
+            data_paths = self._prepare_external_files(frame, val_frame, test_frame)
+        elif self.split_type == "predefined":
             data_paths = self._prepare_predefined_files(frame, test_frame)
         else:
             data_paths = self._prepare_generated_split(frame, test_frame)
 
+        prepared_split_counts: dict[str, int] = {}
+        if data_paths[0].name == "data_with_splits.csv":
+            prepared_splits = pd.read_csv(data_paths[0], usecols=["split"])
+            prepared_split_counts = {
+                str(name): int(count)
+                for name, count in prepared_splits["split"].value_counts().items()
+            }
         audit = {
             "dataset_path": str(self.dataset_path),
+            "val_dataset_path": (
+                str(self.val_dataset_path) if self.val_dataset_path else None
+            ),
             "test_dataset_path": (
                 str(self.test_dataset_path) if self.test_dataset_path else None
             ),
             "rows": len(frame),
+            "val_rows": len(val_frame) if val_frame is not None else None,
             "test_rows": len(test_frame) if test_frame is not None else None,
             "smiles_column": self.smiles_column,
             "targets": self.targets,
+            "descriptor_columns": self.descriptor_columns,
             "target_label_counts": {
                 target: int(frame[target].notna().sum()) for target in self.targets
             },
             "censored_training": self.has_censored_targets,
             "split_type": self.split_type,
+            "prepared_split_counts": prepared_split_counts,
             "prepared_data_paths": [str(path) for path in data_paths],
         }
         return data_paths, audit
@@ -550,6 +639,8 @@ class ChempropTrainer:
         )
         if featurizers:
             command.extend(["--molecule-featurizers", *featurizers])
+        if self.descriptor_columns:
+            command.extend(["--descriptors-columns", *self.descriptor_columns])
         if bool(model.get("no_descriptor_scaling", False)):
             command.append("--no-descriptor-scaling")
 
@@ -681,7 +772,8 @@ class ChempropTrainer:
         test_path = self.workdir / "prepared_data" / "test.csv"
         truth = pd.read_csv(test_path)
         prediction_input = self.workdir / "prepared_data" / "test_smiles.csv"
-        truth[[self.smiles_column]].to_csv(prediction_input, index=False)
+        prediction_columns = [self.smiles_column, *self.descriptor_columns]
+        truth[prediction_columns].to_csv(prediction_input, index=False)
         raw_output = self.workdir / "best_model_predictions.csv"
         best_models = self._best_model_paths()
         command = [
@@ -710,6 +802,8 @@ class ChempropTrainer:
         )
         if featurizers:
             command.extend(["--molecule-featurizers", *featurizers])
+        if self.descriptor_columns:
+            command.extend(["--descriptors-columns", *self.descriptor_columns])
         if bool(self.model_cfg.get("no_descriptor_scaling", False)):
             command.append("--no-descriptor-scaling")
         subprocess.run(
@@ -963,9 +1057,23 @@ class ChempropTrainer:
 
         print("Chemprop v2 training audit", flush=True)
         print(f"  Version: {version}", flush=True)
-        print(f"  Training rows: {audit['rows']:,}", flush=True)
+        print(f"  Training input rows: {audit['rows']:,}", flush=True)
+        if audit["val_rows"] is not None:
+            print(f"  Validation input rows: {audit['val_rows']:,}", flush=True)
         if audit["test_rows"] is not None:
-            print(f"  Independent test rows: {audit['test_rows']:,}", flush=True)
+            print(f"  Independent test input rows: {audit['test_rows']:,}", flush=True)
+        prepared_counts = audit["prepared_split_counts"]
+        if prepared_counts:
+            shown_counts = ", ".join(
+                f"{name}={count:,}"
+                for name, count in (
+                    ("train", prepared_counts.get("train", 0)),
+                    ("validation", prepared_counts.get("val", 0)),
+                    ("test", prepared_counts.get("test", 0)),
+                )
+                if count
+            )
+            print(f"  Prepared labeled rows: {shown_counts}", flush=True)
         print(f"  Targets: {', '.join(self.targets)}", flush=True)
         print(f"  Split: {self.split_type}", flush=True)
         print(f"  Output: {self.workdir}", flush=True)

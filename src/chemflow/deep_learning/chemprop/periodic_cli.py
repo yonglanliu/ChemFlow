@@ -13,6 +13,22 @@ import torch
 from chemflow.deep_learning.test_evaluation import regression_metrics
 
 
+def _relation_codes_from_masks(targets, lt_mask, gt_mask):
+    """Convert optional Chemprop censor masks to -1/0/+1 relation codes."""
+    relation = torch.zeros_like(targets, dtype=torch.int8)
+    for mask, code in ((lt_mask, -1), (gt_mask, 1)):
+        if mask is None:
+            continue
+        if mask.ndim < targets.ndim:
+            mask = mask.reshape(targets.shape)
+        relation = torch.where(
+            mask.to(dtype=torch.bool),
+            torch.full_like(relation, code),
+            relation,
+        )
+    return relation
+
+
 def main() -> None:
     # Imports stay inside main so ChemFlow can be imported without the optional
     # Chemprop/Lightning stack installed.
@@ -98,9 +114,9 @@ def main() -> None:
                     raw_targets = transform(targets)
                     truths.append(raw_targets.detach().cpu().numpy())
                     predictions.append(predicted.detach().cpu().numpy())
-                    relation = torch.zeros_like(targets, dtype=torch.int8)
-                    relation = torch.where(lt_mask, -torch.ones_like(relation), relation)
-                    relation = torch.where(gt_mask, torch.ones_like(relation), relation)
+                    relation = _relation_codes_from_masks(
+                        targets, lt_mask, gt_mask
+                    )
                     relations.append(relation.detach().cpu().numpy())
             model.train(was_training)
             for transform, state in zip(transforms, transform_states):
