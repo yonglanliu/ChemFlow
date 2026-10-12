@@ -169,48 +169,79 @@ def main() -> None:
             }
 
         def on_validation_epoch_end(self, trainer, pl_module) -> None:
-            # Match CheMeleon's stable inspection design. Only global rank zero
-            # evaluates separate, non-distributed reference loaders. Other
-            # ranks proceed to Lightning's normal synchronization points and
-            # never enter an extra custom collective.
-            if trainer.sanity_checking or not trainer.is_global_zero:
+            if trainer.sanity_checking:
+                return
+            # Every DDP rank must reach the same synchronization points. Keep
+            # worker ranks parked while rank zero evaluates the independent
+            # full-data loaders; otherwise they can enter the next epoch's
+            # gradient all-reduce while rank zero is still inside this callback
+            # and eventually trigger the NCCL watchdog.
+            trainer.strategy.barrier("chemflow_task_metrics_start")
+            if not trainer.is_global_zero:
+                trainer.strategy.barrier("chemflow_task_metrics_end")
                 return
             epoch = int(trainer.current_epoch) + 1
-            split_metrics = {
-                "train": self._evaluate_loader(
-                    trainer, pl_module, trainer.train_dataloader
-                ),
-                "validation": self._evaluate_loader(
-                    trainer, pl_module, trainer.val_dataloaders
-                ),
-            }
-            rows = []
-            logged = {"completed_epoch": epoch}
-            for split, metrics_by_task in split_metrics.items():
-                print(f"{split.title()} metrics by task — epoch {epoch}:", flush=True)
-                for task, metrics in metrics_by_task.items():
-                    row = {"epoch": epoch, "split": split, "task": task, **metrics}
-                    rows.append(row)
-                    shown = ", ".join(
-                        f"{name}={value:.4f}"
-                        for name, value in metrics.items()
-                        if name not in {"n", "n_total", "n_exact", "n_censored",
-                                        "n_upper_bound", "n_lower_bound",
-                                        "n_bound_violations"}
-                        and value is not None and np.isfinite(value)
+            try:
+                split_metrics = {
+                    "train": self._evaluate_loader(
+                        trainer, pl_module, trainer.train_dataloader
+                    ),
+                    "validation": self._evaluate_loader(
+                        trainer, pl_module, trainer.val_dataloaders
+                    ),
+                }
+                rows = []
+                logged = {"completed_epoch": epoch}
+                for split, metrics_by_task in split_metrics.items():
+                    print(
+                        f"{split.title()} metrics by task — epoch {epoch}:",
+                        flush=True,
                     )
-                    print(f"  {task} (n={metrics['n']}): {shown}", flush=True)
-                    for name, value in metrics.items():
-                        if value is not None and isinstance(value, (int, float)):
-                            logged[f"{split}_{task}_{name}"] = value
-            log_dir = Path(trainer.logger.log_dir)
-            model_dir = log_dir.parent.parent
-            output = model_dir / "training_task_metrics.csv"
-            previous = []
-            if output.is_file():
-                previous = pd.read_csv(output).query("epoch != @epoch").to_dict("records")
-            pd.DataFrame(previous + rows).to_csv(output, index=False)
-            trainer.logger.log_metrics(logged, step=trainer.global_step)
+                    for task, metrics in metrics_by_task.items():
+                        row = {
+                            "epoch": epoch,
+                            "split": split,
+                            "task": task,
+                            **metrics,
+                        }
+                        rows.append(row)
+                        shown = ", ".join(
+                            f"{name}={value:.4f}"
+                            for name, value in metrics.items()
+                            if name
+                            not in {
+                                "n",
+                                "n_total",
+                                "n_exact",
+                                "n_censored",
+                                "n_upper_bound",
+                                "n_lower_bound",
+                                "n_bound_violations",
+                            }
+                            and value is not None
+                            and np.isfinite(value)
+                        )
+                        print(
+                            f"  {task} (n={metrics['n']}): {shown}",
+                            flush=True,
+                        )
+                        for name, value in metrics.items():
+                            if value is not None and isinstance(value, (int, float)):
+                                logged[f"{split}_{task}_{name}"] = value
+                log_dir = Path(trainer.logger.log_dir)
+                model_dir = log_dir.parent.parent
+                output = model_dir / "training_task_metrics.csv"
+                previous = []
+                if output.is_file():
+                    previous = (
+                        pd.read_csv(output)
+                        .query("epoch != @epoch")
+                        .to_dict("records")
+                    )
+                pd.DataFrame(previous + rows).to_csv(output, index=False)
+                trainer.logger.log_metrics(logged, step=trainer.global_step)
+            finally:
+                trainer.strategy.barrier("chemflow_task_metrics_end")
 
     class MetricsTrainer(original_trainer):
         def __init__(self, *args, callbacks=None, **kwargs):
