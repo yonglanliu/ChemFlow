@@ -291,6 +291,7 @@ def save_split_dataframe(
         (
             normalized_columns[candidate]
             for candidate in (
+                "ligand id",
                 "molecule name",
                 "compound name",
                 "molecule id",
@@ -374,6 +375,7 @@ def load_test_metadata(split_config, smiles_col, expected_rows):
         (
             normalized_columns[candidate]
             for candidate in (
+                "ligand id",
                 "molecule name",
                 "compound name",
                 "molecule id",
@@ -674,7 +676,7 @@ def load_split_column_features(
     )
     train_smiles = train_df[smiles_col].to_numpy()[train_valid_indices]
 
-    X_test, y_test, _ = featurize_array(
+    X_test, y_test, test_valid_indices = featurize_array(
         test_df[smiles_col].to_numpy(),
         test_df[y_col].to_numpy(),
         feature_types,
@@ -776,7 +778,7 @@ def load_explicit_split_features(
     )
     train_smiles = train_df[smiles_col].to_numpy()[train_valid_indices]
 
-    X_test, y_test, _ = featurize_array(
+    X_test, y_test, test_valid_indices = featurize_array(
         test_df[smiles_col].to_numpy(),
         test_df[y_col].to_numpy(),
         feature_types,
@@ -784,18 +786,38 @@ def load_explicit_split_features(
 
     X_valid = None
     y_valid = None
+    valid_valid_indices = None
 
     if valid_df is not None and len(valid_df) > 0:
-        X_valid, y_valid, _ = featurize_array(
+        X_valid, y_valid, valid_valid_indices = featurize_array(
             valid_df[smiles_col].to_numpy(),
             valid_df[y_col].to_numpy(),
             feature_types,
         )
 
-    split_frames = [train_df.assign(split="train")]
+    for label, frame, indices in (
+        ("train", train_df, train_valid_indices),
+        ("test", test_df, test_valid_indices),
+        ("valid", valid_df, valid_valid_indices),
+    ):
+        if frame is None or indices is None:
+            continue
+        removed = len(frame) - len(indices)
+        if removed:
+            _log_and_write(
+                job_dir,
+                "warning",
+                "[%s] Removing %d rows that could not produce finite features.",
+                label,
+                removed,
+            )
+
+    split_frames = [train_df.iloc[train_valid_indices].assign(split="train")]
     if valid_df is not None and len(valid_df) > 0:
-        split_frames.append(valid_df.assign(split="validation"))
-    split_frames.append(test_df.assign(split="test"))
+        split_frames.append(
+            valid_df.iloc[valid_valid_indices].assign(split="validation")
+        )
+    split_frames.append(test_df.iloc[test_valid_indices].assign(split="test"))
     split_export = pd.concat(split_frames, ignore_index=True)
     save_split_dataframe(
         frame=split_export.drop(columns="split"),
@@ -1440,6 +1462,12 @@ def train(training_config):
         x_train_shape = getattr(X_train, "shape", None)
         x_test_shape = getattr(X_test, "shape", None)
         x_valid_shape = getattr(X_valid, "shape", None) if X_valid is not None else None
+        split_name_fallback_file = training_data_file or explicit_train_data_file
+        split_name_fallback = (
+            Path(split_name_fallback_file).stem
+            if split_name_fallback_file is not None
+            else "dataset"
+        )
 
         test_metadata = load_test_metadata(
             split_config=split_config,
@@ -1478,7 +1506,11 @@ def train(training_config):
             "split_name": (
                 split_config.get("split_name", split_config.get("prefix_name"))
                 if split_source == "split"
-                else split_config.get("split_name", Path(training_data_file).stem)
+                else (
+                    split_config.get("split_name")
+                    or split_config.get("prefix_name")
+                    or split_name_fallback
+                )
             ),
             "pre_split_data": split_source != "split",
             "split_source": split_source,
