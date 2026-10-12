@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
+import hashlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from chemflow.deep_learning.test_evaluation import regression_metrics
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _independent_reference_loader(loader) -> DataLoader | None:
@@ -251,6 +260,95 @@ def main() -> None:
             super().__init__(*args, callbacks=callbacks, **kwargs)
 
     train_module.pl.Trainer = MetricsTrainer
+
+    # Chemprop 2.2 loads a local ``--from-foundation`` checkpoint inside
+    # ``build_model`` but does not log a positive confirmation afterward.
+    # Wrap that exact construction point so this message is emitted only after
+    # Chemprop's MPNN.load_from_file call has returned successfully.
+    original_build_model = train_module.build_model
+    transfer_load_count = 0
+
+    def verified_build_model(*args, **kwargs):
+        nonlocal transfer_load_count
+        model = original_build_model(*args, **kwargs)
+        namespace = args[0] if args else kwargs.get("args")
+        foundation_value = getattr(namespace, "from_foundation", None)
+        if foundation_value is None:
+            return model
+
+        transfer_load_count += 1
+        checkpoint = Path(str(foundation_value)).expanduser()
+        checkpoint_hash = _sha256(checkpoint) if checkpoint.is_file() else None
+        expected_hash = os.environ.get("CHEMFLOW_TRANSFER_CHECKPOINT_SHA256")
+        if expected_hash and checkpoint_hash != expected_hash:
+            raise RuntimeError(
+                "Transfer checkpoint changed between ChemFlow validation and "
+                f"Chemprop loading: expected {expected_hash}, got {checkpoint_hash}."
+            )
+
+        encoder = model.message_passing
+        encoder_parameters = sum(
+            parameter.numel() for parameter in encoder.parameters()
+        )
+        trainable_parameters = sum(
+            parameter.numel()
+            for parameter in encoder.parameters()
+            if parameter.requires_grad
+        )
+        encoder_state = "trainable" if trainable_parameters else "frozen"
+        verification = {
+            "load_succeeded": True,
+            "checkpoint": (
+                str(checkpoint.resolve())
+                if checkpoint.exists()
+                else str(checkpoint)
+            ),
+            "checkpoint_sha256": checkpoint_hash,
+            "checksum_verified": bool(
+                expected_hash and checkpoint_hash == expected_hash
+            ),
+            "loaded_component": "message_passing_encoder_and_aggregation",
+            "encoder_class": type(encoder).__name__,
+            "encoder_parameters": encoder_parameters,
+            "encoder_trainable_parameters": trainable_parameters,
+            "encoder_state": encoder_state,
+            "prediction_head_initialized_fresh": True,
+            "load_event": transfer_load_count,
+        }
+        output_dir = Path(namespace.output_dir)
+        verification_path = (
+            output_dir
+            / f"transfer_load_verification_model_{transfer_load_count - 1}.json"
+        )
+        if os.environ.get("LOCAL_RANK", "0") == "0":
+            verification_path.write_text(
+                json.dumps(verification, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print("", flush=True)
+            print("=" * 72, flush=True)
+            print("CHEMFLOW TRANSFER WEIGHTS LOADED SUCCESSFULLY", flush=True)
+            print(f"  Checkpoint: {verification['checkpoint']}", flush=True)
+            print(f"  SHA-256: {checkpoint_hash or 'not available'}", flush=True)
+            print(
+                "  Checksum verified: "
+                + ("yes" if verification["checksum_verified"] else "not requested"),
+                flush=True,
+            )
+            print(
+                "  Loaded component: message-passing encoder and aggregation",
+                flush=True,
+            )
+            print(f"  Encoder class: {type(encoder).__name__}", flush=True)
+            print(f"  Encoder parameters: {encoder_parameters:,}", flush=True)
+            print(f"  Encoder state: {encoder_state}", flush=True)
+            print("  Prediction head: initialized fresh", flush=True)
+            print(f"  Verification: {verification_path}", flush=True)
+            print("=" * 72, flush=True)
+            print("", flush=True)
+        return model
+
+    train_module.build_model = verified_build_model
 
     from chemprop.cli.main import main as chemprop_main
 

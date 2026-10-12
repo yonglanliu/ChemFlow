@@ -671,7 +671,11 @@ class ChempropTrainer:
         resume_checkpoints: list[Path] | None = None,
     ) -> list[str]:
         executable = str(self.training_cfg.get("executable", "chemprop")).strip()
-        if self.checkpoint_interval > 0 or self.inspect_task_metrics:
+        if (
+            self.checkpoint_interval > 0
+            or self.inspect_task_metrics
+            or self.transfer_checkpoint is not None
+        ):
             command = [
                 sys.executable,
                 "-m",
@@ -1128,6 +1132,13 @@ class ChempropTrainer:
             "1" if self.inspect_task_metrics else "0"
         )
         process_environment["CHEMFLOW_TARGET_NAMES"] = json.dumps(self.targets)
+        if self.transfer_checkpoint is not None:
+            # The periodic launcher checks this digest after Chemprop has
+            # successfully loaded the local foundation-model checkpoint. This
+            # detects a checkpoint replacement between preflight and runtime.
+            process_environment["CHEMFLOW_TRANSFER_CHECKPOINT_SHA256"] = _sha256(
+                self.transfer_checkpoint
+            )
         compatibility_environment: dict[str, str] = {}
         if _version_tuple(version) < (2, 3):
             # Chemprop 2.2 asks Lightning to reload the checkpoint it just
