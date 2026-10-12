@@ -245,7 +245,7 @@ def add_finetune_args(parser: ArgumentParser):
                         help='Use MTL loss function')
     parser.add_argument(
         '--task_loss_weighting',
-        choices=['uniform', 'sqrt_inverse_frequency', 'inverse_frequency'],
+        choices=['normal', 'uniform', 'sqrt_inverse_frequency', 'inverse_frequency'],
         default='uniform',
         help='Task loss weighting strategy for partially labeled multitask data.',
     )

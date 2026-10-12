@@ -80,7 +80,7 @@ def resolve_task_loss_weights(
                 )
     else:
         normalized_strategy = str(strategy).strip().lower().replace("-", "_")
-        if normalized_strategy in {"uniform", "none"}:
+        if normalized_strategy in {"uniform", "none", "normal"}:
             weights = np.ones(len(names), dtype=float)
         elif normalized_strategy == "inverse_frequency":
             weights = 1.0 / counts.astype(float)
@@ -91,7 +91,7 @@ def resolve_task_loss_weights(
             weights = 1.0 / np.sqrt(counts.astype(float))
         else:
             raise ValueError(
-                "task_loss_weighting must be 'uniform', "
+                "task_loss_weighting must be 'normal'/'uniform', "
                 "'sqrt_inverse_frequency', or 'inverse_frequency'."
             )
 
