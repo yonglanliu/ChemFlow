@@ -872,7 +872,12 @@ class ChempropTrainer:
             "--accelerator",
             str(self.training_cfg.get("accelerator", "auto")),
             "--devices",
-            str(self.training_cfg.get("devices", "auto")),
+            # Chemprop 2.2 prediction does not gather DDP shards before
+            # writing. With four devices, every rank predicts one quarter of
+            # the rows and then tries to attach that shard to the full input
+            # dataframe. Run final prediction export on one device; this does
+            # not change multi-GPU DDP training or its synchronized metrics.
+            "1",
         ]
         featurizers = _items(
             self.model_cfg.get("molecule_featurizers", []),
