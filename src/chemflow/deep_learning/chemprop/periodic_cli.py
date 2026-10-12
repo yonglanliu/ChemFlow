@@ -9,8 +9,29 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader
 
 from chemflow.deep_learning.test_evaluation import regression_metrics
+
+
+def _independent_reference_loader(loader) -> DataLoader | None:
+    """Clone a Lightning loader without its distributed sampler or workers."""
+    if loader is None:
+        return None
+    batch_size = getattr(loader, "batch_size", None)
+    if batch_size is None:
+        raise ValueError(
+            "Chemprop task inspection requires a data loader with batch_size."
+        )
+    return DataLoader(
+        loader.dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=loader.collate_fn,
+        pin_memory=bool(getattr(loader, "pin_memory", False)),
+        drop_last=False,
+    )
 
 
 def _relation_codes_from_masks(targets, lt_mask, gt_mask):
@@ -70,7 +91,11 @@ def main() -> None:
     original_trainer = train_module.pl.Trainer
 
     class EpochMetricsCallback(Callback):
-        """Evaluate complete train/validation loaders after every epoch."""
+        """Evaluate independent full-data loaders on global rank zero."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._reference_loaders = {}
 
         @staticmethod
         def _loader(value):
@@ -78,9 +103,20 @@ def main() -> None:
                 return value[0]
             return value
 
+        def _reference_loader(self, value):
+            active_loader = self._loader(value)
+            if active_loader is None:
+                return None
+            key = id(active_loader)
+            if key not in self._reference_loaders:
+                self._reference_loaders[key] = _independent_reference_loader(
+                    active_loader
+                )
+            return self._reference_loaders[key]
+
         def _evaluate_loader(self, trainer, model, loader):
             truths, predictions, relations = [], [], []
-            loader = self._loader(loader)
+            loader = self._reference_loader(loader)
             if loader is None:
                 return {}
             was_training = model.training
@@ -124,38 +160,6 @@ def main() -> None:
             truth = np.concatenate(truths, axis=0)
             prediction = np.concatenate(predictions, axis=0)
             relation = np.concatenate(relations, axis=0)
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                # Lightning replaces each loader's sampler with a distributed
-                # sampler, so every rank sees only its local shard. Gather the
-                # shards before calculating the inspection metrics; otherwise
-                # rank zero reports approximately 1 / world_size of the data.
-                gathered = [None] * torch.distributed.get_world_size()
-                torch.distributed.all_gather_object(
-                    gathered, (truth, prediction, relation)
-                )
-                if not trainer.is_global_zero:
-                    return {}
-                # DistributedSampler pads a non-divisible dataset by repeating
-                # a few records at the end of individual rank shards. Retain
-                # only the number of original samples assigned to each rank.
-                dataset_size = len(loader.dataset)
-                world_size = len(gathered)
-                real_counts = [
-                    max(0, (dataset_size - 1 - rank) // world_size + 1)
-                    for rank in range(world_size)
-                ]
-                truth = np.concatenate(
-                    [item[0][:count] for item, count in zip(gathered, real_counts)],
-                    axis=0,
-                )
-                prediction = np.concatenate(
-                    [item[1][:count] for item, count in zip(gathered, real_counts)],
-                    axis=0,
-                )
-                relation = np.concatenate(
-                    [item[2][:count] for item, count in zip(gathered, real_counts)],
-                    axis=0,
-                )
             names = target_names or [f"task_{index}" for index in range(truth.shape[1])]
             return {
                 name: regression_metrics(
@@ -165,7 +169,11 @@ def main() -> None:
             }
 
         def on_validation_epoch_end(self, trainer, pl_module) -> None:
-            if trainer.sanity_checking:
+            # Match CheMeleon's stable inspection design. Only global rank zero
+            # evaluates separate, non-distributed reference loaders. Other
+            # ranks proceed to Lightning's normal synchronization points and
+            # never enter an extra custom collective.
+            if trainer.sanity_checking or not trainer.is_global_zero:
                 return
             epoch = int(trainer.current_epoch) + 1
             split_metrics = {
@@ -176,8 +184,6 @@ def main() -> None:
                     trainer, pl_module, trainer.val_dataloaders
                 ),
             }
-            if not trainer.is_global_zero:
-                return
             rows = []
             logged = {"completed_epoch": epoch}
             for split, metrics_by_task in split_metrics.items():
