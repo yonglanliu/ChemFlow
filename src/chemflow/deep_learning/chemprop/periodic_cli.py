@@ -124,6 +124,38 @@ def main() -> None:
             truth = np.concatenate(truths, axis=0)
             prediction = np.concatenate(predictions, axis=0)
             relation = np.concatenate(relations, axis=0)
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                # Lightning replaces each loader's sampler with a distributed
+                # sampler, so every rank sees only its local shard. Gather the
+                # shards before calculating the inspection metrics; otherwise
+                # rank zero reports approximately 1 / world_size of the data.
+                gathered = [None] * torch.distributed.get_world_size()
+                torch.distributed.all_gather_object(
+                    gathered, (truth, prediction, relation)
+                )
+                if not trainer.is_global_zero:
+                    return {}
+                # DistributedSampler pads a non-divisible dataset by repeating
+                # a few records at the end of individual rank shards. Retain
+                # only the number of original samples assigned to each rank.
+                dataset_size = len(loader.dataset)
+                world_size = len(gathered)
+                real_counts = [
+                    max(0, (dataset_size - 1 - rank) // world_size + 1)
+                    for rank in range(world_size)
+                ]
+                truth = np.concatenate(
+                    [item[0][:count] for item, count in zip(gathered, real_counts)],
+                    axis=0,
+                )
+                prediction = np.concatenate(
+                    [item[1][:count] for item, count in zip(gathered, real_counts)],
+                    axis=0,
+                )
+                relation = np.concatenate(
+                    [item[2][:count] for item, count in zip(gathered, real_counts)],
+                    axis=0,
+                )
             names = target_names or [f"task_{index}" for index in range(truth.shape[1])]
             return {
                 name: regression_metrics(
@@ -133,7 +165,7 @@ def main() -> None:
             }
 
         def on_validation_epoch_end(self, trainer, pl_module) -> None:
-            if trainer.sanity_checking or not trainer.is_global_zero:
+            if trainer.sanity_checking:
                 return
             epoch = int(trainer.current_epoch) + 1
             split_metrics = {
@@ -144,6 +176,8 @@ def main() -> None:
                     trainer, pl_module, trainer.val_dataloaders
                 ),
             }
+            if not trainer.is_global_zero:
+                return
             rows = []
             logged = {"completed_epoch": epoch}
             for split, metrics_by_task in split_metrics.items():
