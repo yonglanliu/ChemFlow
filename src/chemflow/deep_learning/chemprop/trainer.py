@@ -317,6 +317,9 @@ class ChempropTrainer:
         self.transfer_checkpoint = (
             _path(transfer_value, self.config_dir) if transfer_value else None
         )
+        self.transfer_keep_head = bool(
+            self.model_cfg.get("transfer_keep_head", False)
+        )
         self.freeze_transferred_encoder = bool(
             self.model_cfg.get("freeze_encoder", False)
         )
@@ -337,6 +340,11 @@ class ChempropTrainer:
         if self.freeze_transferred_encoder and self.transfer_checkpoint is None:
             raise ValueError(
                 "ChempropConfig.freeze_encoder requires "
+                "ChempropConfig.transfer_checkpoint."
+            )
+        if self.transfer_keep_head and self.transfer_checkpoint is None:
+            raise ValueError(
+                "ChempropConfig.transfer_keep_head requires "
                 "ChempropConfig.transfer_checkpoint."
             )
         epochs = int(self.training_cfg.get("num_epochs", 100))
@@ -711,11 +719,15 @@ class ChempropTrainer:
         if resume_checkpoints:
             command.extend(["--checkpoint", *(str(path) for path in resume_checkpoints)])
         elif self.transfer_checkpoint is not None:
-            # Chemprop's foundation-model path imports the message-passing
-            # encoder and constructs a new task-specific FFN. This deliberately
-            # avoids transferring a source task's prediction head.
-            command.extend(["--from-foundation", str(self.transfer_checkpoint)])
-            if self.freeze_transferred_encoder:
+            if self.transfer_keep_head:
+                # Chemprop's checkpoint path retains the complete trained
+                # model, including the prediction head and its transforms.
+                command.extend(["--checkpoint", str(self.transfer_checkpoint)])
+            else:
+                # The foundation-model path imports message passing and
+                # aggregation while constructing a fresh task-specific FFN.
+                command.extend(["--from-foundation", str(self.transfer_checkpoint)])
+            if self.freeze_transferred_encoder and self.transfer_keep_head:
                 command.append("--freeze-encoder")
 
         if data_paths[0].name == "data_with_splits.csv":
@@ -1139,6 +1151,17 @@ class ChempropTrainer:
             process_environment["CHEMFLOW_TRANSFER_CHECKPOINT_SHA256"] = _sha256(
                 self.transfer_checkpoint
             )
+            process_environment["CHEMFLOW_TRANSFER_CHECKPOINT"] = str(
+                self.transfer_checkpoint
+            )
+            process_environment["CHEMFLOW_TRANSFER_MODE"] = (
+                "full_model" if self.transfer_keep_head else "encoder_only"
+            )
+            process_environment["CHEMFLOW_TRANSFER_TASK"] = self.task
+            process_environment["CHEMFLOW_TRANSFER_FREEZE_ENCODER"] = (
+                "1" if self.freeze_transferred_encoder else "0"
+            )
+            process_environment["CHEMFLOW_TRANSFER_OUTPUT_DIR"] = str(self.workdir)
         compatibility_environment: dict[str, str] = {}
         if _version_tuple(version) < (2, 3):
             # Chemprop 2.2 asks Lightning to reload the checkpoint it just
@@ -1186,7 +1209,13 @@ class ChempropTrainer:
             "transfer_learning": {
                 "enabled": self.transfer_checkpoint is not None,
                 "mode": (
-                    "encoder_only" if self.transfer_checkpoint is not None else None
+                    (
+                        "full_model"
+                        if self.transfer_keep_head
+                        else "encoder_only"
+                    )
+                    if self.transfer_checkpoint is not None
+                    else None
                 ),
                 "checkpoint": (
                     {
@@ -1199,6 +1228,11 @@ class ChempropTrainer:
                 "encoder_frozen": self.freeze_transferred_encoder,
                 "prediction_head_initialized_fresh": (
                     self.transfer_checkpoint is not None
+                    and not self.transfer_keep_head
+                ),
+                "prediction_head_transferred": (
+                    self.transfer_checkpoint is not None
+                    and self.transfer_keep_head
                 ),
             },
         }
@@ -1274,7 +1308,12 @@ class ChempropTrainer:
         else:
             print("  Resume: disabled", flush=True)
         if self.transfer_checkpoint is not None:
-            print("  Transfer learning: enabled (encoder only)", flush=True)
+            transfer_mode = (
+                "full model including prediction head"
+                if self.transfer_keep_head
+                else "encoder only"
+            )
+            print(f"  Transfer learning: enabled ({transfer_mode})", flush=True)
             print(
                 f"  Transfer checkpoint: {self.transfer_checkpoint}",
                 flush=True,
@@ -1284,11 +1323,18 @@ class ChempropTrainer:
                 f"{_sha256(self.transfer_checkpoint)}",
                 flush=True,
             )
-            print(
-                "  Transfer state: message-passing encoder restored; "
-                "prediction head initialized fresh",
-                flush=True,
-            )
+            if self.transfer_keep_head:
+                print(
+                    "  Transfer state: message-passing encoder, aggregation, "
+                    "and prediction head restored",
+                    flush=True,
+                )
+            else:
+                print(
+                    "  Transfer state: message-passing encoder restored; "
+                    "prediction head initialized fresh",
+                    flush=True,
+                )
             print(
                 "  Transferred encoder: "
                 + ("frozen" if self.freeze_transferred_encoder else "trainable"),

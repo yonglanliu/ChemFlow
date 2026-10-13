@@ -97,6 +97,12 @@ def main() -> None:
 
     inspect_metrics = os.environ.get("CHEMFLOW_INSPECT_TASK_METRICS", "1") == "1"
     target_names = json.loads(os.environ.get("CHEMFLOW_TARGET_NAMES", "[]"))
+    transfer_checkpoint_value = os.environ.get("CHEMFLOW_TRANSFER_CHECKPOINT")
+    transfer_mode = os.environ.get("CHEMFLOW_TRANSFER_MODE")
+    transfer_task = os.environ.get("CHEMFLOW_TRANSFER_TASK")
+    freeze_transfer_encoder = (
+        os.environ.get("CHEMFLOW_TRANSFER_FREEZE_ENCODER", "0") == "1"
+    )
     original_trainer = train_module.pl.Trainer
 
     class EpochMetricsCallback(Callback):
@@ -252,103 +258,138 @@ def main() -> None:
             finally:
                 trainer.strategy.barrier("chemflow_task_metrics_end")
 
+    class TransferVerificationCallback(Callback):
+        """Verify and report transfer state after the model has been built."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.reported = False
+
+        def on_fit_start(self, trainer, pl_module) -> None:
+            if self.reported or transfer_checkpoint_value is None:
+                return
+            checkpoint = Path(transfer_checkpoint_value).expanduser()
+            checkpoint_hash = _sha256(checkpoint)
+            expected_hash = os.environ.get(
+                "CHEMFLOW_TRANSFER_CHECKPOINT_SHA256"
+            )
+            if expected_hash and checkpoint_hash != expected_hash:
+                raise RuntimeError(
+                    "Transfer checkpoint changed between ChemFlow validation "
+                    f"and Chemprop loading: expected {expected_hash}, got "
+                    f"{checkpoint_hash}."
+                )
+
+            encoder = pl_module.message_passing
+            encoder_parameters = sum(
+                parameter.numel() for parameter in encoder.parameters()
+            )
+            trainable_encoder_parameters = sum(
+                parameter.numel()
+                for parameter in encoder.parameters()
+                if parameter.requires_grad
+            )
+            predictor_parameters = sum(
+                parameter.numel() for parameter in pl_module.predictor.parameters()
+            )
+            encoder_state = (
+                "trainable" if trainable_encoder_parameters else "frozen"
+            )
+            keep_head = transfer_mode == "full_model"
+            predictor_targets = int(pl_module.predictor.n_targets)
+            if (
+                keep_head
+                and target_names
+                and predictor_targets != len(target_names)
+            ):
+                raise ValueError(
+                    "A transferred prediction head must have the same number "
+                    f"of targets as the new dataset: checkpoint="
+                    f"{predictor_targets}, dataset={len(target_names)}. Set "
+                    "ChempropConfig.transfer_keep_head = false to create a "
+                    "compatible new head."
+                )
+            loaded_component = (
+                "complete_model_including_prediction_head"
+                if keep_head
+                else "message_passing_encoder_and_aggregation"
+            )
+            verification = {
+                "load_succeeded": True,
+                "transfer_mode": transfer_mode,
+                "checkpoint": str(checkpoint.resolve()),
+                "checkpoint_sha256": checkpoint_hash,
+                "checksum_verified": bool(
+                    expected_hash and checkpoint_hash == expected_hash
+                ),
+                "loaded_component": loaded_component,
+                "encoder_class": type(encoder).__name__,
+                "encoder_parameters": encoder_parameters,
+                "encoder_trainable_parameters": trainable_encoder_parameters,
+                "encoder_state": encoder_state,
+                "predictor_parameters": predictor_parameters,
+                "predictor_targets": predictor_targets,
+                "configured_task": transfer_task,
+                "prediction_head_transferred": keep_head,
+                "prediction_head_initialized_fresh": not keep_head,
+            }
+            if trainer.is_global_zero:
+                model_dir = Path(trainer.logger.log_dir).parent.parent
+                verification_path = model_dir / "transfer_load_verification.json"
+                verification_path.write_text(
+                    json.dumps(verification, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                print("", flush=True)
+                print("=" * 72, flush=True)
+                print("CHEMFLOW TRANSFER WEIGHTS LOADED SUCCESSFULLY", flush=True)
+                print(f"  Transfer mode: {transfer_mode}", flush=True)
+                print(f"  Checkpoint: {checkpoint.resolve()}", flush=True)
+                print(f"  SHA-256: {checkpoint_hash}", flush=True)
+                print("  Checksum verified: yes", flush=True)
+                print(f"  Loaded component: {loaded_component}", flush=True)
+                print(f"  Encoder class: {type(encoder).__name__}", flush=True)
+                print(f"  Encoder parameters: {encoder_parameters:,}", flush=True)
+                print(f"  Encoder state: {encoder_state}", flush=True)
+                print(
+                    "  Prediction head: "
+                    + ("transferred" if keep_head else "initialized fresh"),
+                    flush=True,
+                )
+                print(f"  Verification: {verification_path}", flush=True)
+                print("=" * 72, flush=True)
+                print("", flush=True)
+            self.reported = True
+
+        def on_train_epoch_start(self, trainer, pl_module) -> None:
+            if freeze_transfer_encoder:
+                pl_module.message_passing.eval()
+
     class MetricsTrainer(original_trainer):
         def __init__(self, *args, callbacks=None, **kwargs):
             callbacks = list(callbacks or [])
             if inspect_metrics:
                 callbacks.append(EpochMetricsCallback())
+            if transfer_checkpoint_value is not None:
+                callbacks.append(TransferVerificationCallback())
             super().__init__(*args, callbacks=callbacks, **kwargs)
 
     train_module.pl.Trainer = MetricsTrainer
 
-    # Chemprop 2.2 loads a local ``--from-foundation`` checkpoint inside
-    # ``build_model`` but does not log a positive confirmation afterward.
-    # Wrap that exact construction point so this message is emitted only after
-    # Chemprop's MPNN.load_from_file call has returned successfully.
-    original_build_model = train_module.build_model
-    transfer_load_count = 0
+    if transfer_mode == "encoder_only" and freeze_transfer_encoder:
+        # Chemprop 2.2 only accepts its public --freeze-encoder switch with
+        # --checkpoint, not --from-foundation. Freeze the imported foundation
+        # encoder immediately after model construction and before Lightning
+        # configures its optimizer.
+        original_build_model = train_module.build_model
 
-    def verified_build_model(*args, **kwargs):
-        nonlocal transfer_load_count
-        model = original_build_model(*args, **kwargs)
-        namespace = args[0] if args else kwargs.get("args")
-        foundation_value = getattr(namespace, "from_foundation", None)
-        if foundation_value is None:
+        def build_model_with_frozen_encoder(*args, **kwargs):
+            model = original_build_model(*args, **kwargs)
+            model.message_passing.requires_grad_(False)
+            model.message_passing.eval()
             return model
 
-        transfer_load_count += 1
-        checkpoint = Path(str(foundation_value)).expanduser()
-        checkpoint_hash = _sha256(checkpoint) if checkpoint.is_file() else None
-        expected_hash = os.environ.get("CHEMFLOW_TRANSFER_CHECKPOINT_SHA256")
-        if expected_hash and checkpoint_hash != expected_hash:
-            raise RuntimeError(
-                "Transfer checkpoint changed between ChemFlow validation and "
-                f"Chemprop loading: expected {expected_hash}, got {checkpoint_hash}."
-            )
-
-        encoder = model.message_passing
-        encoder_parameters = sum(
-            parameter.numel() for parameter in encoder.parameters()
-        )
-        trainable_parameters = sum(
-            parameter.numel()
-            for parameter in encoder.parameters()
-            if parameter.requires_grad
-        )
-        encoder_state = "trainable" if trainable_parameters else "frozen"
-        verification = {
-            "load_succeeded": True,
-            "checkpoint": (
-                str(checkpoint.resolve())
-                if checkpoint.exists()
-                else str(checkpoint)
-            ),
-            "checkpoint_sha256": checkpoint_hash,
-            "checksum_verified": bool(
-                expected_hash and checkpoint_hash == expected_hash
-            ),
-            "loaded_component": "message_passing_encoder_and_aggregation",
-            "encoder_class": type(encoder).__name__,
-            "encoder_parameters": encoder_parameters,
-            "encoder_trainable_parameters": trainable_parameters,
-            "encoder_state": encoder_state,
-            "prediction_head_initialized_fresh": True,
-            "load_event": transfer_load_count,
-        }
-        output_dir = Path(namespace.output_dir)
-        verification_path = (
-            output_dir
-            / f"transfer_load_verification_model_{transfer_load_count - 1}.json"
-        )
-        if os.environ.get("LOCAL_RANK", "0") == "0":
-            verification_path.write_text(
-                json.dumps(verification, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            print("", flush=True)
-            print("=" * 72, flush=True)
-            print("CHEMFLOW TRANSFER WEIGHTS LOADED SUCCESSFULLY", flush=True)
-            print(f"  Checkpoint: {verification['checkpoint']}", flush=True)
-            print(f"  SHA-256: {checkpoint_hash or 'not available'}", flush=True)
-            print(
-                "  Checksum verified: "
-                + ("yes" if verification["checksum_verified"] else "not requested"),
-                flush=True,
-            )
-            print(
-                "  Loaded component: message-passing encoder and aggregation",
-                flush=True,
-            )
-            print(f"  Encoder class: {type(encoder).__name__}", flush=True)
-            print(f"  Encoder parameters: {encoder_parameters:,}", flush=True)
-            print(f"  Encoder state: {encoder_state}", flush=True)
-            print("  Prediction head: initialized fresh", flush=True)
-            print(f"  Verification: {verification_path}", flush=True)
-            print("=" * 72, flush=True)
-            print("", flush=True)
-        return model
-
-    train_module.build_model = verified_build_model
+        train_module.build_model = build_model_with_frozen_encoder
 
     from chemprop.cli.main import main as chemprop_main
 
