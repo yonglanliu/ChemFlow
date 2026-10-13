@@ -23,6 +23,36 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _patch_chemprop_readonly_descriptors() -> None:
+    """Make pandas-backed Chemprop 2.2 descriptor matrices writable.
+
+    New pandas/NumPy combinations can return a read-only array from
+    ``DataFrame.to_numpy``. Chemprop 2.2 replaces descriptor NaNs in place when
+    constructing datapoints, so copy only arrays that are actually read-only.
+    """
+    from chemprop.cli.utils import parsing
+
+    original_parse_csv = parsing.parse_csv
+    reported = False
+
+    def parse_csv_with_writable_descriptors(*args, **kwargs):
+        nonlocal reported
+        parsed = list(original_parse_csv(*args, **kwargs))
+        descriptors = parsed[-1]
+        if descriptors is not None and not descriptors.flags.writeable:
+            parsed[-1] = np.array(descriptors, copy=True)
+            if not reported:
+                print(
+                    "ChemFlow compatibility: copied the read-only Chemprop "
+                    "descriptor matrix into writable memory.",
+                    flush=True,
+                )
+                reported = True
+        return tuple(parsed)
+
+    parsing.parse_csv = parse_csv_with_writable_descriptors
+
+
 def _independent_reference_loader(loader) -> DataLoader | None:
     """Clone a Lightning loader without its distributed sampler or workers."""
     if loader is None:
@@ -65,6 +95,7 @@ def main() -> None:
     from chemflow.deep_learning.chemprop import losses as _losses
     _losses.patch_chemprop_bounded_metric_masks()
     _losses.patch_chemprop_bounded_tracking_validation()
+    _patch_chemprop_readonly_descriptors()
     from lightning.pytorch.callbacks import ModelCheckpoint
     from lightning.pytorch.callbacks import Callback
     from chemprop.cli import train as train_module

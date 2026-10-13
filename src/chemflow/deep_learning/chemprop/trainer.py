@@ -683,6 +683,7 @@ class ChempropTrainer:
             self.checkpoint_interval > 0
             or self.inspect_task_metrics
             or self.transfer_checkpoint is not None
+            or bool(self.descriptor_columns)
         ):
             command = [
                 sys.executable,
