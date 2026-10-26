@@ -1,0 +1,79 @@
+[project]
+name = "example_residue_fep"
+work_dir = "/path/to/work"
+
+[system]
+type = "soluble" # soluble or membrane
+complex = "/path/to/complex.pdb"
+gromacs_command = "gmx_mpi"
+force_field = "amber99sb-star-ildn-mut"
+water_model = "tip3p"
+box_distance = 1.0
+ion_concentration = 0.15
+temperature_k = 300.0
+pressure_bar = 1.0
+setup_mode = "SKIP"
+# Membrane mode requires an already built, solvated, ionized, equilibrated
+# complex. prepare-system will stage it and will not run the soluble builder.
+# prepared_complex_gro = "/path/to/equilibrated_membrane_complex.gro"
+# prepared_complex_topology = "/path/to/equilibrated_membrane_complex.top"
+# membrane_normal = "z"
+# lipid_resnames = ["POPC", "POPE", "CHOL"]
+# minimum_lipids = 20
+# reference_pressure_bar = [1.0, 1.0]
+# compressibility_bar = [4.5e-5, 4.5e-5]
+# refcoord_scaling = "com"
+
+[mutation]
+chain = "A"
+residue = 123
+target = "VAL"
+
+[ligand]
+mol2 = "/path/to/ligand.mol2"
+# Existing ACPYPE/GROMACS files are optional. When supplied, `stage` copies
+# them into the layout expected by the legacy ResFEP scripts.
+# itp = "/path/to/ligand.itp"
+# gro = "/path/to/ligand.gro"
+# top = "/path/to/ligand.top"
+resname = "LIG"
+charge = 0
+charge_method = "bcc"
+preparation_mode = "SKIP"
+
+[simulation]
+start_replicate = 1
+replicates = 1
+lambda_windows = 17
+md_timestep_ps = 0.002
+timestep_ps = 0.002
+# Equilibration may be specified in ps or ns. Step counts are derived and
+# checked automatically, so they should normally be omitted.
+nvt_ns = 0.5
+npt_ns = 1.0
+production_ns = 10.0
+lambda_function = "cosine"
+lambda_mode = "single"
+mode = "RESUME"
+
+[execution]
+# At most three lambda-window jobs run concurrently by default.
+max_parallel_jobs = 3
+# Arrays are safer than shell fragments and also accept a quoted string.
+mdrun_em_options = ["-ntmpi", "1"]
+mdrun_md_options = ["-ntmpi", "1", "-nb", "gpu", "-pme", "gpu"]
+mdrun_fep_options = ["-ntmpi", "1", "-nb", "gpu", "-pme", "gpu"]
+mdrun_switch_options = ["-ntmpi", "1", "-nb", "gpu", "-pme", "gpu"]
+# Shell fragment for site-specific module setup, if needed:
+# environment_setup = "/path/to/load_gromacs.sh"
+# Required by `submit` unless already staged as <work_dir>/<name>/ResAlchemFEP.sh:
+# worker_script = "/path/to/ResAlchemFEP.sh"
+
+[slurm]
+partition = "gpu"
+nodes = 1
+tasks = 1
+cpus_per_task = 8
+gpus = 1
+memory = "16G"
+walltime = "08:00:00"

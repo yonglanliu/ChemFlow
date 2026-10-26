@@ -1,0 +1,62 @@
+[project]
+name = "septop_rbfe"
+work_dir = "./runs"
+
+[inputs]
+# Multi-record SDF; every record needs a unique _Name.
+ligand_library = "./ligands.sdf"
+# One directory per SDF name containing ligand.mol2, complex.pdb,
+# complex.gro, complex.top, solvent.gro, and solvent.top.
+prepared_root = "./prepared"
+# Checkout of https://github.com/MobleyLab/SeparatedTopologies
+septop_source_dir = "./SeparatedTopologies"
+
+[system]
+# Use "membrane" for a fully built, solvated, ionized, and equilibrated
+# protein-membrane complex in every prepared ligand directory.
+type = "soluble"
+membrane_normal = "z"
+complexes_pre_aligned = false
+lipid_resnames = ["POPC", "POPE", "POPS", "POPG", "DOPC", "DOPE", "DPPC", "CHOL"]
+minimum_lipids = 20
+barostat = "Parrinello-Rahman"
+reference_pressure_bar = [1.0, 1.0]       # xy, z
+compressibility_bar = [4.5e-5, 4.5e-5]  # xy, z
+refcoord_scaling = "com"
+
+[network]
+method = "minimal_spanning" # lomap, minimal_spanning, minimal_redundant, radial
+atom_mapper = "lomap"       # used only to score/plan edges, not by SepTop
+max3d_angstrom = 1.0
+element_change = false
+require_cycle_covering = true
+# radial_hub = "ligand_01"
+
+[protocol]
+complex_gamma = 0.5
+solvent_gamma = 0.3
+complex_ligand_resname = "LIG"
+solvent_ligand_resname = "UNL"
+# Keep false unless charge-changing finite-size corrections are handled separately.
+allow_charge_change = false
+replicates = 1
+start_replicate = 1
+timestep_ps = 0.002
+equilibration_ns = 1.0
+# Additional semi-isotropic complex equilibration in membrane mode.
+pressure_equilibration_ns = 1.0
+production_ns = 5.0
+
+[execution]
+gromacs_command = "gmx"
+mdrun_options = ["-ntmpi", "1", "-nb", "gpu", "-pme", "gpu"]
+max_parallel_jobs = 3
+
+[slurm]
+partition = "gpu"
+time = "24:00:00"
+nodes = 1
+tasks = 1
+gpus = 1
+cpus_per_task = 4
+memory = "16G"

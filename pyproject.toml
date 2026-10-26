@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=80,<82", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 
 name = "chemflow"
@@ -26,6 +30,9 @@ dependencies = [
 [project.optional-dependencies]
 desktop = [
     "PySide6>=6.8,<7",
+    "openai>=2,<3",
+    "keyring>=25,<26",
+    "PyJWT[crypto]>=2.9,<3",
 ]
 hf-graphormer = [
     "transformers==4.50.3",
@@ -37,6 +44,7 @@ chemberta = [
 ]
 data-curation = [
     "openpyxl>=3.1,<4",
+    "pypdf>=6,<7",
     "xlrd>=2,<3",
 ]
 kermt = [
@@ -52,21 +60,31 @@ kermt = [
 # ===========================
 [project.scripts]
 chemflow = "chemflow.cli.main:main"
+alchemforge = "alchemforge.cli:main"
+alchemforge-desktop = "alchemforge.desktop.main_window:main"
 chemflow-desktop = "chemflow.desktop.app:main"
 admet-desktop = "chemflow.desktop.admet_app:main"
 chemflow-install-ketcher = "chemflow.desktop.install_ketcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["chemflow*", "src*"]
+include = ["chemflow*", "alchemforge*", "src*"]
 
 [tool.setuptools.package-data]
-"chemflow.desktop" = ["*.md"]
+"chemflow.desktop" = ["*.md", "models/*.pt", "models/*.csv.gz"]
 "chemflow.config" = ["*.toml", "*.yaml"]
 "chemflow.deep_learning.gpt.config" = ["*.toml"]
 "chemflow.deep_learning.lstm" = ["*.toml"]
 "chemflow.deep_learning.kermt.vendor" = ["LICENSE", "UPSTREAM.md"]
 "chemflow.deep_learning.kermt.vendor.kermt.data" = ["smiles_regex.txt"]
+"alchemforge" = ["README.md"]
+"alchemforge.desktop" = ["*.svg", "assets/*"]
+"alchemforge.gromacs.resFEP" = ["*.sh", "*.toml", "mdp/*.mdp"]
+"alchemforge.gromacs.rbfe" = ["*.toml"]
+"alchemforge.gromacs.abfe" = ["*.sh", "*.toml"]
+"alchemforge.gromacs.septop" = ["*.toml"]
+"alchemforge.openfe" = ["*.sh", "*.yaml"]
+"alchemforge.structure" = ["*.sh"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

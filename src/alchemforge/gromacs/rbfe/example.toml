@@ -1,0 +1,94 @@
+[project]
+name = "ligand_rbfe_network"
+work_dir = "/path/to/work"
+
+[system]
+type = "soluble" # soluble or membrane
+protein = "/path/to/protein.pdb"
+gromacs_command = "gmx"
+force_field = "amber99sb-star-ildn-mut"
+water_model = "tip3p"
+box_shape = "dodecahedron"
+box_distance = 1.2
+neutralize = true
+ion_concentration = 0.15
+temperature_k = 300.0
+pressure_bar = 1.0
+# Membrane mode requires a fully prepared complex; the custom worker must
+# preserve this topology and use the membrane variables exported by AlchemForge.
+# prepared_complex_gro = "/path/to/equilibrated_membrane_complex.gro"
+# prepared_complex_topology = "/path/to/equilibrated_membrane_complex.top"
+# membrane_normal = "z"
+# lipid_resnames = ["POPC", "POPE", "CHOL"]
+# minimum_lipids = 20
+# reference_pressure_bar = [1.0, 1.0]
+# compressibility_bar = [4.5e-5, 4.5e-5]
+# refcoord_scaling = "com"
+
+[ligands]
+library_sdf = "/path/to/ligands.sdf"
+# Produced by GROMACS Ligand Preparation; ligand_name values must match the SDF.
+charge_manifest = "/path/to/prepared_ligands/ligand_manifest.tsv"
+
+[mapping]
+network_method = "lomap"
+atom_mapper = "lomap" # lomap, kartograf, or pmx
+# With atom_mapper = "pmx", OpenFE/LoMap selects edges and PMX maps each pair.
+pmx_command = "pmx"
+pmx_mapping_mode = "stage" # stage or run
+pmx_h2h_polar = true
+element_change = false
+max3d_angstrom = 1.0
+require_cycle_covering = true
+redundant_networks = 2
+# Required only when network_method = "radial".
+# radial_hub = "LIG001"
+
+[topology]
+backend = "pmx"
+charge_method = "bcc"
+# reject, coion, or correction. Co-ion preserves the periodic-cell charge in
+# both complex and solvent legs. Correction requires the CSV below.
+charge_change_method = "coion"
+# charge_correction_file = "/path/to/charge_corrections.csv"
+
+[simulation]
+start_replicate = 1
+replicates = 1
+lambda_windows = 21
+# "generated" uses lambda_function; "manual" uses the four arrays below.
+lambda_schedule_mode = "generated"
+lambda_function = "cosine" # cosine, linear, or power
+lambda_power = 2.0 # used only by the power function
+# Manual example (uncomment all four and set lambda_schedule_mode = "manual"):
+# coul_lambdas = [0.0, 0.0, 0.0, 0.5, 1.0]
+# vdw_lambdas = [0.0, 0.5, 1.0, 1.0, 1.0]
+# bonded_lambdas = [0.0, 0.5, 1.0, 1.0, 1.0]
+# restraint_lambdas = [0.0, 0.0, 0.0, 0.0, 0.0]
+timestep_ps = 0.002
+equilibration_ns = 1.0
+production_ns = 5.0
+
+[mdp]
+integrator = "sd" # sd or md
+constraints = "h-bonds" # h-bonds, all-bonds, or none
+coulomb_cutoff_nm = 1.0
+vdw_cutoff_nm = 1.0
+softcore_alpha = 0.5
+calc_lambda_neighbors = -1 # -1 for all states/MBAR; 1 for adjacent/BAR
+nstdhdl = 100
+
+[execution]
+max_parallel_jobs = 3
+mdrun_options = ["-ntmpi", "1"]
+# Required for execution after PMX hybrid topologies have been prepared.
+# worker_script = "/path/to/LigandRBFE_GROMACS.sh"
+
+[slurm]
+partition = "gpu"
+nodes = 1
+tasks = 1
+cpus_per_task = 8
+gpus = 1
+memory = "16G"
+walltime = "24:00:00"

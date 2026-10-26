@@ -1,0 +1,49 @@
+name: alchemforge
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - pip
+
+  # Alchemical and molecular-simulation stack
+  - openfe=1.12
+  - openff-toolkit
+  - acpype
+  - ambertools
+  - openmm=8.4.0
+  - gromacs
+  - pdbfixer
+
+  # PMX is installed separately from its Python 3 develop branch because no
+  # pmx_biobb build is available for macOS ARM. See src/alchemforge/README.md.
+
+  # Scientific and analysis stack. OpenFE 1.12 and AmberTools require the
+  # NumPy 1.x and pre-2026.03 RDKit lines.
+  - "numpy>=1.26,<2"
+  - scipy
+  - "pandas>=2.1,<3"
+  - matplotlib
+  - "rdkit>=2024.03,<2026.03"
+  - openbabel
+  - pyyaml
+  - mpi4py
+  - alchemlyb
+  - mdtraj
+  - parmed
+  - pillow
+
+  # GROMACS SepTop preparation additionally uses oechem/oespruce from the
+  # licensed OpenEye Toolkit. It is intentionally not installed here; add it
+  # from your licensed OpenEye channel when using that backend.
+
+  # Build support
+  - setuptools>=80,<82
+  - wheel
+  - cmake
+
+  # Pip installs only AlchemForge GUI and development dependencies. Install
+  # AlchemForge separately with `pip install -e src --no-deps --no-build-isolation`.
+  - pip:
+      - -r requirements-alchemforge.txt

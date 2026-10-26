@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=80,<82", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alchemforge"
+version = "0.1.0"
+description = "Alchemical free-energy workflows using GROMACS and OpenFE"
+requires-python = ">=3.12,<3.13"
+
+[project.scripts]
+alchemforge = "alchemforge.cli:main"
+alchemforge-desktop = "alchemforge.desktop.main_window:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["alchemforge*"]
+
+[tool.setuptools.package-data]
+"alchemforge" = ["README.md"]
+"alchemforge.desktop" = ["*.svg", "assets/*"]
+"alchemforge.gromacs.resFEP" = ["*.sh", "*.toml", "mdp/*.mdp"]
+"alchemforge.gromacs.rbfe" = ["*.toml"]
+"alchemforge.gromacs.abfe" = ["*.sh", "*.toml"]

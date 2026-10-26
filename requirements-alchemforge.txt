@@ -1,0 +1,32 @@
+# AlchemForge pip-side GUI and development dependencies. The compiled
+# simulation stack is managed by environment-alchemforge.yaml.
+# PMX needs a separate --no-build-isolation source install; see
+# src/alchemforge/README.md. Keeping it out of this file prevents pip from
+# selecting PMX's obsolete isolated setuptools build requirement.
+
+# GUI (kept separate from ChemFlow's PySide6 desktop environment)
+PyQt5
+PyQtWebEngine
+QtPy
+
+# 3D visualization
+py3Dmol
+PyOpenGL
+PyOpenGL_accelerate
+moderngl
+pyvista
+pyvistaqt
+vtk
+pillow
+
+# File watching and development
+watchdog
+pytest
+pytest-qt
+ruff
+build
+
+# General utilities
+requests
+rich
+platformdirs

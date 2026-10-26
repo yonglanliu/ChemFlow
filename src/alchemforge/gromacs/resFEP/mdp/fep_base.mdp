@@ -1,0 +1,46 @@
+; ============================================================
+; Base equilibrium FEP MDP
+; Shared parameters only
+; ============================================================
+
+constraints             = h-bonds        ; constrain bonds involving hydrogen atoms
+constraint_algorithm    = lincs          ; LINCS algorithm for bond constraints
+
+cutoff-scheme           = Verlet         ; use Verlet neighbor list scheme
+nstlist                 = 20             ; update neighbor list every 20 steps
+
+rlist                   = 1.0            ; real-space cutoff for nonbonded interactions
+rcoulomb                = 1.0            ; Coulomb cutoff distance
+rvdw                    = 1.0            ; van der Waals cutoff distance
+
+coulombtype             = PME            ; use particle-mesh Ewald electrostatics
+vdwtype                 = Cut-off        ; use plain cutoff for van der Waals interactions
+
+pbc                     = xyz            ; periodic boundary conditions in all directions
+
+nstxout-compressed      = 5000           ; write compressed coordinates every 5000 steps
+nstenergy               = 1000           ; write energies every 1000 steps
+nstlog                  = 5000           ; write log output every 5000 steps
+
+
+; ============================================================
+; Soft-core settings
+; ============================================================
+
+sc-alpha                = 0.5            ; soft-core alpha parameter for lambda interpolation
+sc-power                = 1              ; soft-core power exponent
+sc-sigma                = 0.3            ; soft-core sigma parameter for smoothing
+sc-coul                 = no             ; disable soft-core for Coulomb interactions
+
+
+; ============================================================
+; Free-energy output
+; ============================================================
+
+nstdhdl                 = 100            ; write dhdl every 100 steps
+dhdl-derivatives        = yes            ; output free-energy derivatives
+dhdl-print-energy       = total          ; print total energy contribution to dhdl
+
+calc-lambda-neighbors   = -1             ; not include all neighboring lambda states in free-energy calculations
+
+separate-dhdl-file      = yes            ; store dhdl output in a separate file

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QStackedWidget,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from chemflow.desktop.adme_page import ADMEDeploymentPage
 from chemflow.desktop.app import _dark_palette
+from chemflow.desktop.physchem_page import PhysChemDeploymentPage
 from chemflow.desktop.theme import stylesheet
 
 
@@ -61,10 +63,16 @@ class ADMETMainWindow(QMainWindow):
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
         self.page = ADMEDeploymentPage(root, config_path=config_path)
+        self.physchem_page = PhysChemDeploymentPage(root)
+        self.pages = QStackedWidget(root)
+        self.pages.addWidget(self.physchem_page)
+        self.pages.addWidget(self.page)
         shell.addWidget(self._property_panel())
-        shell.addWidget(self.page, 1)
+        shell.addWidget(self.pages, 1)
         self.setCentralWidget(root)
-        self.statusBar().showMessage("Ready · HLM/RLM multitask + MLM single-task")
+        self.statusBar().showMessage(
+            "Ready · LogD, kinetic and thermodynamic solubility"
+        )
 
     def _property_panel(self) -> QWidget:
         panel = QFrame()
@@ -139,6 +147,23 @@ class ADMETMainWindow(QMainWindow):
             button.toggled.connect(self._property_selection_changed)
             self.property_buttons[property_name] = button
             category_layout.addWidget(button)
+        physchem_category = QFrame()
+        physchem_category.setObjectName("PropertyCategory")
+        physchem_layout = QVBoxLayout(physchem_category)
+        physchem_layout.setContentsMargins(12, 12, 12, 12)
+        physchem_layout.setSpacing(7)
+        physchem_name = QLabel("PHYSICOCHEMICAL")
+        physchem_name.setObjectName("PropertyCategoryTitle")
+        physchem_layout.addWidget(physchem_name)
+        physchem_detail = QLabel("Bundled Chemprop deployment")
+        physchem_detail.setObjectName("Muted")
+        physchem_layout.addWidget(physchem_detail)
+        open_physchem = QPushButton("LogD and solubility")
+        open_physchem.setObjectName("PropertyButton")
+        open_physchem.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_physchem.clicked.connect(self._show_physchem)
+        physchem_layout.addWidget(open_physchem)
+        layout.addWidget(physchem_category)
         layout.addWidget(category)
 
         layout.addStretch()
@@ -167,6 +192,12 @@ class ADMETMainWindow(QMainWindow):
             self._updating_property_selection = False
         self._select_properties(self._selected_properties())
 
+    def _show_physchem(self) -> None:
+        self.pages.setCurrentWidget(self.physchem_page)
+        self.statusBar().showMessage(
+            "Active prediction: LogD, kinetic and thermodynamic solubility", 4000
+        )
+
     def _property_selection_changed(self, _checked: bool) -> None:
         if self._updating_property_selection:
             return
@@ -182,6 +213,7 @@ class ADMETMainWindow(QMainWindow):
         self._select_properties(selected)
 
     def _select_properties(self, properties: tuple[str, ...]) -> None:
+        self.pages.setCurrentWidget(self.page)
         self.page.set_selected_properties(properties)
         self.statusBar().showMessage(
             f"Active prediction: {', '.join(properties)}", 4000

@@ -906,9 +906,20 @@ class ChempropTrainer:
         truth[prediction_columns].to_csv(prediction_input, index=False)
         raw_output = self.workdir / "best_model_predictions.csv"
         best_models = self._best_model_paths()
-        command = [
-            executable,
-            "predict",
+        if self.descriptor_columns:
+            # Chemprop 2.2 can receive a read-only pandas-backed descriptor
+            # matrix during prediction, just as it can during training. Use
+            # the compatibility launcher so the matrix is copied before
+            # Chemprop replaces descriptor NaNs in place.
+            command = [
+                sys.executable,
+                "-m",
+                "chemflow.deep_learning.chemprop.periodic_cli",
+                "predict",
+            ]
+        else:
+            command = [executable, "predict"]
+        command.extend([
             "--test-path",
             str(prediction_input),
             "--preds-path",
@@ -930,7 +941,7 @@ class ChempropTrainer:
             # dataframe. Run final prediction export on one device; this does
             # not change multi-GPU DDP training or its synchronized metrics.
             "1",
-        ]
+        ])
         featurizers = _items(
             self.model_cfg.get("molecule_featurizers", []),
             name="ChempropConfig.molecule_featurizers",

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<rect width="256" height="256" rx="46" fill="#f7fbff"/>
+<g stroke="#2f79c7" stroke-width="10" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <polygon points="128,28 203,72 203,160 128,204 53,160 53,72"/>
+  <line x1="128" y1="28" x2="128" y2="50"/>
+  <line x1="203" y1="72" x2="184" y2="84"/>
+  <line x1="203" y1="160" x2="184" y2="148"/>
+  <line x1="128" y1="204" x2="128" y2="182"/>
+  <line x1="53" y1="160" x2="72" y2="148"/>
+  <line x1="53" y1="72" x2="72" y2="84"/>
+</g>
+<g fill="#2f79c7">
+  <circle cx="128" cy="28" r="13"/>
+  <circle cx="203" cy="72" r="13"/>
+  <circle cx="203" cy="160" r="13"/>
+  <circle cx="128" cy="204" r="13"/>
+  <circle cx="53" cy="160" r="13"/>
+  <circle cx="53" cy="72" r="13"/>
+</g>
+<path d="M88 166 L126 72 L168 166 M104 126 H153"
+      stroke="#133c6a" stroke-width="18" fill="none"
+      stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

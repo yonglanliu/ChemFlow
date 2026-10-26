@@ -1,0 +1,1 @@
+"""AlchemForge desktop styles."""

@@ -22,10 +22,8 @@ from chemflow.desktop.pages import (
     GeneratePage,
     PredictPage,
     SearchPage,
-    UncertaintyPage,
 )
-from chemflow.desktop.adme_page import ADMEDeploymentPage
-from chemflow.desktop.training_center import TrainingCenterPage
+from chemflow.desktop.property_prediction_page import PropertyPredictionPage
 from chemflow.desktop.widgets.forms import Card
 from chemflow.desktop.widgets.process_console import ProcessConsole
 
@@ -50,12 +48,10 @@ class MainWindow(QMainWindow):
         dashboard.navigate.connect(self.select_page)
         for page in [
             dashboard,
-            TrainingCenterPage(),
+            PropertyPredictionPage(),
             PredictPage(runner),
-            ADMEDeploymentPage(),
             SearchPage(runner),
             GeneratePage(runner),
-            UncertaintyPage(runner),
         ]:
             self.pages.addWidget(page)
 
@@ -76,7 +72,6 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(splitter)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
-        self.pages.currentChanged.connect(self._page_changed)
         self.statusBar().showMessage("Ready · local ChemFlow environment")
 
     def _sidebar(self) -> QWidget:
@@ -105,12 +100,10 @@ class MainWindow(QMainWindow):
         self.nav_group.setExclusive(True)
         for index, label in enumerate([
             "Overview",
-            "Train",
+            "Property prediction",
             "Predict",
-            "ADME clearance",
             "Similarity search",
             "Generate",
-            "Uncertainty",
         ]):
             button = QPushButton(label)
             button.setObjectName("NavButton")
@@ -141,7 +134,3 @@ class MainWindow(QMainWindow):
     def _task_state_changed(self, running: bool) -> None:
         if not running:
             self.statusBar().showMessage("Ready · task finished", 5000)
-
-    def _page_changed(self, index: int) -> None:
-        """The training center owns its job output; other pages use the shared console."""
-        self.console_card.setVisible(index != 1)

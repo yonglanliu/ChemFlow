@@ -7,7 +7,6 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFrame,
@@ -54,42 +53,6 @@ class WorkflowPage(QWidget):
             runner(arguments)
         except (RuntimeError, ValueError) as error:
             QMessageBox.warning(None, "Cannot start task", str(error))
-
-
-class TrainPage(WorkflowPage):
-    def __init__(self, runner: Runner, parent=None):
-        card = Card("Training setup", "Select a model family and its reproducible configuration file.")
-        model = QComboBox()
-        model.addItems(["chemeleon", "hf-graphormer", "ml", "gpt"])
-        config = PathField("TOML, YAML, or JSON configuration")
-        seed = QSpinBox()
-        seed.setRange(0, 2_147_483_647)
-        seed.setValue(42)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(14)
-        grid.addWidget(field("Model family", model), 0, 0)
-        grid.addWidget(field("Random seed", seed, "Used by GPT."), 0, 1)
-        grid.addWidget(field("Configuration", config), 1, 0, 1, 2)
-        card.body.addLayout(grid)
-        run = action_button("Start training")
-        card.body.addWidget(run, alignment=Qt.AlignmentFlag.AlignRight)
-        super().__init__(
-            PageHeader("Model studio", "Train a model", "Launch classical ML, Graphormer, CheMeleon, or GPT experiments."),
-            card,
-            parent,
-        )
-
-        def start() -> None:
-            if not config.text():
-                raise_or_warn(self, "Choose a training configuration first.")
-                return
-            args = ["train", model.currentText(), config.text()]
-            if model.currentText() == "gpt":
-                args.extend(["--seed", str(seed.value())])
-            self.launch(runner, args)
-
-        run.clicked.connect(start)
 
 
 class PredictPage(WorkflowPage):
@@ -258,41 +221,6 @@ class GeneratePage(WorkflowPage):
         run.clicked.connect(start)
 
 
-class UncertaintyPage(WorkflowPage):
-    def __init__(self, runner: Runner, parent=None):
-        card = Card("Bootstrap evaluation", "Estimate confidence intervals for multitask prediction metrics.")
-        input_file = PathField("Prediction CSV or Parquet")
-        tasks = QLineEdit(); tasks.setPlaceholderText("task:target_column:prediction_column; task2:target2:prediction2")
-        output = PathField("Output directory", mode="directory")
-        iterations = QSpinBox(); iterations.setRange(10, 1_000_000); iterations.setValue(1000)
-        confidence = QDoubleSpinBox(); confidence.setRange(0.5, 0.999); confidence.setDecimals(3); confidence.setSingleStep(0.01); confidence.setValue(0.95)
-        distributions = QCheckBox("Save individual bootstrap distributions")
-        grid = QGridLayout(); grid.setHorizontalSpacing(18); grid.setVerticalSpacing(14)
-        grid.addWidget(field("Predictions", input_file), 0, 0, 1, 2)
-        grid.addWidget(field("Task mappings", tasks, "Separate multiple task specifications with semicolons."), 1, 0, 1, 2)
-        grid.addWidget(field("Bootstrap samples", iterations), 2, 0)
-        grid.addWidget(field("Confidence level", confidence), 2, 1)
-        grid.addWidget(field("Output directory", output), 3, 0, 1, 2)
-        grid.addWidget(distributions, 4, 0, 1, 2)
-        card.body.addLayout(grid)
-        run = action_button("Evaluate uncertainty")
-        card.body.addWidget(run, alignment=Qt.AlignmentFlag.AlignRight)
-        super().__init__(PageHeader("Evaluation", "Quantify uncertainty", "Bootstrap model metrics and generate publication-ready summaries."), card, parent)
-
-        def start() -> None:
-            specs = [value.strip() for value in tasks.text().split(";") if value.strip()]
-            if not input_file.text() or not output.text() or not specs:
-                raise_or_warn(self, "Predictions, at least one task mapping, and output directory are required.")
-                return
-            args = ["uncertainty", "bootstrap", "--input", input_file.text()]
-            for spec in specs: args.extend(["--task", spec])
-            args.extend(["--n-bootstrap", str(iterations.value()), "--confidence-level", str(confidence.value()), "--output-dir", output.text()])
-            if distributions.isChecked(): args.append("--plot-distributions")
-            self.launch(runner, args)
-
-        run.clicked.connect(start)
-
-
 class DashboardPage(QWidget):
     navigate = Signal(int)
 
@@ -301,7 +229,7 @@ class DashboardPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(34, 28, 34, 34)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("ChemFlow desktop", "Molecular intelligence, one workspace", "Train, predict, search, generate, and evaluate from a focused native interface."))
+        layout.addWidget(PageHeader("ChemFlow desktop", "Molecular intelligence, one workspace", "Predict physicochemical and ADME properties, search chemical space, and generate molecules."))
         hero = Card()
         hero.setObjectName("AccentCard")
         hero_layout = QHBoxLayout()
@@ -312,7 +240,7 @@ class DashboardPage(QWidget):
         title.setStyleSheet("font-size: 24px; font-weight: 700;")
         text = QLabel("Configure experiments visually while ChemFlow runs the same reproducible CLI workflows underneath.")
         text.setObjectName("Muted"); text.setWordWrap(True)
-        start = action_button("Start a training run")
+        start = action_button("Predict properties")
         start.clicked.connect(lambda: self.navigate.emit(1))
         copy.addWidget(tag); copy.addWidget(title); copy.addWidget(text); copy.addSpacing(8); copy.addWidget(start, alignment=Qt.AlignmentFlag.AlignLeft); copy.addStretch()
         hero_layout.addLayout(copy, 3)
@@ -321,11 +249,10 @@ class DashboardPage(QWidget):
         layout.addWidget(hero, 1)
         shortcuts = QHBoxLayout(); shortcuts.setSpacing(14)
         for index, title_text, detail in [
-            (2, "Predict", "Score molecular properties"),
-            (3, "ADME", "Predict HLM, RLM, and MLM clearance"),
-            (4, "Search", "Explore chemical similarity"),
-            (5, "Generate", "Sample novel SMILES"),
-            (6, "Evaluate", "Bootstrap uncertainty"),
+            (1, "Property prediction", "Physicochemical and ADME endpoints"),
+            (2, "Predict", "Run a saved model"),
+            (3, "Search", "Explore chemical similarity"),
+            (4, "Generate", "Sample novel SMILES"),
         ]:
             item = Card(title_text, detail)
             button = QPushButton("Open workflow  →")

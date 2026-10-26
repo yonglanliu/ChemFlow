@@ -22,6 +22,10 @@ from chemflow.cli.uncertainty import (
     add_uncertainty_parser,
 )
 
+from chemflow.cli.free_energy import (
+    add_free_energy_parser,
+)
+
 
 # ============================================================
 # Build CLI parser
@@ -92,6 +96,15 @@ def build_parser():
     )
 
 
+    # --------------------------------------------------------
+    # Physics-based free-energy workflows
+    # --------------------------------------------------------
+
+    add_free_energy_parser(
+        subparsers
+    )
+
+
     return parser
 
 
@@ -114,7 +127,7 @@ def main():
 
         return
 
-    args.func(
+    return args.func(
         args
     )
 
@@ -124,5 +137,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
-    main()
+    raise SystemExit(main())

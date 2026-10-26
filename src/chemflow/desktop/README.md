@@ -1,11 +1,52 @@
 # ChemFlow Studio and ADMET Desktop
 
 ChemFlow Studio is an optional native desktop interface for the existing
-ChemFlow command-line workflows. It provides visual forms for training,
-prediction, similarity search, GPT generation, and uncertainty evaluation,
-plus a live process console and an interactive native molecular scene.
+ChemFlow command-line workflows. It provides visual forms for prediction,
+similarity search, and GPT generation, plus deployed physicochemical and ADME
+models, a live process console, and an interactive native molecular scene.
 
-The **ADME clearance** workspace deploys two CheMeleon checkpoints as one
+The **Property prediction** workspace puts **Physicochemical** first and
+**Clearance** second. Molecular input is carried between the two tabs so
+the same compounds can be evaluated across both model families. The
+physicochemical tab includes the packaged `logd_best.pt` and
+`solubility_best.pt` Chemprop models. It provides LogD plus kinetic and
+thermodynamic-solubility endpoints and exports predictions to CSV. No
+checkpoint selection is required.
+
+The workspace can run MC-dropout inference (30 passes by default) and reports
+the MC mean, standard deviation, and 95% interval. Solubility values are shown
+in µM while LogS remains on its native log10(mol/L) scale. Endpoint-specific
+Morgan similarity identifies the nearest training compound, and validation
+similarity distributions calibrate an empirical OOD score and flag at the
+95% threshold.
+
+After prediction, **Open selection agent…** launches a separate agentic window.
+The assistant uses constrained tools to inspect numeric ranges, filter and rank
+rows, and explicitly select compounds; selected rows are highlighted and can be
+exported as a separate CSV with the selection rationale. **Continue with
+ChatGPT** opens browser authorization and lets eligible users run the agent with
+their ChatGPT plan. OAuth credentials are kept in the operating-system keychain,
+can be disconnected from the window, and are never placed in exports or logs.
+Managed Work or Enterprise workspaces may disallow third-party ChatGPT-plan
+usage through workspace policy. In that case, use an eligible personal Plus/Pro
+workspace or the API-key option; ChemFlow cannot override workspace policy.
+
+As an alternative, paste an API key into the password-masked field; it remains
+in memory only until that window closes. The environment variable also remains
+supported:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+# Optional; defaults to gpt-5.5
+export CHEMFLOW_AGENT_MODEL="gpt-5.5"
+chemflow-desktop
+```
+
+Queried prediction rows, including structures and requested metrics, are sent
+to OpenAI when the agent is used. The agent is decision support only: model
+predictions and AI selections require experimental review and confirmation.
+
+The **Clearance** tab deploys two CheMeleon checkpoints as one
 inference product:
 
 - a multitask regression checkpoint for HLM and RLM intrinsic clearance;
@@ -69,47 +110,6 @@ The activity console executes workflows using the currently active Python
 interpreter, so launch the desktop from the environment containing ChemFlow and
 all model dependencies.
 
-## Training center
-
-The **Train** workspace supports conventional ML, Chemprop, Graphormer,
-CheMeleon, ChemBERTa, KERMT, GPT, and LSTM experiments. A configuration can be launched in the
-desktop's local Python environment or submitted to a Slurm cluster through
-SSH. The HPC form records the login host, remote ChemFlow checkout, remote
-configuration, Conda environment, partition, GPU/CPU/memory request, and wall
-time. It never stores a password or private key; SSH uses the user's existing
-agent and SSH configuration.
-
-The job monitor keeps the most recent 100 jobs, displays local PIDs or Slurm
-job IDs, streams local output, polls remote `squeue`/`sacct` state every 15
-seconds, and can terminate a local process or call `scancel` for a selected
-Slurm job. Remote configurations and datasets must already be present on the
-HPC filesystem. The desktop submits the equivalent of:
-
-```bash
-chemflow train MODEL /remote/path/to/config
-```
-
-The SSH host should normally be a login node, not a transient compute node.
-Public-key authentication is recommended so monitoring does not repeatedly
-prompt for a password.
-
-Each model offers two configuration modes:
-
-- **Existing configuration** runs an advanced TOML, JSON, or YAML file without
-  changing it.
-- **Build configuration** displays the model's canonical configuration as
-  typed controls grouped by section. Choice fields constrain valid values,
-  numeric fields enforce ranges, and every parameter has a `?` explanation.
-
-The parameter schemas and defaults live in
-`chemflow.desktop.training_parameters`, so desktop forms and generated files
-are versioned with the source code. Generated Chemprop, Graphormer, CheMeleon,
-ChemBERTa, KERMT, GPT, and LSTM configurations use TOML; conventional ML uses JSON.
-For local execution, the generated file is passed directly to ChemFlow. For
-Slurm execution, it is saved locally, uploaded over SCP to the configured
-remote path, and then submitted. The existing-file mode assumes the specified
-remote configuration already exists on the cluster.
-
 ## Standalone ADMET Desktop
 
 Launch the focused clearance-deployment application with:
@@ -162,10 +162,14 @@ During development, use:
 python -m chemflow.desktop.admet_app
 ```
 
-This standalone application contains only the deployed ADMET workflow: the
-multitask HLM/RLM checkpoint, single-task MLM checkpoint, molecule input and
-sketching tools, prediction table, unit conversion, and CSV export. The same
-workflow also remains available inside the broader `chemflow-desktop` studio.
+This standalone application contains the deployed property workflows: the
+multitask HLM/RLM checkpoint, single-task MLM checkpoint, packaged LogD and
+solubility models, molecule input tools, prediction tables, unit conversion,
+and CSV export. The same workflows also remain available inside the broader
+`chemflow-desktop` studio.
+
+The standalone sidebar also opens the packaged Physicochemical workspace for
+LogD and kinetic-solubility prediction.
 
 The left property panel groups **HLM CLint**, **MLM CLint**, and **RLM CLint**
 under **Metabolism**. These endpoints support multiple selection, and the
