@@ -17,6 +17,25 @@ mamba activate alchemforge
 python -m pip install -e src --no-deps --no-build-isolation
 ```
 
+For a Linux HPC installation on NVIDIA GPU nodes, use the dedicated CUDA 12.6
+environment instead. Create it from the repository root so the relative pip
+requirements file can be found:
+
+```bash
+conda env create \
+  --prefix /data/liuy48/conda/envs/alchemforge \
+  --file environment-alchemforge-hpc.yaml
+conda activate /data/liuy48/conda/envs/alchemforge
+
+python -m pip install -e src --no-deps --no-build-isolation
+```
+
+The cluster supplies the NVIDIA driver. The HPC environment installs the CUDA
+12.6 toolkit, including the runtime and NVRTC needed by OpenMM. Test CUDA from
+an allocated GPU compute node, not from a login node. GPUs newer than the CUDA
+12.6 architecture set (for example, Blackwell) require a newer CUDA environment
+rather than this P100-compatible file.
+
 GROMACS ABFE also requires the Python 3 `develop` branch of PMX. It is not
 available from Bioconda on macOS ARM, so install it after activating the
 AlchemForge environment:

@@ -1,0 +1,58 @@
+name: alchemforge
+
+# Linux HPC environment for AlchemForge on NVIDIA GPU compute nodes.
+# The NVIDIA kernel driver is supplied by the cluster and is not installed
+# by Conda. CUDA 12.6 is the last recommended line here for Tesla P100/Pascal.
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - pip
+
+  # Alchemical and molecular-simulation stack
+  - openfe=1.12
+  - openff-toolkit
+  - acpype
+  - ambertools
+  - openmm=8.4.0
+  - gromacs
+  - pdbfixer
+
+  # NVIDIA user-space toolkit used by OpenMM/OpenFE and a CUDA-enabled GROMACS
+  # build. The cluster must separately provide a compatible NVIDIA driver.
+  # NVRTC, included in this toolkit, is required because OpenMM compiles CUDA
+  # kernels at runtime.
+  - cuda-version=12.6
+  - cuda-toolkit=12.6
+
+  # PMX is installed separately from the Python 3 develop branch after this
+  # environment is created. See src/alchemforge/README.md.
+
+  # Scientific and analysis stack. Keep the versions compatible with OpenFE
+  # 1.12 and AmberTools.
+  - "numpy>=1.26,<2"
+  - scipy
+  - "pandas>=2.1,<3"
+  - matplotlib
+  - "rdkit>=2024.03,<2026.03"
+  - openbabel
+  - pyyaml
+  - mpi4py
+  - alchemlyb
+  - mdtraj
+  - parmed
+  - pillow
+
+  # Build support
+  - setuptools>=80,<82
+  - wheel
+  - cmake
+  - make
+  - compilers
+
+  # GUI/development packages are shared with the local AlchemForge
+  # environment. GUI use requires X forwarding or another display service;
+  # command-line and SLURM workflows remain usable on headless nodes.
+  - pip:
+      - -r requirements-alchemforge.txt
