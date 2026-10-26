@@ -212,18 +212,33 @@ class GromacsLigandPrepareDialog(QDialog):
         row = rows[0].row()
         if row >= len(self._molecules):
             return
-        from rdkit import Chem
-        from rdkit.Chem import rdDepictor
-        from rdkit.Chem.Draw import rdMolDraw2D
+        name = self.compound_table.item(row, 0).text()
+        self.preview_name.setText(name)
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import rdDepictor
+            from rdkit.Chem.Draw import rdMolDraw2D
 
-        molecule = Chem.Mol(self._molecules[row])
-        rdDepictor.Compute2DCoords(molecule)
-        drawer = rdMolDraw2D.MolDraw2DSVG(420, 330)
-        drawer.drawOptions().clearBackground = False
-        drawer.DrawMolecule(molecule)
-        drawer.FinishDrawing()
-        self.preview_name.setText(self.compound_table.item(row, 0).text())
-        self.structure_preview.load(QByteArray(drawer.GetDrawingText().encode("utf-8")))
+            molecule = Chem.Mol(self._molecules[row])
+            rdDepictor.Compute2DCoords(molecule)
+            drawer = rdMolDraw2D.MolDraw2DSVG(420, 330)
+            drawer.drawOptions().clearBackground = False
+            drawer.DrawMolecule(molecule)
+            drawer.FinishDrawing()
+            self.structure_preview.load(
+                QByteArray(drawer.GetDrawingText().encode("utf-8"))
+            )
+            self.structure_preview.setToolTip("")
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            # A mismatched HPC Cairo/FreeType runtime must not abort the entire
+            # Qt process merely because an optional 2D preview cannot render.
+            fallback = b"""<svg xmlns="http://www.w3.org/2000/svg" width="420" height="330">
+<rect width="100%" height="100%" fill="#f4f6f8"/>
+<text x="210" y="150" text-anchor="middle" fill="#8b1e1e" font-size="16">Structure preview unavailable</text>
+<text x="210" y="178" text-anchor="middle" fill="#4a5568" font-size="12">Check the RDKit Cairo/FreeType installation</text>
+</svg>"""
+            self.structure_preview.load(QByteArray(fallback))
+            self.structure_preview.setToolTip(str(error))
 
     def _assigned_charges(self) -> tuple[int, ...]:
         charges = []
