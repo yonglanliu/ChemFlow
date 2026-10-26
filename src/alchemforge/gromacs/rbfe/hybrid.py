@@ -341,12 +341,21 @@ def _heavy_atom_indices(text: str, residue_names: set[str] | None = None) -> lis
     return indices
 
 
-def _restraint_block(indices: list[int], macro: str, force: float) -> str:
+def _restraint_block(
+    indices: list[int],
+    macro: str,
+    force: float,
+    force_symbol: str,
+) -> str:
     rows = "\n".join(
-        f"{index:6d} 1 {force:g} {force:g} {force:g}" for index in indices
+        f"{index:6d} 1 {force_symbol} {force_symbol} {force_symbol}"
+        for index in indices
     )
     return (
         f"#ifdef {macro}\n"
+        f"#ifndef {force_symbol}\n"
+        f"#define {force_symbol} {force:g}\n"
+        "#endif\n"
         "[ position_restraints ]\n"
         "; atom  type      fx      fy      fz\n"
         f"{rows}\n"
@@ -361,11 +370,14 @@ def _write_ligand_position_restraints(
     if not indices:
         raise ValueError(f"Hybrid ligand topology has no heavy atoms: {merged_itp}")
     output.write_text(
-        "; Hybrid-ligand heavy-atom restraints for EM/NVT/NPT.\n"
+        "; Stage-dependent hybrid-ligand heavy-atom restraints.\n"
+        "#ifndef POSRES_LIG_FC\n"
+        f"#define POSRES_LIG_FC {force:g}\n"
+        "#endif\n"
         "[ position_restraints ]\n"
         "; atom  type      fx      fy      fz\n"
         + "\n".join(
-            f"{index:6d} 1 {force:g} {force:g} {force:g}"
+            f"{index:6d} 1 POSRES_LIG_FC POSRES_LIG_FC POSRES_LIG_FC"
             for index in indices
         )
         + "\n",
@@ -393,7 +405,12 @@ def _add_cofactor_restraints(
             raise ValueError("Base topology has no [ system ] section")
         text = (
             text[: system.start()]
-            + _restraint_block(indices, "POSRES_COFACTOR", force)
+            + _restraint_block(
+                indices,
+                "POSRES_COFACTOR",
+                force,
+                "POSRES_COFACTOR_FC",
+            )
             + "\n"
             + text[system.start() :]
         )
@@ -422,7 +439,10 @@ def _add_cofactor_restraints(
         if included_indices:
             rewritten.extend(
                 _restraint_block(
-                    included_indices, "POSRES_COFACTOR", force
+                    included_indices,
+                    "POSRES_COFACTOR",
+                    force,
+                    "POSRES_COFACTOR_FC",
                 ).rstrip().splitlines()
             )
     return "\n".join(rewritten) + "\n"
@@ -430,7 +450,7 @@ def _add_cofactor_restraints(
 
 def _add_protein_restraints(text: str, force: float) -> str:
     """Add protein heavy-atom restraints for monolithic Amber topologies."""
-    if "POSRES_PROTEIN" in text:
+    if re.search(r"(?m)^\s*#\s*ifdef\s+POSRES\b", text):
         return text
     indices = _heavy_atom_indices(text, _PROTEIN_RESIDUES)
     if not indices:
@@ -442,7 +462,7 @@ def _add_protein_restraints(text: str, force: float) -> str:
         raise ValueError("Base topology has no [ system ] section")
     return (
         text[: system.start()]
-        + _restraint_block(indices, "POSRES_PROTEIN", force)
+        + _restraint_block(indices, "POSRES", force, "POSRES_FC")
         + "\n"
         + text[system.start() :]
     )
@@ -670,7 +690,7 @@ def _inject_complex_topology(
     assert system_section is not None
     includes = (
         f'#include "{hybrid_include_prefix}/merged.itp"\n'
-        "#ifdef POSRES_LIGAND\n"
+        "#ifdef POSRES_LIG\n"
         f'#include "{hybrid_include_prefix}/posre_ligand.itp"\n'
         "#endif\n"
     )
@@ -739,7 +759,7 @@ def _write_solvent_topology(
         f'#include "{hybrid_include_prefix}/solvent_atomtypes.itp"',
         f'#include "{hybrid_include_prefix}/ffmerged.itp"',
         f'#include "{hybrid_include_prefix}/merged.itp"',
-        "#ifdef POSRES_LIGAND",
+        "#ifdef POSRES_LIG",
         f'#include "{hybrid_include_prefix}/posre_ligand.itp"',
         "#endif",
     ]

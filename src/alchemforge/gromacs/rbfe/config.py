@@ -158,6 +158,8 @@ class LigandRBFEConfig:
     em_tolerance: float
     nvt_ns: float
     npt_ns: float
+    transition_ns: float
+    final_equilibration_ns: float
     production_ns: float
     mdrun_options: tuple[str, ...]
     worker_script: Path | None
@@ -419,7 +421,7 @@ class LigandRBFEConfig:
                 simulation.get("em_steps", 50000), "[simulation].em_steps"
             ),
             em_tolerance=_positive_float(
-                simulation.get("em_tolerance", 1000.0),
+                simulation.get("em_tolerance", 200.0),
                 "[simulation].em_tolerance",
             ),
             nvt_ns=_positive_float(
@@ -429,6 +431,14 @@ class LigandRBFEConfig:
             npt_ns=_positive_float(
                 simulation.get("npt_ns", simulation.get("equilibration_ns", 1.0) / 2),
                 "[simulation].npt_ns",
+            ),
+            transition_ns=_positive_float(
+                simulation.get("transition_ns", 0.5),
+                "[simulation].transition_ns",
+            ),
+            final_equilibration_ns=_positive_float(
+                simulation.get("final_equilibration_ns", 0.5),
+                "[simulation].final_equilibration_ns",
             ),
             production_ns=_positive_float(
                 simulation.get("production_ns", 5.0), "[simulation].production_ns"
@@ -492,19 +502,27 @@ class LigandRBFEConfig:
 
     @property
     def equilibration_steps(self) -> int:
-        return _steps(self.equilibration_ns, self.timestep_ps)
+        return self.nvt_steps + self.npt_steps
 
     @property
     def nvt_steps(self) -> int:
-        return _steps(self.nvt_ns, self.timestep_ps)
+        return _steps(self.nvt_ns, 0.001)
 
     @property
     def npt_steps(self) -> int:
-        return _steps(self.npt_ns, self.timestep_ps)
+        return _steps(self.npt_ns, 0.001)
+
+    @property
+    def transition_steps(self) -> int:
+        return _steps(self.transition_ns, 0.002)
+
+    @property
+    def final_equilibration_steps(self) -> int:
+        return _steps(self.final_equilibration_ns, 0.002)
 
     @property
     def production_steps(self) -> int:
-        return _steps(self.production_ns, self.timestep_ps)
+        return _steps(self.production_ns, 0.002)
 
     def validate_inputs(self, *, require_runtime: bool = False) -> None:
         for label, path in (
@@ -601,6 +619,10 @@ class LigandRBFEConfig:
             "NVT_STEPS": self.nvt_steps,
             "NPT_NS": self.npt_ns,
             "NPT_STEPS": self.npt_steps,
+            "TRANSITION_NS": self.transition_ns,
+            "TRANSITION_STEPS": self.transition_steps,
+            "FINAL_EQUIL_NS": self.final_equilibration_ns,
+            "FINAL_EQUIL_STEPS": self.final_equilibration_steps,
             "PROD_NS": self.production_ns,
             "EQUIL_STEPS": self.equilibration_steps,
             "PROD_STEPS": self.production_steps,

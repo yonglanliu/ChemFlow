@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -415,7 +416,7 @@ class LigandRBFEGromacsDialog(QDialog):
         self.em_tolerance = QDoubleSpinBox()
         self.em_tolerance.setRange(0.001, 1_000_000.0)
         self.em_tolerance.setDecimals(3)
-        self.em_tolerance.setValue(1000.0)
+        self.em_tolerance.setValue(200.0)
         self.nvt_duration = QDoubleSpinBox()
         self.nvt_duration.setRange(0.001, 100000.0)
         self.nvt_duration.setDecimals(3)
@@ -424,6 +425,14 @@ class LigandRBFEGromacsDialog(QDialog):
         self.npt_duration.setRange(0.001, 100000.0)
         self.npt_duration.setDecimals(3)
         self.npt_duration.setValue(1.0)
+        self.transition_duration = QDoubleSpinBox()
+        self.transition_duration.setRange(0.001, 100000.0)
+        self.transition_duration.setDecimals(3)
+        self.transition_duration.setValue(0.5)
+        self.final_equilibration_duration = QDoubleSpinBox()
+        self.final_equilibration_duration.setRange(0.001, 100000.0)
+        self.final_equilibration_duration.setDecimals(3)
+        self.final_equilibration_duration.setValue(0.5)
         self.production = QDoubleSpinBox()
         self.production.setRange(0.001, 100000.0)
         self.production.setValue(5.0)
@@ -468,23 +477,6 @@ class LigandRBFEGromacsDialog(QDialog):
             "Edges × 2 thermodynamic legs × replicates × lambda windows"
         )
         self.worker_script = QLineEdit()
-        form.addRow("Replicates:", self.replicates)
-        form.addRow("Lambda schedule:", self.lambda_schedule_mode)
-        form.addRow("Lambda windows:", self.lambda_windows)
-        form.addRow("Generated function:", self.lambda_function)
-        form.addRow("Power exponent:", self.lambda_power)
-        form.addRow("Manual Coulomb lambdas:", self.coul_lambdas)
-        form.addRow("Manual vdW lambdas:", self.vdw_lambdas)
-        form.addRow("Manual bonded lambdas:", self.bonded_lambdas)
-        form.addRow("Manual restraint lambdas:", self.restraint_lambdas)
-        form.addRow("Schedule preview:", self.lambda_preview)
-        form.addRow("Timestep (ps):", self.timestep)
-        form.addRow("EM maximum steps:", self.em_steps)
-        form.addRow("EM tolerance (kJ/mol/nm):", self.em_tolerance)
-        form.addRow("NVT duration (ns):", self.nvt_duration)
-        form.addRow("NPT duration (ns):", self.npt_duration)
-        form.addRow("Production (ns):", self.production)
-
         self.mdp_integrator = QComboBox()
         self.mdp_integrator.addItems(["sd", "md"])
         self.mdp_constraints = QComboBox()
@@ -510,13 +502,117 @@ class LigandRBFEGromacsDialog(QDialog):
         self.mdp_nstdhdl = QSpinBox()
         self.mdp_nstdhdl.setRange(1, 10_000_000)
         self.mdp_nstdhdl.setValue(100)
-        form.addRow("MDP integrator:", self.mdp_integrator)
-        form.addRow("MDP constraints:", self.mdp_constraints)
-        form.addRow("Coulomb cutoff (nm):", self.mdp_coulomb_cutoff)
-        form.addRow("vdW cutoff (nm):", self.mdp_vdw_cutoff)
-        form.addRow("Soft-core alpha:", self.mdp_softcore_alpha)
-        form.addRow("Lambda neighbors:", self.mdp_lambda_neighbors)
-        form.addRow("dH/dλ interval (steps):", self.mdp_nstdhdl)
+        self.simulation_tabs = QTabWidget()
+
+        lambda_page = QWidget()
+        lambda_layout = QFormLayout(lambda_page)
+        lambda_layout.setLabelAlignment(Qt.AlignRight)
+        lambda_layout.addRow("Replicates:", self.replicates)
+        lambda_layout.addRow("Lambda schedule:", self.lambda_schedule_mode)
+        lambda_layout.addRow("Lambda windows:", self.lambda_windows)
+        lambda_layout.addRow("Generated function:", self.lambda_function)
+        lambda_layout.addRow("Power exponent:", self.lambda_power)
+        lambda_layout.addRow("Manual Coulomb lambdas:", self.coul_lambdas)
+        lambda_layout.addRow("Manual vdW lambdas:", self.vdw_lambdas)
+        lambda_layout.addRow("Manual bonded lambdas:", self.bonded_lambdas)
+        lambda_layout.addRow("Manual restraint lambdas:", self.restraint_lambdas)
+        lambda_layout.addRow("Schedule preview:", self.lambda_preview)
+        self.simulation_tabs.addTab(lambda_page, "Lambda Schedule")
+
+        stage_page = QWidget()
+        stage_layout = QVBoxLayout(stage_page)
+        self.stage_protocol_table = QTableWidget(6, 5)
+        self.stage_protocol_table.setHorizontalHeaderLabels(
+            ["Stage", "Integrator", "dt (ps)", "Temperature", "Pressure"]
+        )
+        stage_rows = (
+            ("EM", "steep", "—", "No coupling", "No coupling"),
+            ("Early NVT", "md", "0.001", "Berendsen", "No coupling"),
+            ("Early NPT", "md", "0.001", "Berendsen", "Berendsen"),
+            ("Transition", "sd", "0.002", "SD", "C-rescale"),
+            ("Final equil.", "sd", "0.002", "SD", "C-rescale"),
+            ("Production", "sd", "0.002", "SD", "C-rescale"),
+        )
+        for row, values in enumerate(stage_rows):
+            for column, value in enumerate(values):
+                self.stage_protocol_table.setItem(
+                    row, column, QTableWidgetItem(value)
+                )
+        self.stage_protocol_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.stage_protocol_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.stage_protocol_table.verticalHeader().setVisible(False)
+        self.stage_protocol_table.horizontalHeader().setStretchLastSection(True)
+        self.stage_protocol_table.setMaximumHeight(220)
+        stage_layout.addWidget(self.stage_protocol_table)
+        stage_form = QFormLayout()
+        stage_form.setLabelAlignment(Qt.AlignRight)
+        stage_form.addRow("EM maximum steps:", self.em_steps)
+        stage_form.addRow("EM tolerance (kJ/mol/nm):", self.em_tolerance)
+        stage_form.addRow("NVT duration (ns):", self.nvt_duration)
+        stage_form.addRow("NPT duration (ns):", self.npt_duration)
+        stage_form.addRow("Transition duration (ns):", self.transition_duration)
+        stage_form.addRow(
+            "Final equilibration duration (ns):",
+            self.final_equilibration_duration,
+        )
+        stage_form.addRow("Production duration (ns):", self.production)
+        stage_layout.addLayout(stage_form)
+        stage_layout.addStretch()
+        self.simulation_tabs.addTab(stage_page, "Stage Protocol")
+
+        restraint_page = QWidget()
+        restraint_layout = QVBoxLayout(restraint_page)
+        restraint_note = QLabel(
+            "Heavy-atom positional restraints are reduced between stages and "
+            "fully released for production."
+        )
+        restraint_note.setWordWrap(True)
+        restraint_layout.addWidget(restraint_note)
+        self.restraint_protocol_table = QTableWidget(6, 4)
+        self.restraint_protocol_table.setHorizontalHeaderLabels(
+            ["Stage", "Protein", "Ligand", "Cofactor"]
+        )
+        restraint_rows = (
+            ("EM", "1000", "1000", "1000"),
+            ("Early NVT", "1000", "1000", "1000"),
+            ("Early NPT", "500", "500", "500"),
+            ("Transition", "Released", "100", "100"),
+            ("Final equil.", "Released", "20", "Released"),
+            ("Production", "Released", "Released", "Released"),
+        )
+        for row, values in enumerate(restraint_rows):
+            for column, value in enumerate(values):
+                self.restraint_protocol_table.setItem(
+                    row, column, QTableWidgetItem(value)
+                )
+        self.restraint_protocol_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.restraint_protocol_table.setSelectionMode(
+            QAbstractItemView.NoSelection
+        )
+        self.restraint_protocol_table.verticalHeader().setVisible(False)
+        self.restraint_protocol_table.horizontalHeader().setStretchLastSection(True)
+        self.restraint_protocol_table.setMaximumHeight(220)
+        restraint_layout.addWidget(self.restraint_protocol_table)
+        restraint_units = QLabel("Force constants: kJ mol⁻¹ nm⁻²")
+        restraint_units.setStyleSheet("color:#6b7280")
+        restraint_layout.addWidget(restraint_units)
+        restraint_layout.addStretch()
+        self.simulation_tabs.addTab(restraint_page, "Restraints")
+
+        alchemical_page = QWidget()
+        alchemical_layout = QFormLayout(alchemical_page)
+        alchemical_layout.setLabelAlignment(Qt.AlignRight)
+        alchemical_layout.addRow("MDP constraints:", self.mdp_constraints)
+        alchemical_layout.addRow("Coulomb cutoff (nm):", self.mdp_coulomb_cutoff)
+        alchemical_layout.addRow("vdW cutoff (nm):", self.mdp_vdw_cutoff)
+        alchemical_layout.addRow("Soft-core alpha:", self.mdp_softcore_alpha)
+        alchemical_layout.addRow("Lambda neighbors:", self.mdp_lambda_neighbors)
+        alchemical_layout.addRow("dH/dλ interval (steps):", self.mdp_nstdhdl)
+        self.simulation_tabs.addTab(alchemical_page, "Alchemical Controls")
+
+        form.addRow(self.simulation_tabs)
         form.addRow("Slurm partition:", self.partition)
         form.addRow("Nodes per job:", self.nodes)
         form.addRow("Tasks per job:", self.tasks)
@@ -541,7 +637,7 @@ class LigandRBFEGromacsDialog(QDialog):
             form,
             (
                 ("System", 6),
-                ("FEP Simulation", 23),
+                ("FEP Simulation", 1),
                 ("Job Setting", 15),
             ),
         )
@@ -1594,6 +1690,8 @@ class LigandRBFEGromacsDialog(QDialog):
             f"em_tolerance = {self.em_tolerance.value()}\n"
             f"nvt_ns = {self.nvt_duration.value()}\n"
             f"npt_ns = {self.npt_duration.value()}\n"
+            f"transition_ns = {self.transition_duration.value()}\n"
+            f"final_equilibration_ns = {self.final_equilibration_duration.value()}\n"
             f"production_ns = {self.production.value()}\n\n"
             "[restraints]\n"
             "protein_force_kj_mol_nm2 = 1000.0\n"

@@ -67,9 +67,11 @@ lambda_power = 2.0 # used only by the power function
 # restraint_lambdas = [0.0, 0.0, 0.0, 0.0, 0.0]
 timestep_ps = 0.002
 em_steps = 50000
-em_tolerance = 1000.0
+em_tolerance = 200.0
 nvt_ns = 0.5
 npt_ns = 0.5
+transition_ns = 0.5
+final_equilibration_ns = 0.5
 production_ns = 5.0
 
 [restraints]

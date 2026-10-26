@@ -380,17 +380,21 @@ def render_rbfe_stage_mdp(
     *,
     membrane: bool | None = None,
 ) -> str:
-    """Render minimization, NVT, NPT, or production for one lambda state."""
+    """Render one stage of the six-stage RBFE protocol."""
     stage = stage.casefold()
-    if stage not in {"mini", "nvt", "npt", "prod"}:
-        raise ValueError("RBFE stage must be mini, nvt, npt, or prod")
+    if stage not in {"mini", "nvt", "npt", "transition", "final", "prod"}:
+        raise ValueError(
+            "RBFE stage must be mini, nvt, npt, transition, final, or prod"
+        )
     text = render_rbfe_mdp(config, window, membrane=membrane)
+    strong_restraints = (
+        "-DPOSRES -DPOSRES_LIG -DPOSRES_COFACTOR "
+        "-DPOSRES_FC=1000 -DPOSRES_LIG_FC=1000 "
+        "-DPOSRES_COFACTOR_FC=1000"
+    )
     if stage == "mini":
         values: dict[str, object] = {
-            "define": (
-                "-DPOSRES -DPOSRES_PROTEIN -DPOSRES_LIGAND "
-                "-DPOSRES_COFACTOR"
-            ),
+            "define": strong_restraints,
             "integrator": "steep",
             "nsteps": config.em_steps,
             "emtol": config.em_tolerance,
@@ -403,37 +407,67 @@ def render_rbfe_stage_mdp(
         }
     elif stage == "nvt":
         values = {
-            "define": (
-                "-DPOSRES -DPOSRES_PROTEIN -DPOSRES_LIGAND "
-                "-DPOSRES_COFACTOR"
-            ),
+            "define": strong_restraints,
             "integrator": "md",
+            "dt": 0.001,
             "nsteps": config.nvt_steps,
             "continuation": "no",
             "gen-vel": "yes",
             "gen-temp": config.temperature_k,
             "gen-seed": -1,
-            "tcoupl": "V-rescale",
+            "tcoupl": "Berendsen",
             "pcoupl": "no",
         }
     elif stage == "npt":
         values = {
             "define": (
-                "-DPOSRES -DPOSRES_PROTEIN -DPOSRES_LIGAND "
-                "-DPOSRES_COFACTOR"
+                "-DPOSRES -DPOSRES_LIG -DPOSRES_COFACTOR "
+                "-DPOSRES_FC=500 -DPOSRES_LIG_FC=500 "
+                "-DPOSRES_COFACTOR_FC=500"
             ),
             "integrator": "md",
+            "dt": 0.001,
             "nsteps": config.npt_steps,
             "continuation": "yes",
             "gen-vel": "no",
-            "tcoupl": "V-rescale",
+            "tcoupl": "Berendsen",
+            "pcoupl": "Berendsen",
+        }
+    elif stage == "transition":
+        values = {
+            "define": (
+                "-DPOSRES_LIG -DPOSRES_COFACTOR "
+                "-DPOSRES_LIG_FC=100 -DPOSRES_COFACTOR_FC=100"
+            ),
+            "integrator": "sd",
+            "dt": 0.002,
+            "nsteps": config.transition_steps,
+            "continuation": "yes",
+            "gen-vel": "no",
+            "tcoupl": "no",
+            "pcoupl": "C-rescale",
+        }
+    elif stage == "final":
+        values = {
+            "define": "-DPOSRES_LIG -DPOSRES_LIG_FC=20",
+            "integrator": "sd",
+            "dt": 0.002,
+            "nsteps": config.final_equilibration_steps,
+            "continuation": "yes",
+            "gen-vel": "no",
+            "tcoupl": "no",
             "pcoupl": "C-rescale",
         }
     else:
         values = {
             "define": "",
+            "integrator": "sd",
+            "dt": 0.002,
+            "nsteps": config.production_steps,
             "continuation": "yes",
             "gen-vel": "no",
+            "tcoupl": "no",
+            "pcoupl": "C-rescale",
         }
     for key, value in values.items():
         text = _set_value(text, key, value)

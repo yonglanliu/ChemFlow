@@ -28,7 +28,7 @@ def _directive(value: str, label: str) -> str:
 def render_slurm_array_script(
     config: LigandRBFEConfig, *, expected_tasks: int
 ) -> str:
-    """Render one-GPU-per-window EM -> NVT -> NPT -> production execution."""
+    """Render the sequential six-stage protocol for each FEP window."""
     partition = (
         f"#SBATCH --partition={_directive(config.slurm_partition, 'Partition')}\n"
         if config.slurm_partition.strip()
@@ -79,7 +79,9 @@ def render_slurm_array_script(
         + 'BASE_GRO="$LEG_DIR/setup/system.gro"\n'
         + 'TOPOLOGY="$LEG_DIR/setup/topol.top"\n'
         + 'for required in "$BASE_GRO" "$TOPOLOGY" "$TASK_DIR/em.mdp" '
-        + '"$TASK_DIR/nvt.mdp" "$TASK_DIR/npt.mdp" "$TASK_DIR/prod.mdp"; do\n'
+        + '"$TASK_DIR/nvt.mdp" "$TASK_DIR/npt.mdp" '
+        + '"$TASK_DIR/transition.mdp" "$TASK_DIR/equil.mdp" '
+        + '"$TASK_DIR/prod.mdp"; do\n'
         + '    [[ -s "$required" ]] || { echo "ERROR: Missing $required" >&2; exit 1; }\n'
         + "done\n\n"
         + 'cd "$TASK_DIR"\n\n'
@@ -119,14 +121,16 @@ def render_slurm_array_script(
         + 'run_stage em "$BASE_GRO"\n'
         + 'run_stage nvt em.gro\n'
         + 'run_stage npt nvt.gro nvt.cpt\n'
-        + 'run_stage prod npt.gro npt.cpt\n'
+        + 'run_stage transition npt.gro npt.cpt\n'
+        + 'run_stage equil transition.gro transition.cpt\n'
+        + 'run_stage prod equil.gro equil.cpt\n'
     )
 
 
 def stage_fep_task_directories(
     config: LigandRBFEConfig, network: NetworkPlan
 ) -> list[Path]:
-    """Create one sequential EM/NVT/NPT/production task per FEP window."""
+    """Create one sequential six-stage task per FEP window."""
     with network.edges_csv.open(newline="", encoding="utf-8") as handle:
         edge_ids = [row["edge_id"].strip() for row in csv.DictReader(handle)]
     tasks: list[Path] = []
@@ -152,6 +156,8 @@ def stage_fep_task_directories(
                         ("em.mdp", "mini"),
                         ("nvt.mdp", "nvt"),
                         ("npt.mdp", "npt"),
+                        ("transition.mdp", "transition"),
+                        ("equil.mdp", "final"),
                         ("prod.mdp", "prod"),
                     ):
                         (task / filename).write_text(
@@ -219,7 +225,7 @@ def write_slurm_array_files(
         "fi\n"
         'cd "$PROJECT_DIR"\n'
         'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
-        'echo "Submitting $N_TASKS EM/NVT/NPT/production tasks as array $ARRAY_SPEC"\n'
+        'echo "Submitting $N_TASKS six-stage FEP tasks as array $ARRAY_SPEC"\n'
         'sbatch --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE"\n',
         encoding="utf-8",
     )
@@ -251,24 +257,36 @@ def stage(
     ):
         leg_dir = mdp_dir / leg
         leg_dir.mkdir(parents=True, exist_ok=True)
-        for stage_name in ("mini", "nvt", "npt", "prod"):
-            (leg_dir / f"{stage_name}.mdp").write_text(
+        for filename, stage_name in (
+            ("em.mdp", "mini"),
+            ("nvt.mdp", "nvt"),
+            ("npt.mdp", "npt"),
+            ("transition.mdp", "transition"),
+            ("equil.mdp", "final"),
+            ("prod.mdp", "prod"),
+        ):
+            (leg_dir / filename).write_text(
                 render_rbfe_stage_mdp(
                     config, 0, stage_name, membrane=membrane
                 ),
                 encoding="utf-8",
             )
-        shutil.copy2(leg_dir / "mini.mdp", leg_dir / "em.mdp")
 
     # Keep the established top-level paths as complex-leg templates so older
     # worker scripts continue to function. New workers should select the MDP
     # directory by leg via RBFE_COMPLEX_MDP_DIR/RBFE_SOLVENT_MDP_DIR.
-    for stage_name in ("mini", "nvt", "npt", "prod"):
+    for filename in (
+        "em.mdp",
+        "nvt.mdp",
+        "npt.mdp",
+        "transition.mdp",
+        "equil.mdp",
+        "prod.mdp",
+    ):
         shutil.copy2(
-            mdp_dir / "complex" / f"{stage_name}.mdp",
-            mdp_dir / f"{stage_name}.mdp",
+            mdp_dir / "complex" / filename,
+            mdp_dir / filename,
         )
-    shutil.copy2(mdp_dir / "mini.mdp", mdp_dir / "em.mdp")
 
     sources = [
         config.protein,
