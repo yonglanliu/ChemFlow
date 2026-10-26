@@ -124,6 +124,10 @@ class LigandRBFEConfig:
     ion_concentration: float
     temperature_k: float
     pressure_bar: float
+    protein_restraint_force: float
+    ligand_restraint_force: float
+    cofactor_restraint_force: float
+    cofactor_resnames: tuple[str, ...]
     network_method: str
     atom_mapper: str
     pmx_command: str
@@ -150,8 +154,11 @@ class LigandRBFEConfig:
     restraint_lambdas: tuple[float, ...] | None
     timestep_ps: float
     equilibration_ns: float
+    em_steps: int
+    em_tolerance: float
+    nvt_ns: float
+    npt_ns: float
     production_ns: float
-    max_parallel_jobs: int
     mdrun_options: tuple[str, ...]
     worker_script: Path | None
     slurm_partition: str
@@ -187,6 +194,7 @@ class LigandRBFEConfig:
         topology = _table(data, "topology")
         simulation = _table(data, "simulation")
         mdp = _table(data, "mdp")
+        restraints = _table(data, "restraints")
         execution = _table(data, "execution")
         slurm = _table(data, "slurm")
         base = source.parent
@@ -213,6 +221,15 @@ class LigandRBFEConfig:
         if method == "radial" and not hub:
             raise ValueError("[mapping].radial_hub is required for a radial network")
         worker = execution.get("worker_script")
+        cofactor_resnames_value = restraints.get("cofactor_resnames", [])
+        if not isinstance(cofactor_resnames_value, list) or not all(
+            isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9]{1,5}", item)
+            for item in cofactor_resnames_value
+        ):
+            raise ValueError(
+                "[restraints].cofactor_resnames must be an array of 1-5 "
+                "character residue names"
+            )
         membrane = MembraneSettings.from_system(system)
         protein_value = system.get("protein")
         complex_gro = system.get("prepared_complex_gro")
@@ -313,6 +330,21 @@ class LigandRBFEConfig:
             pressure_bar=_positive_float(
                 system.get("pressure_bar", 1.0), "[system].pressure_bar"
             ),
+            protein_restraint_force=_positive_float(
+                restraints.get("protein_force_kj_mol_nm2", 1000.0),
+                "[restraints].protein_force_kj_mol_nm2",
+            ),
+            ligand_restraint_force=_positive_float(
+                restraints.get("ligand_force_kj_mol_nm2", 1000.0),
+                "[restraints].ligand_force_kj_mol_nm2",
+            ),
+            cofactor_restraint_force=_positive_float(
+                restraints.get("cofactor_force_kj_mol_nm2", 1000.0),
+                "[restraints].cofactor_force_kj_mol_nm2",
+            ),
+            cofactor_resnames=tuple(
+                item.upper() for item in cofactor_resnames_value
+            ),
             network_method=method,
             atom_mapper=atom_mapper,
             pmx_command=pmx_command,
@@ -373,15 +405,33 @@ class LigandRBFEConfig:
             timestep_ps=_positive_float(
                 simulation.get("timestep_ps", 0.002), "[simulation].timestep_ps"
             ),
-            equilibration_ns=_positive_float(
-                simulation.get("equilibration_ns", 1.0), "[simulation].equilibration_ns"
+            equilibration_ns=(
+                _positive_float(
+                    simulation.get("nvt_ns", simulation.get("equilibration_ns", 1.0) / 2),
+                    "[simulation].nvt_ns",
+                )
+                + _positive_float(
+                    simulation.get("npt_ns", simulation.get("equilibration_ns", 1.0) / 2),
+                    "[simulation].npt_ns",
+                )
+            ),
+            em_steps=_positive_int(
+                simulation.get("em_steps", 50000), "[simulation].em_steps"
+            ),
+            em_tolerance=_positive_float(
+                simulation.get("em_tolerance", 1000.0),
+                "[simulation].em_tolerance",
+            ),
+            nvt_ns=_positive_float(
+                simulation.get("nvt_ns", simulation.get("equilibration_ns", 1.0) / 2),
+                "[simulation].nvt_ns",
+            ),
+            npt_ns=_positive_float(
+                simulation.get("npt_ns", simulation.get("equilibration_ns", 1.0) / 2),
+                "[simulation].npt_ns",
             ),
             production_ns=_positive_float(
                 simulation.get("production_ns", 5.0), "[simulation].production_ns"
-            ),
-            max_parallel_jobs=_positive_int(
-                execution.get("max_parallel_jobs", 3),
-                "[execution].max_parallel_jobs",
             ),
             mdrun_options=_options(
                 execution.get("mdrun_options", ["-ntmpi", "1"]),
@@ -443,6 +493,14 @@ class LigandRBFEConfig:
     @property
     def equilibration_steps(self) -> int:
         return _steps(self.equilibration_ns, self.timestep_ps)
+
+    @property
+    def nvt_steps(self) -> int:
+        return _steps(self.nvt_ns, self.timestep_ps)
+
+    @property
+    def npt_steps(self) -> int:
+        return _steps(self.npt_ns, self.timestep_ps)
 
     @property
     def production_steps(self) -> int:
@@ -537,10 +595,15 @@ class LigandRBFEConfig:
             "LAMBDA_POWER": self.lambda_power,
             "DT_PS": self.timestep_ps,
             "EQUIL_NS": self.equilibration_ns,
+            "EM_STEPS": self.em_steps,
+            "EM_TOLERANCE": self.em_tolerance,
+            "NVT_NS": self.nvt_ns,
+            "NVT_STEPS": self.nvt_steps,
+            "NPT_NS": self.npt_ns,
+            "NPT_STEPS": self.npt_steps,
             "PROD_NS": self.production_ns,
             "EQUIL_STEPS": self.equilibration_steps,
             "PROD_STEPS": self.production_steps,
-            "MAX_FEP_JOBS": self.max_parallel_jobs,
             "TASKS_PER_EDGE": self.tasks_per_edge,
             "MDRUN_OPTIONS": shlex.join(self.mdrun_options),
             "FEP_PARTITION": self.slurm_partition,

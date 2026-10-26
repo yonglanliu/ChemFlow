@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import shutil
+import csv
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def _directive(value: str, label: str) -> str:
 def render_slurm_array_script(
     config: LigandRBFEConfig, *, expected_tasks: int
 ) -> str:
-    """Render one-GPU-per-TPR SLURM array execution for production windows."""
+    """Render one-GPU-per-window EM -> NVT -> NPT -> production execution."""
     partition = (
         f"#SBATCH --partition={_directive(config.slurm_partition, 'Partition')}\n"
         if config.slurm_partition.strip()
@@ -46,9 +47,10 @@ def render_slurm_array_script(
             "conda activate "
             f"{shlex.quote(config.slurm_conda_environment)}\n"
         )
-    mdrun_options = "\n".join(
-        f"    {shlex.quote(option)}" for option in config.mdrun_options
+    mdrun_options = " ".join(
+        shlex.quote(option) for option in config.mdrun_options
     )
+    gmx_command = " ".join(shlex.quote(part) for part in shlex.split(config.gmx))
     return (
         "#!/bin/bash\n"
         f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}\n"
@@ -61,46 +63,112 @@ def render_slurm_array_script(
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
         + f"#SBATCH --output={_directive(config.slurm_log_output, 'Log output')}\n"
         + f"#SBATCH --error={_directive(config.slurm_log_error, 'Log error')}\n"
-        + f"#SBATCH --array=0-{expected_tasks - 1}%{config.max_parallel_jobs}\n\n"
+        + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
         + 'TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n\n'
         + activation
         + f'export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-{config.slurm_cpus_per_task}}}"\n\n'
         + "# sed uses one-based line numbers; SLURM array indices are zero-based.\n"
-        + 'TPR_FILE="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n\n'
-        + 'if [[ -z "$TPR_FILE" || ! -f "$TPR_FILE" ]]; then\n'
-        + '    echo "ERROR: No accessible TPR for array index $TASK_INDEX" >&2\n'
+        + 'TASK_DIR="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n\n'
+        + 'if [[ -z "$TASK_DIR" || ! -d "$TASK_DIR" ]]; then\n'
+        + '    echo "ERROR: No accessible FEP task directory for array index $TASK_INDEX" >&2\n'
         + "    exit 1\n"
         + "fi\n\n"
-        + 'RUN_DIR="$(dirname "$TPR_FILE")"\n'
-        + 'RUN_NAME="$(basename "$TPR_FILE" .tpr)"\n\n'
-        + 'cd "$RUN_DIR"\n\n'
+        + 'LEG_DIR="$(dirname "$(dirname "$(dirname "$TASK_DIR")")")"\n'
+        + 'BASE_GRO="$LEG_DIR/setup/system.gro"\n'
+        + 'TOPOLOGY="$LEG_DIR/setup/topol.top"\n'
+        + 'for required in "$BASE_GRO" "$TOPOLOGY" "$TASK_DIR/em.mdp" '
+        + '"$TASK_DIR/nvt.mdp" "$TASK_DIR/npt.mdp" "$TASK_DIR/prod.mdp"; do\n'
+        + '    [[ -s "$required" ]] || { echo "ERROR: Missing $required" >&2; exit 1; }\n'
+        + "done\n\n"
+        + 'cd "$TASK_DIR"\n\n'
         + 'echo "Job:             $SLURM_JOB_ID"\n'
         + 'echo "Array task:      $SLURM_ARRAY_TASK_ID"\n'
         + 'echo "Node:            $(hostname)"\n'
-        + 'echo "TPR:             $TPR_FILE"\n'
+        + 'echo "Task directory:  $TASK_DIR"\n'
         + 'echo "Visible GPU(s):  ${CUDA_VISIBLE_DEVICES:-not set}"\n'
         + "nvidia-smi --query-gpu=index,name,uuid --format=csv,noheader\n\n"
-        + "MDRUN_ARGS=(\n"
-        + '    -s "$TPR_FILE"\n'
-        + '    -deffnm "$RUN_NAME"\n'
-        + '    -ntomp "$OMP_NUM_THREADS"\n'
-        + mdrun_options
-        + "\n)\n\n"
-        + "# Continue an interrupted window when a checkpoint exists.\n"
-        + 'if [[ -f "${RUN_NAME}.cpt" ]]; then\n'
-        + "    MDRUN_ARGS+=(\n"
-        + '        -cpi "${RUN_NAME}.cpt"\n'
-        + "        -append\n"
-        + "    )\n"
-        + "fi\n\n"
-        + f"{shlex.quote(config.gmx)} mdrun \"${{MDRUN_ARGS[@]}}\"\n"
+        + f"GMX_COMMAND=( {gmx_command} )\n"
+        + f"MDRUN_COMMON=( -ntomp \"$OMP_NUM_THREADS\" {mdrun_options} )\n\n"
+        + "run_stage() {\n"
+        + '    local stage="$1"\n'
+        + '    local coordinates="$2"\n'
+        + '    local checkpoint="${3:-}"\n'
+        + '    if [[ -s "${stage}.gro" ]]; then\n'
+        + '        echo "Skipping completed ${stage}: ${stage}.gro exists"\n'
+        + "        return\n"
+        + "    fi\n"
+        + '    if [[ ! -s "${stage}.tpr" ]]; then\n'
+        + '        grompp_args=( grompp -f "${stage}.mdp" -c "$coordinates" '
+        + '-r "$BASE_GRO" -p "$TOPOLOGY" -o "${stage}.tpr" )\n'
+        + '        if [[ -n "$checkpoint" && -s "$checkpoint" ]]; then\n'
+        + '            grompp_args+=( -t "$checkpoint" )\n'
+        + "        fi\n"
+        + '        "${GMX_COMMAND[@]}" "${grompp_args[@]}"\n'
+        + "    fi\n"
+        + '    mdrun_args=( mdrun -s "${stage}.tpr" -deffnm "$stage" '
+        + '"${MDRUN_COMMON[@]}" )\n'
+        + '    if [[ -s "${stage}.cpt" ]]; then\n'
+        + '        mdrun_args+=( -cpi "${stage}.cpt" -append )\n'
+        + "    fi\n"
+        + '    "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
+        + '    [[ -s "${stage}.gro" ]] || { '
+        + 'echo "ERROR: ${stage} did not produce ${stage}.gro" >&2; exit 1; }\n'
+        + "}\n\n"
+        + 'run_stage em "$BASE_GRO"\n'
+        + 'run_stage nvt em.gro\n'
+        + 'run_stage npt nvt.gro nvt.cpt\n'
+        + 'run_stage prod npt.gro npt.cpt\n'
     )
 
 
+def stage_fep_task_directories(
+    config: LigandRBFEConfig, network: NetworkPlan
+) -> list[Path]:
+    """Create one sequential EM/NVT/NPT/production task per FEP window."""
+    with network.edges_csv.open(newline="", encoding="utf-8") as handle:
+        edge_ids = [row["edge_id"].strip() for row in csv.DictReader(handle)]
+    tasks: list[Path] = []
+    for edge_id in edge_ids:
+        for leg in ("complex", "solvent"):
+            membrane = leg == "complex" and config.membrane.enabled
+            for replicate in range(
+                config.start_replicate,
+                config.start_replicate + config.replicates,
+            ):
+                for window in range(config.lambda_windows):
+                    task = (
+                        config.project_dir
+                        / "edges"
+                        / edge_id
+                        / leg
+                        / f"rep_{replicate}"
+                        / "fep"
+                        / f"lambda_{window:03d}"
+                    )
+                    task.mkdir(parents=True, exist_ok=True)
+                    for filename, stage_name in (
+                        ("em.mdp", "mini"),
+                        ("nvt.mdp", "nvt"),
+                        ("npt.mdp", "npt"),
+                        ("prod.mdp", "prod"),
+                    ):
+                        (task / filename).write_text(
+                            render_rbfe_stage_mdp(
+                                config,
+                                window,
+                                stage_name,
+                                membrane=membrane,
+                            ),
+                            encoding="utf-8",
+                        )
+                    tasks.append(task)
+    return tasks
+
+
 def write_slurm_array_files(
-    config: LigandRBFEConfig, *, edge_count: int
+    config: LigandRBFEConfig, *, edge_count: int, tasks: list[Path] | None = None
 ) -> tuple[Path, Path, Path]:
     """Write the production task manifest, array runner, and submit helper."""
     project = config.project_dir
@@ -114,14 +182,12 @@ def write_slurm_array_files(
         f"lambda_windows={config.lambda_windows}\n"
         f"tasks_per_edge={config.tasks_per_edge}\n"
         f"total_tasks={expected_tasks}\n"
-        f"maximum_simultaneous_tasks={config.max_parallel_jobs}\n"
-        f"array=0-{expected_tasks - 1}%{config.max_parallel_jobs}\n",
+        f"array=0-{expected_tasks - 1}\n",
         encoding="utf-8",
     )
     task_file = project / "production_tasks.txt"
-    tasks = sorted(project.rglob("prod.tpr"))
     task_file.write_text(
-        "".join(f"{task.resolve()}\n" for task in tasks), encoding="utf-8"
+        "".join(f"{task.resolve()}\n" for task in (tasks or [])), encoding="utf-8"
     )
 
     array_script = project / "gromacs_production_array.sh"
@@ -138,25 +204,22 @@ def write_slurm_array_files(
         f"PROJECT_DIR={shlex.quote(str(project))}\n"
         f"TASK_FILE={shlex.quote(str(task_file))}\n"
         f"ARRAY_SCRIPT={shlex.quote(str(array_script))}\n"
-        f"MAX_PARALLEL={config.max_parallel_jobs}\n\n"
         f"EXPECTED_TASKS={expected_tasks}\n\n"
         'mkdir -p "$PROJECT_DIR/logs"\n'
-        'find "$PROJECT_DIR" -type f -name prod.tpr -print '
-        '| LC_ALL=C sort > "$TASK_FILE"\n'
         'N_TASKS="$(awk \'NF {count++} END {print count+0}\' "$TASK_FILE")"\n'
         'if (( N_TASKS == 0 )); then\n'
-        '    echo "ERROR: No prod.tpr files exist under $PROJECT_DIR." >&2\n'
-        '    echo "Build the EM/NVT/NPT/production TPR files before submission." >&2\n'
+        '    echo "ERROR: The FEP task manifest is empty: $TASK_FILE" >&2\n'
+        '    echo "Run Create Workflow and wait for staging to finish." >&2\n'
         "    exit 1\n"
         "fi\n"
         'if (( N_TASKS != EXPECTED_TASKS )); then\n'
-        '    echo "ERROR: Found $N_TASKS prod.tpr files; expected '
+        '    echo "ERROR: Found $N_TASKS FEP tasks; expected '
         '$EXPECTED_TASKS (= edges x 2 legs x replicates x lambda windows)." >&2\n'
         "    exit 1\n"
         "fi\n"
         'cd "$PROJECT_DIR"\n'
-        'ARRAY_SPEC="0-$((N_TASKS - 1))%${MAX_PARALLEL}"\n'
-        'echo "Submitting $N_TASKS production tasks as array $ARRAY_SPEC"\n'
+        'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
+        'echo "Submitting $N_TASKS EM/NVT/NPT/production tasks as array $ARRAY_SPEC"\n'
         'sbatch --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE"\n',
         encoding="utf-8",
     )
@@ -234,7 +297,6 @@ def stage(
             apply_membrane_pressure("", config.membrane), encoding="utf-8"
         )
     network = existing_network_plan(config) if reuse_network else plan_network(config)
-    write_slurm_array_files(config, edge_count=network.edge_count)
     build_charge_plan(
         edges_csv=network.edges_csv,
         ligand_library=config.ligand_library,
@@ -245,6 +307,10 @@ def stage(
         force_field=config.force_field,
     )
     stage_hybrid_systems(config, network)
+    tasks = stage_fep_task_directories(config, network)
+    write_slurm_array_files(
+        config, edge_count=network.edge_count, tasks=tasks
+    )
     generated.write_text(config.render_shell_config(), encoding="utf-8")
     return generated, network
 

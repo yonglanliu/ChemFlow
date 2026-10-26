@@ -385,15 +385,15 @@ def render_rbfe_stage_mdp(
     if stage not in {"mini", "nvt", "npt", "prod"}:
         raise ValueError("RBFE stage must be mini, nvt, npt, or prod")
     text = render_rbfe_mdp(config, window, membrane=membrane)
-    equilibration_steps = config.equilibration_steps
-    nvt_steps = max(1, equilibration_steps // 2)
-    npt_steps = max(1, equilibration_steps - nvt_steps)
-
     if stage == "mini":
         values: dict[str, object] = {
+            "define": (
+                "-DPOSRES -DPOSRES_PROTEIN -DPOSRES_LIGAND "
+                "-DPOSRES_COFACTOR"
+            ),
             "integrator": "steep",
-            "nsteps": 50000,
-            "emtol": 1000.0,
+            "nsteps": config.em_steps,
+            "emtol": config.em_tolerance,
             "emstep": 0.01,
             "continuation": "no",
             "gen-vel": "no",
@@ -403,8 +403,12 @@ def render_rbfe_stage_mdp(
         }
     elif stage == "nvt":
         values = {
+            "define": (
+                "-DPOSRES -DPOSRES_PROTEIN -DPOSRES_LIGAND "
+                "-DPOSRES_COFACTOR"
+            ),
             "integrator": "md",
-            "nsteps": nvt_steps,
+            "nsteps": config.nvt_steps,
             "continuation": "no",
             "gen-vel": "yes",
             "gen-temp": config.temperature_k,
@@ -414,8 +418,12 @@ def render_rbfe_stage_mdp(
         }
     elif stage == "npt":
         values = {
+            "define": (
+                "-DPOSRES -DPOSRES_PROTEIN -DPOSRES_LIGAND "
+                "-DPOSRES_COFACTOR"
+            ),
             "integrator": "md",
-            "nsteps": npt_steps,
+            "nsteps": config.npt_steps,
             "continuation": "yes",
             "gen-vel": "no",
             "tcoupl": "V-rescale",
@@ -423,6 +431,7 @@ def render_rbfe_stage_mdp(
         }
     else:
         values = {
+            "define": "",
             "continuation": "yes",
             "gen-vel": "no",
         }

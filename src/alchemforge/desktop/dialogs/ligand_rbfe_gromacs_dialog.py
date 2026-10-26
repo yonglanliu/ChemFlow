@@ -161,7 +161,7 @@ class LigandRBFEGromacsDialog(QDialog):
         self.expected_array_tasks.setText(
             f"{edge_count} edges × 2 legs × {self.replicates.value()} replicates "
             f"× {windows} windows = {total} tasks; "
-            f"array 0-{total - 1}%{self.max_jobs.value()}"
+            f"array 0-{total - 1}"
         )
 
     def _build_ui(self) -> None:
@@ -409,15 +409,24 @@ class LigandRBFEGromacsDialog(QDialog):
         self.timestep.setRange(0.0001, 0.01)
         self.timestep.setDecimals(4)
         self.timestep.setValue(0.002)
-        self.equilibration = QDoubleSpinBox()
-        self.equilibration.setRange(0.001, 100000.0)
-        self.equilibration.setValue(1.0)
+        self.em_steps = QSpinBox()
+        self.em_steps.setRange(1, 100_000_000)
+        self.em_steps.setValue(50_000)
+        self.em_tolerance = QDoubleSpinBox()
+        self.em_tolerance.setRange(0.001, 1_000_000.0)
+        self.em_tolerance.setDecimals(3)
+        self.em_tolerance.setValue(1000.0)
+        self.nvt_duration = QDoubleSpinBox()
+        self.nvt_duration.setRange(0.001, 100000.0)
+        self.nvt_duration.setDecimals(3)
+        self.nvt_duration.setValue(0.5)
+        self.npt_duration = QDoubleSpinBox()
+        self.npt_duration.setRange(0.001, 100000.0)
+        self.npt_duration.setDecimals(3)
+        self.npt_duration.setValue(1.0)
         self.production = QDoubleSpinBox()
         self.production.setRange(0.001, 100000.0)
         self.production.setValue(5.0)
-        self.max_jobs = QSpinBox()
-        self.max_jobs.setRange(1, 1_000_000)
-        self.max_jobs.setValue(3)
         self.partition = QLineEdit("gpu")
         self.nodes = QSpinBox()
         self.nodes.setRange(1, 1000)
@@ -470,7 +479,10 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("Manual restraint lambdas:", self.restraint_lambdas)
         form.addRow("Schedule preview:", self.lambda_preview)
         form.addRow("Timestep (ps):", self.timestep)
-        form.addRow("Equilibration (ns):", self.equilibration)
+        form.addRow("EM maximum steps:", self.em_steps)
+        form.addRow("EM tolerance (kJ/mol/nm):", self.em_tolerance)
+        form.addRow("NVT duration (ns):", self.nvt_duration)
+        form.addRow("NPT duration (ns):", self.npt_duration)
         form.addRow("Production (ns):", self.production)
 
         self.mdp_integrator = QComboBox()
@@ -505,7 +517,6 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("Soft-core alpha:", self.mdp_softcore_alpha)
         form.addRow("Lambda neighbors:", self.mdp_lambda_neighbors)
         form.addRow("dH/dλ interval (steps):", self.mdp_nstdhdl)
-        form.addRow("Maximum parallel jobs:", self.max_jobs)
         form.addRow("Slurm partition:", self.partition)
         form.addRow("Nodes per job:", self.nodes)
         form.addRow("Tasks per job:", self.tasks)
@@ -530,8 +541,8 @@ class LigandRBFEGromacsDialog(QDialog):
             form,
             (
                 ("System", 6),
-                ("FEP Simulation", 20),
-                ("Job Setting", 16),
+                ("FEP Simulation", 23),
+                ("Job Setting", 15),
             ),
         )
         self.ligand_preparation = GromacsLigandPrepareDialog(
@@ -572,7 +583,6 @@ class LigandRBFEGromacsDialog(QDialog):
         self.lambda_function.currentTextChanged.connect(self._update_lambda_ui)
         self.lambda_windows.valueChanged.connect(self._update_lambda_ui)
         self.replicates.valueChanged.connect(self._update_expected_array_tasks)
-        self.max_jobs.valueChanged.connect(self._update_expected_array_tasks)
         self.coul_lambdas.textChanged.connect(self._update_expected_array_tasks)
         self.network_bundle.editingFinished.connect(
             self._update_expected_array_tasks
@@ -1483,6 +1493,7 @@ class LigandRBFEGromacsDialog(QDialog):
         charge_manifest = self._write_charge_manifest(project)
         charge_change_method = str(self.charge_change_method.currentData())
         correction_file = self.charge_correction_file.text().strip()
+        cofactor_resname, _cofactor_charge = self._cofactor_identity()
         if charge_change_method == "correction" and not correction_file:
             raise ValueError(
                 "Select a charge correction CSV when using the correction-table method"
@@ -1579,8 +1590,16 @@ class LigandRBFEGromacsDialog(QDialog):
             f"lambda_power = {self.lambda_power.value()}\n"
             + manual_text
             + f"timestep_ps = {self.timestep.value()}\n"
-            f"equilibration_ns = {self.equilibration.value()}\n"
+            f"em_steps = {self.em_steps.value()}\n"
+            f"em_tolerance = {self.em_tolerance.value()}\n"
+            f"nvt_ns = {self.nvt_duration.value()}\n"
+            f"npt_ns = {self.npt_duration.value()}\n"
             f"production_ns = {self.production.value()}\n\n"
+            "[restraints]\n"
+            "protein_force_kj_mol_nm2 = 1000.0\n"
+            "ligand_force_kj_mol_nm2 = 1000.0\n"
+            f"cofactor_resnames = {json.dumps([cofactor_resname] if cofactor_resname else [])}\n"
+            "cofactor_force_kj_mol_nm2 = 1000.0\n\n"
             "[mdp]\n"
             f"integrator = {json.dumps(self.mdp_integrator.currentText())}\n"
             f"constraints = {json.dumps(self.mdp_constraints.currentText())}\n"
@@ -1590,7 +1609,6 @@ class LigandRBFEGromacsDialog(QDialog):
             f"calc_lambda_neighbors = {self.mdp_lambda_neighbors.value()}\n"
             f"nstdhdl = {self.mdp_nstdhdl.value()}\n\n"
             "[execution]\n"
-            f"max_parallel_jobs = {self.max_jobs.value()}\n"
             + (
                 "mdrun_options = "
                 + json.dumps(

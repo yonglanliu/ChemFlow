@@ -19,6 +19,13 @@ import numpy as np
 from .config import LigandRBFEConfig
 from .mapping import NetworkPlan
 
+_PROTEIN_RESIDUES = {
+    "ACE", "ALA", "ARG", "ASH", "ASN", "ASP", "CYS", "CYX", "GLH",
+    "GLN", "GLU", "GLY", "HID", "HIE", "HIP", "HIS", "HSD", "HSE",
+    "HSP", "ILE", "LEU", "LYN", "LYS", "MET", "NME", "PHE", "PRO",
+    "SER", "THR", "TRP", "TYR", "VAL",
+}
+
 
 @dataclass(frozen=True)
 class PreparedLigand:
@@ -159,7 +166,13 @@ def stage_hybrid_systems(
         input_dir = edge_dir / "input"
         hybrid_dir = edge_dir / "hybrid"
         mapping_dir = edge_dir / "mapping"
-        for directory in (input_dir, hybrid_dir, mapping_dir, edge_dir / "complex", edge_dir / "solvent"):
+        for directory in (
+            input_dir,
+            hybrid_dir,
+            mapping_dir,
+            edge_dir / "complex" / "setup",
+            edge_dir / "solvent" / "setup",
+        ):
             directory.mkdir(parents=True, exist_ok=True)
         _copy_ligand(ligand_a, input_dir, "a")
         _copy_ligand(ligand_b, input_dir, "b")
@@ -183,6 +196,10 @@ def stage_hybrid_systems(
             "box_distance": config.box_distance,
             "neutralize": config.neutralize,
             "ion_concentration": config.ion_concentration,
+            "protein_restraint_force": config.protein_restraint_force,
+            "ligand_restraint_force": config.ligand_restraint_force,
+            "cofactor_restraint_force": config.cofactor_restraint_force,
+            "cofactor_resnames": list(config.cofactor_resnames),
             "coion": charge.get("coion", ""),
             "coion_count": int(charge.get("coion_count") or 0),
         }
@@ -295,6 +312,140 @@ def _molecule_type(path: Path) -> str:
         if in_section and line and not line.startswith((";", "#")):
             return line.split()[0]
     raise ValueError(f"No [ moleculetype ] name found in {path}")
+
+
+def _heavy_atom_indices(text: str, residue_names: set[str] | None = None) -> list[int]:
+    """Return heavy-atom indices from a GROMACS [ atoms ] section."""
+    section = ""
+    indices: list[int] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip().casefold()
+            continue
+        if section != "atoms" or not stripped or stripped.startswith((";", "#")):
+            continue
+        fields = stripped.split()
+        if len(fields) < 8 or not fields[0].isdigit():
+            continue
+        if residue_names and fields[3].upper() not in residue_names:
+            continue
+        atom_name = fields[4].upper()
+        try:
+            mass = float(fields[7])
+        except ValueError:
+            mass = 0.0
+        if atom_name.startswith("H") or (mass and mass <= 2.1):
+            continue
+        indices.append(int(fields[0]))
+    return indices
+
+
+def _restraint_block(indices: list[int], macro: str, force: float) -> str:
+    rows = "\n".join(
+        f"{index:6d} 1 {force:g} {force:g} {force:g}" for index in indices
+    )
+    return (
+        f"#ifdef {macro}\n"
+        "[ position_restraints ]\n"
+        "; atom  type      fx      fy      fz\n"
+        f"{rows}\n"
+        "#endif\n"
+    )
+
+
+def _write_ligand_position_restraints(
+    merged_itp: Path, output: Path, force: float
+) -> None:
+    indices = _heavy_atom_indices(merged_itp.read_text(encoding="utf-8"))
+    if not indices:
+        raise ValueError(f"Hybrid ligand topology has no heavy atoms: {merged_itp}")
+    output.write_text(
+        "; Hybrid-ligand heavy-atom restraints for EM/NVT/NPT.\n"
+        "[ position_restraints ]\n"
+        "; atom  type      fx      fy      fz\n"
+        + "\n".join(
+            f"{index:6d} 1 {force:g} {force:g} {force:g}"
+            for index in indices
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _add_cofactor_restraints(
+    text: str,
+    source: Path,
+    residue_names: tuple[str, ...],
+    force: float,
+) -> str:
+    """Attach conditional heavy-atom restraints to monolithic or included cofactors."""
+    names = {name.upper() for name in residue_names}
+    if not names:
+        return text
+
+    # A ParmEd/tleap topology often stores protein and cofactors in one
+    # moleculetype. Insert the cofactor atom restraints before [ system ].
+    indices = _heavy_atom_indices(text, names)
+    if indices:
+        system = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
+        if system is None:
+            raise ValueError("Base topology has no [ system ] section")
+        text = (
+            text[: system.start()]
+            + _restraint_block(indices, "POSRES_COFACTOR", force)
+            + "\n"
+            + text[system.start() :]
+        )
+
+    # A component topology may keep the cofactor in a directly included ITP.
+    # Placing the restraint block immediately after that include associates it
+    # with the included cofactor moleculetype.
+    rewritten: list[str] = []
+    include_pattern = re.compile(r'^\s*#include\s+"([^"]+)"')
+    for line in text.splitlines():
+        rewritten.append(line)
+        match = include_pattern.match(line)
+        if not match:
+            continue
+        included = (source.parent / match.group(1)).resolve()
+        if not included.is_file():
+            continue
+        included_text = included.read_text(encoding="utf-8", errors="replace")
+        try:
+            molecule = _molecule_type(included)
+        except ValueError:
+            continue
+        included_indices = _heavy_atom_indices(
+            included_text, None if molecule.upper() in names else names
+        )
+        if included_indices:
+            rewritten.extend(
+                _restraint_block(
+                    included_indices, "POSRES_COFACTOR", force
+                ).rstrip().splitlines()
+            )
+    return "\n".join(rewritten) + "\n"
+
+
+def _add_protein_restraints(text: str, force: float) -> str:
+    """Add protein heavy-atom restraints for monolithic Amber topologies."""
+    if "POSRES_PROTEIN" in text:
+        return text
+    indices = _heavy_atom_indices(text, _PROTEIN_RESIDUES)
+    if not indices:
+        # Component/pdb2gmx topologies normally provide their own POSRES block;
+        # the stage MDP enables it with -DPOSRES.
+        return text
+    system = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
+    if system is None:
+        raise ValueError("Base topology has no [ system ] section")
+    return (
+        text[: system.start()]
+        + _restraint_block(indices, "POSRES_PROTEIN", force)
+        + "\n"
+        + text[system.start() :]
+    )
 
 
 def _atomtype_definitions(path: Path) -> dict[str, str]:
@@ -495,17 +646,34 @@ def _inject_complex_topology(
     solvate: bool = False,
     force_field: str = "",
     water: str = "",
+    hybrid_include_prefix: str = "../hybrid",
+    protein_restraint_force: float = 1000.0,
+    cofactor_resnames: tuple[str, ...] = (),
+    cofactor_restraint_force: float = 1000.0,
 ) -> None:
     text = source.read_text(encoding="utf-8")
+    text = _add_protein_restraints(text, protein_restraint_force)
+    text = _add_cofactor_restraints(
+        text, source, cofactor_resnames, cofactor_restraint_force
+    )
     text = _alchemize_base_ions(text, coion_atom_indices)
     first_molecule = re.search(r"(?im)^\s*\[\s*moleculetype\s*\]", text)
     system_section = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
     if first_molecule is None or system_section is None:
         raise ValueError(f"Base topology lacks required sections: {source}")
-    text = text[: first_molecule.start()] + '#include "../hybrid/ffmerged.itp"\n\n' + text[first_molecule.start() :]
+    text = (
+        text[: first_molecule.start()]
+        + f'#include "{hybrid_include_prefix}/ffmerged.itp"\n\n'
+        + text[first_molecule.start() :]
+    )
     system_section = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
     assert system_section is not None
-    includes = '#include "../hybrid/merged.itp"\n'
+    includes = (
+        f'#include "{hybrid_include_prefix}/merged.itp"\n'
+        "#ifdef POSRES_LIGAND\n"
+        f'#include "{hybrid_include_prefix}/posre_ligand.itp"\n'
+        "#endif\n"
+    )
     if solvate:
         force_include = _force_field_include(force_field)
         ff_dir = str(Path(force_include).parent)
@@ -562,14 +730,18 @@ def _write_solvent_topology(
     force_field: str,
     water: str,
     molecule: str,
+    hybrid_include_prefix: str = "../hybrid",
 ) -> None:
     force_include = _force_field_include(force_field)
     ff_dir = str(Path(force_include).parent)
     lines = [
         f'#include "{force_include}"',
-        '#include "../hybrid/solvent_atomtypes.itp"',
-        '#include "../hybrid/ffmerged.itp"',
-        '#include "../hybrid/merged.itp"',
+        f'#include "{hybrid_include_prefix}/solvent_atomtypes.itp"',
+        f'#include "{hybrid_include_prefix}/ffmerged.itp"',
+        f'#include "{hybrid_include_prefix}/merged.itp"',
+        "#ifdef POSRES_LIGAND",
+        f'#include "{hybrid_include_prefix}/posre_ligand.itp"',
+        "#endif",
     ]
     lines.extend(
         [
@@ -836,8 +1008,8 @@ def assemble_edge(spec_path: Path) -> None:
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     edge = Path(spec["edge_directory"])
     hybrid = edge / "hybrid"
-    complex_dir = edge / "complex"
-    solvent_dir = edge / "solvent"
+    complex_dir = edge / "complex" / "setup"
+    solvent_dir = edge / "solvent" / "setup"
     for required in (hybrid / "mergedA.pdb", hybrid / "merged.itp", hybrid / "ffmerged.itp"):
         if not required.is_file():
             raise ValueError(f"PMX did not create required hybrid file: {required}")
@@ -853,6 +1025,11 @@ def assemble_edge(spec_path: Path) -> None:
         hybrid / "merged.itp",
         hybrid / "ffmerged.itp",
         hybrid / "solvent_atomtypes.itp",
+    )
+    _write_ligand_position_restraints(
+        hybrid / "merged.itp",
+        hybrid / "posre_ligand.itp",
+        float(spec.get("ligand_restraint_force", 1000.0)),
     )
     molecule = _molecule_type(hybrid / "merged.itp")
     gmx = str(spec["gmx"])
@@ -888,6 +1065,14 @@ def assemble_edge(spec_path: Path) -> None:
         solvate=not membrane,
         force_field=str(spec["force_field"]),
         water=str(spec["water_model"]),
+        hybrid_include_prefix="../../hybrid",
+        protein_restraint_force=float(
+            spec.get("protein_restraint_force", 1000.0)
+        ),
+        cofactor_resnames=tuple(spec.get("cofactor_resnames", [])),
+        cofactor_restraint_force=float(
+            spec.get("cofactor_restraint_force", 1000.0)
+        ),
     )
     complex_mdp = complex_dir / "validate.mdp"
     _write_validation_mdp(complex_mdp)
@@ -937,6 +1122,7 @@ def assemble_edge(spec_path: Path) -> None:
         str(spec["force_field"]),
         str(spec["water_model"]),
         molecule,
+        hybrid_include_prefix="../../hybrid",
     )
     solvent_coordinates, ions_mdp = _solvate_and_ionize(
         gmx=gmx,
@@ -998,8 +1184,14 @@ def assemble_edge(spec_path: Path) -> None:
             "ion_concentration_molar": spec["ion_concentration"],
         },
         "legs": {
-            "complex": {"coordinates": "complex/system.gro", "topology": "complex/topol.top"},
-            "solvent": {"coordinates": "solvent/system.gro", "topology": "solvent/topol.top"},
+            "complex": {
+                "coordinates": "complex/setup/system.gro",
+                "topology": "complex/setup/topol.top",
+            },
+            "solvent": {
+                "coordinates": "solvent/setup/system.gro",
+                "topology": "solvent/setup/topol.top",
+            },
         },
         "coion": {
             "residue": coion,

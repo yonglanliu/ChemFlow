@@ -66,8 +66,20 @@ lambda_power = 2.0 # used only by the power function
 # bonded_lambdas = [0.0, 0.5, 1.0, 1.0, 1.0]
 # restraint_lambdas = [0.0, 0.0, 0.0, 0.0, 0.0]
 timestep_ps = 0.002
-equilibration_ns = 1.0
+em_steps = 50000
+em_tolerance = 1000.0
+nvt_ns = 0.5
+npt_ns = 0.5
 production_ns = 5.0
+
+[restraints]
+# Protein heavy atoms are restrained during EM, NVT, and NPT.
+protein_force_kj_mol_nm2 = 1000.0
+# Heavy atoms of the hybrid ligand are restrained during EM, NVT, and NPT.
+ligand_force_kj_mol_nm2 = 1000.0
+# List cofactor residue names present in the prepared complex topology.
+cofactor_resnames = []
+cofactor_force_kj_mol_nm2 = 1000.0
 
 [mdp]
 integrator = "sd" # sd or md
@@ -79,7 +91,6 @@ calc_lambda_neighbors = -1 # -1 for all states/MBAR; 1 for adjacent/BAR
 nstdhdl = 100
 
 [execution]
-max_parallel_jobs = 3
 mdrun_options = ["-ntmpi", "1"]
 # Required for execution after PMX hybrid topologies have been prepared.
 # worker_script = "/path/to/LigandRBFE_GROMACS.sh"
