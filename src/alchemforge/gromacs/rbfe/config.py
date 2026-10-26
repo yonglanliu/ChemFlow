@@ -74,10 +74,64 @@ def _options(value: Any, label: str) -> tuple[str, ...]:
     raise ValueError(f"{label} must be a string or an array of strings")
 
 
+def _restraint_forces(value: Any, label: str) -> tuple[float, float, float]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError(f"{label} must contain protein, ligand, and cofactor values")
+    result = tuple(_nonnegative_float(item, label) for item in value)
+    return result[0], result[1], result[2]
+
+
+def _name_array(value: Any, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{label} must be an array of names")
+    return tuple(item.strip().upper() for item in value if item.strip())
+
+
+def _positive_integer_array(value: Any, label: str) -> tuple[int, ...]:
+    if not isinstance(value, list):
+        raise TypeError(f"{label} must be an array of positive residue numbers")
+    return tuple(_positive_int(item, label) for item in value)
+
+
 def _choice(value: Any, label: str, choices: set[str]) -> str:
     result = str(value).lower()
     if result not in choices:
         raise ValueError(f"{label} must be one of: {', '.join(sorted(choices))}")
+    return result
+
+
+def _stage_choices(
+    value: Any,
+    default: tuple[str, ...],
+    label: str,
+    choices: dict[str, str],
+) -> tuple[str, ...]:
+    values = list(default) if value is None else value
+    if not isinstance(values, list) or len(values) != 6:
+        raise ValueError(f"{label} must contain six stage values")
+    result: list[str] = []
+    for item in values:
+        canonical = choices.get(str(item).casefold())
+        if canonical is None:
+            raise ValueError(
+                f"{label} contains unsupported value {item!r}; choose from "
+                + ", ".join(choices.values())
+            )
+        result.append(canonical)
+    return tuple(result)
+
+
+def _stage_timesteps(value: Any) -> tuple[float, ...]:
+    values = [0.0, 0.001, 0.001, 0.002, 0.002, 0.002] if value is None else value
+    if not isinstance(values, list) or len(values) != 6:
+        raise ValueError("[stage_protocol].timesteps_ps must contain six values")
+    result = tuple(
+        _nonnegative_float(item, "[stage_protocol].timesteps_ps") for item in values
+    )
+    if result[0] != 0.0 or any(item <= 0 for item in result[1:]):
+        raise ValueError(
+            "The EM timestep must be 0 and all dynamic-stage timesteps must be positive"
+        )
     return result
 
 
@@ -127,7 +181,18 @@ class LigandRBFEConfig:
     protein_restraint_force: float
     ligand_restraint_force: float
     cofactor_restraint_force: float
+    em_restraint_forces: tuple[float, float, float]
+    nvt_restraint_forces: tuple[float, float, float]
+    npt_restraint_forces: tuple[float, float, float]
+    transition_restraint_forces: tuple[float, float, float]
+    final_restraint_forces: tuple[float, float, float]
+    production_restraint_forces: tuple[float, float, float]
+    protein_residue_ids: tuple[int, ...]
+    protein_atom_names: tuple[str, ...]
+    ligand_resnames: tuple[str, ...]
+    ligand_atom_names: tuple[str, ...]
     cofactor_resnames: tuple[str, ...]
+    cofactor_atom_names: tuple[str, ...]
     network_method: str
     atom_mapper: str
     pmx_command: str
@@ -144,6 +209,8 @@ class LigandRBFEConfig:
     charge_correction_file: Path | None
     start_replicate: int
     replicates: int
+    sampling_method: str
+    exchange_interval_steps: int
     lambda_windows: int
     lambda_schedule_mode: str
     lambda_function: str
@@ -153,6 +220,10 @@ class LigandRBFEConfig:
     bonded_lambdas: tuple[float, ...] | None
     restraint_lambdas: tuple[float, ...] | None
     timestep_ps: float
+    stage_integrators: tuple[str, ...]
+    stage_timesteps_ps: tuple[float, ...]
+    stage_temperature_coupling: tuple[str, ...]
+    stage_pressure_coupling: tuple[str, ...]
     equilibration_ns: float
     em_steps: int
     em_tolerance: float
@@ -162,6 +233,7 @@ class LigandRBFEConfig:
     final_equilibration_ns: float
     production_ns: float
     mdrun_options: tuple[str, ...]
+    hrex_gmx_command: str
     worker_script: Path | None
     slurm_partition: str
     slurm_nodes: int
@@ -182,6 +254,21 @@ class LigandRBFEConfig:
     mdp_calc_lambda_neighbors: int
     mdp_nstdhdl: int
 
+    def __post_init__(self) -> None:
+        minimizers = {"steep", "cg", "l-bfgs"}
+        if self.stage_integrators[0] not in minimizers:
+            raise ValueError("The EM stage must use steep, cg, or l-bfgs")
+        if any(value in minimizers for value in self.stage_integrators[1:]):
+            raise ValueError("Dynamic stages cannot use an energy-minimization integrator")
+        for index, integrator in enumerate(self.stage_integrators):
+            if integrator == "sd" and self.stage_temperature_coupling[index] != "no":
+                raise ValueError(
+                    "integrator=sd requires temperature_coupling='no'; stochastic "
+                    "dynamics controls temperature internally"
+                )
+        if self.stage_pressure_coupling[0] != "no":
+            raise ValueError("Energy minimization cannot use pressure coupling")
+
     @classmethod
     def load(cls, path: str | Path) -> LigandRBFEConfig:
         source = Path(path).expanduser().resolve()
@@ -195,6 +282,7 @@ class LigandRBFEConfig:
         mapping = _table(data, "mapping")
         topology = _table(data, "topology")
         simulation = _table(data, "simulation")
+        stage_protocol = _table(data, "stage_protocol")
         mdp = _table(data, "mdp")
         restraints = _table(data, "restraints")
         execution = _table(data, "execution")
@@ -223,15 +311,47 @@ class LigandRBFEConfig:
         if method == "radial" and not hub:
             raise ValueError("[mapping].radial_hub is required for a radial network")
         worker = execution.get("worker_script")
-        cofactor_resnames_value = restraints.get("cofactor_resnames", [])
-        if not isinstance(cofactor_resnames_value, list) or not all(
-            isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9]{1,5}", item)
-            for item in cofactor_resnames_value
-        ):
-            raise ValueError(
-                "[restraints].cofactor_resnames must be an array of 1-5 "
-                "character residue names"
+        stage_restraint_forces = {
+            stage: _restraint_forces(
+                restraints.get(key, default), f"[restraints].{key}"
             )
+            for stage, key, default in (
+                ("em", "em_forces", [1000, 1000, 1000]),
+                ("nvt", "nvt_forces", [1000, 1000, 1000]),
+                ("npt", "npt_forces", [500, 500, 500]),
+                ("transition", "transition_forces", [0, 100, 100]),
+                ("final", "final_forces", [0, 20, 0]),
+                ("production", "production_forces", [0, 0, 0]),
+            )
+        }
+        protein_residue_ids = _positive_integer_array(
+            restraints.get("protein_residue_ids", []),
+            "[restraints].protein_residue_ids",
+        )
+        protein_atom_names = _name_array(
+            restraints.get("protein_atom_names", []),
+            "[restraints].protein_atom_names",
+        )
+        ligand_resnames = _name_array(
+            restraints.get("ligand_resnames", []),
+            "[restraints].ligand_resnames",
+        )
+        ligand_atom_names = _name_array(
+            restraints.get("ligand_atom_names", []),
+            "[restraints].ligand_atom_names",
+        )
+        cofactor_resnames = _name_array(
+            restraints.get("cofactor_resnames", []),
+            "[restraints].cofactor_resnames",
+        )
+        if any(not re.fullmatch(r"[A-Z0-9]{1,5}", name) for name in cofactor_resnames):
+            raise ValueError(
+                "[restraints].cofactor_resnames entries must contain 1-5 letters/numbers"
+            )
+        cofactor_atom_names = _name_array(
+            restraints.get("cofactor_atom_names", []),
+            "[restraints].cofactor_atom_names",
+        )
         membrane = MembraneSettings.from_system(system)
         protein_value = system.get("protein")
         complex_gro = system.get("prepared_complex_gro")
@@ -244,6 +364,22 @@ class LigandRBFEConfig:
         replicates = _positive_int(
             simulation.get("replicates", 1), "[simulation].replicates"
         )
+        sampling_method = _choice(
+            simulation.get("sampling_method", "independent"),
+            "[simulation].sampling_method",
+            {"independent", "hrex"},
+        )
+        exchange_interval_steps = _positive_int(
+            simulation.get("exchange_interval_steps", 500),
+            "[simulation].exchange_interval_steps",
+        )
+        hrex_gmx_command = str(
+            execution.get("hrex_gromacs_command", "gmx_mpi")
+        ).strip()
+        if sampling_method == "hrex" and not hrex_gmx_command:
+            raise ValueError(
+                "[execution].hrex_gromacs_command is required for lambda-HREX"
+            )
         windows = _positive_int(
             simulation.get("lambda_windows", 21), "[simulation].lambda_windows", 2
         )
@@ -333,20 +469,29 @@ class LigandRBFEConfig:
                 system.get("pressure_bar", 1.0), "[system].pressure_bar"
             ),
             protein_restraint_force=_positive_float(
-                restraints.get("protein_force_kj_mol_nm2", 1000.0),
+                max(forces[0] for forces in stage_restraint_forces.values()) or 1000.0,
                 "[restraints].protein_force_kj_mol_nm2",
             ),
             ligand_restraint_force=_positive_float(
-                restraints.get("ligand_force_kj_mol_nm2", 1000.0),
+                max(forces[1] for forces in stage_restraint_forces.values()) or 1000.0,
                 "[restraints].ligand_force_kj_mol_nm2",
             ),
             cofactor_restraint_force=_positive_float(
-                restraints.get("cofactor_force_kj_mol_nm2", 1000.0),
+                max(forces[2] for forces in stage_restraint_forces.values()) or 1000.0,
                 "[restraints].cofactor_force_kj_mol_nm2",
             ),
-            cofactor_resnames=tuple(
-                item.upper() for item in cofactor_resnames_value
-            ),
+            em_restraint_forces=stage_restraint_forces["em"],
+            nvt_restraint_forces=stage_restraint_forces["nvt"],
+            npt_restraint_forces=stage_restraint_forces["npt"],
+            transition_restraint_forces=stage_restraint_forces["transition"],
+            final_restraint_forces=stage_restraint_forces["final"],
+            production_restraint_forces=stage_restraint_forces["production"],
+            protein_residue_ids=protein_residue_ids,
+            protein_atom_names=protein_atom_names,
+            ligand_resnames=ligand_resnames,
+            ligand_atom_names=ligand_atom_names,
+            cofactor_resnames=cofactor_resnames,
+            cofactor_atom_names=cofactor_atom_names,
             network_method=method,
             atom_mapper=atom_mapper,
             pmx_command=pmx_command,
@@ -390,6 +535,8 @@ class LigandRBFEConfig:
                 simulation.get("start_replicate", 1), "[simulation].start_replicate"
             ),
             replicates=replicates,
+            sampling_method=sampling_method,
+            exchange_interval_steps=exchange_interval_steps,
             lambda_windows=windows,
             lambda_schedule_mode=schedule_mode,
             lambda_function=_choice(
@@ -407,6 +554,45 @@ class LigandRBFEConfig:
             timestep_ps=_positive_float(
                 simulation.get("timestep_ps", 0.002), "[simulation].timestep_ps"
             ),
+            stage_integrators=_stage_choices(
+                stage_protocol.get("integrators"),
+                ("steep", "md", "md", "sd", "sd", "sd"),
+                "[stage_protocol].integrators",
+                {
+                    "steep": "steep",
+                    "cg": "cg",
+                    "l-bfgs": "l-bfgs",
+                    "md": "md",
+                    "md-vv": "md-vv",
+                    "md-vv-avek": "md-vv-avek",
+                    "sd": "sd",
+                },
+            ),
+            stage_timesteps_ps=_stage_timesteps(
+                stage_protocol.get("timesteps_ps")
+            ),
+            stage_temperature_coupling=_stage_choices(
+                stage_protocol.get("temperature_coupling"),
+                ("no", "Berendsen", "Berendsen", "no", "no", "no"),
+                "[stage_protocol].temperature_coupling",
+                {
+                    "no": "no",
+                    "berendsen": "Berendsen",
+                    "v-rescale": "V-rescale",
+                    "nose-hoover": "Nose-Hoover",
+                },
+            ),
+            stage_pressure_coupling=_stage_choices(
+                stage_protocol.get("pressure_coupling"),
+                ("no", "no", "Berendsen", "C-rescale", "C-rescale", "C-rescale"),
+                "[stage_protocol].pressure_coupling",
+                {
+                    "no": "no",
+                    "berendsen": "Berendsen",
+                    "c-rescale": "C-rescale",
+                    "parrinello-rahman": "Parrinello-Rahman",
+                },
+            ),
             equilibration_ns=(
                 _positive_float(
                     simulation.get("nvt_ns", simulation.get("equilibration_ns", 1.0) / 2),
@@ -418,7 +604,7 @@ class LigandRBFEConfig:
                 )
             ),
             em_steps=_positive_int(
-                simulation.get("em_steps", 50000), "[simulation].em_steps"
+                simulation.get("em_steps", 5000), "[simulation].em_steps"
             ),
             em_tolerance=_positive_float(
                 simulation.get("em_tolerance", 200.0),
@@ -447,6 +633,7 @@ class LigandRBFEConfig:
                 execution.get("mdrun_options", ["-ntmpi", "1"]),
                 "[execution].mdrun_options",
             ),
+            hrex_gmx_command=hrex_gmx_command,
             worker_script=resolve(worker) if worker else None,
             slurm_partition=str(slurm.get("partition", "gpu")),
             slurm_nodes=_positive_int(slurm.get("nodes", 1), "[slurm].nodes"),
@@ -498,6 +685,8 @@ class LigandRBFEConfig:
 
     @property
     def tasks_per_edge(self) -> int:
+        if self.sampling_method == "hrex":
+            return 2 * self.replicates
         return 2 * self.replicates * self.lambda_windows
 
     @property
@@ -506,23 +695,23 @@ class LigandRBFEConfig:
 
     @property
     def nvt_steps(self) -> int:
-        return _steps(self.nvt_ns, 0.001)
+        return _steps(self.nvt_ns, self.stage_timesteps_ps[1])
 
     @property
     def npt_steps(self) -> int:
-        return _steps(self.npt_ns, 0.001)
+        return _steps(self.npt_ns, self.stage_timesteps_ps[2])
 
     @property
     def transition_steps(self) -> int:
-        return _steps(self.transition_ns, 0.002)
+        return _steps(self.transition_ns, self.stage_timesteps_ps[3])
 
     @property
     def final_equilibration_steps(self) -> int:
-        return _steps(self.final_equilibration_ns, 0.002)
+        return _steps(self.final_equilibration_ns, self.stage_timesteps_ps[4])
 
     @property
     def production_steps(self) -> int:
-        return _steps(self.production_ns, 0.002)
+        return _steps(self.production_ns, self.stage_timesteps_ps[5])
 
     def validate_inputs(self, *, require_runtime: bool = False) -> None:
         for label, path in (
@@ -607,6 +796,8 @@ class LigandRBFEConfig:
             "COION_TOPOLOGY_DIR": str(project_dir / "charge_correction"),
             "START_REP": self.start_replicate,
             "NREP": self.replicates,
+            "SAMPLING_METHOD": self.sampling_method,
+            "EXCHANGE_INTERVAL_STEPS": self.exchange_interval_steps,
             "NLAMBDA": self.lambda_windows,
             "LAMBDA_SCHEDULE_MODE": self.lambda_schedule_mode,
             "LAMBDA_FUNCTION": self.lambda_function,

@@ -34,6 +34,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from alchemforge.desktop.dialogs.asl_restraint_dialog import (
+    ASLRestraintDialog,
+    parse_restraint_asl,
+)
 from alchemforge.desktop.dialogs.form_tabs import form_step_tabs
 from alchemforge.desktop.dialogs.gromacs_ligand_prepare_dialog import (
     GromacsLigandPrepareDialog,
@@ -68,6 +72,8 @@ class LigandRBFEGromacsDialog(QDialog):
         self._planned_edges: Path | None = None
         self._planned_ligands: Path | None = None
         self._network_viewer = None
+        self._stage_restraint_rules = self._default_stage_restraint_rules()
+        self._restraint_editors: dict[str, ASLRestraintDialog] = {}
         self.setWindowTitle("GROMACS · LigandFEP-RBFE Workflow")
         self.resize(900, 780)
         self._build_ui()
@@ -158,12 +164,30 @@ class LigandRBFEGromacsDialog(QDialog):
                 "Select/create a network and define the lambda schedule"
             )
             return
-        total = edge_count * 2 * self.replicates.value() * windows
-        self.expected_array_tasks.setText(
-            f"{edge_count} edges × 2 legs × {self.replicates.value()} replicates "
-            f"× {windows} windows = {total} tasks; "
-            f"array 0-{total - 1}"
-        )
+        if self.sampling_method.currentData() == "hrex":
+            total = edge_count * 2 * self.replicates.value()
+            self.expected_array_tasks.setText(
+                f"{edge_count} edges × 2 legs × {self.replicates.value()} "
+                f"replicates = {total} HREX groups; {windows} lambda replicas/group; "
+                f"array 0-{total - 1}"
+            )
+        else:
+            total = edge_count * 2 * self.replicates.value() * windows
+            self.expected_array_tasks.setText(
+                f"{edge_count} edges × 2 legs × {self.replicates.value()} replicates "
+                f"× {windows} windows = {total} tasks; array 0-{total - 1}"
+            )
+
+    def _update_sampling_method(self, *_args) -> None:
+        hrex = self.sampling_method.currentData() == "hrex"
+        self.exchange_interval.setEnabled(hrex)
+        self.exchange_interval.setVisible(hrex)
+        self.exchange_interval_label.setVisible(hrex)
+        self.ntmpi.setEnabled(not hrex)
+        self.hrex_gmx_command.setEnabled(hrex)
+        self.tasks.setEnabled(not hrex)
+        self.tasks.setValue(self.lambda_windows.value() if hrex else 1)
+        self._update_expected_array_tasks()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -178,6 +202,11 @@ class LigandRBFEGromacsDialog(QDialog):
         note.setStyleSheet("color: #71839a;")
         root.addWidget(title)
         root.addWidget(note)
+        parameter_help_note = QLabel(
+            "ⓘ Hover over any parameter to see what it controls and the units used."
+        )
+        parameter_help_note.setStyleSheet("color:#52708f; font-style:italic")
+        root.addWidget(parameter_help_note)
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         self.job_name = QLineEdit("LigRBFE_GROMACS")
@@ -376,6 +405,22 @@ class LigandRBFEGromacsDialog(QDialog):
         self.replicates = QSpinBox()
         self.replicates.setRange(1, 1000)
         self.replicates.setValue(1)
+        self.sampling_method = QComboBox()
+        self.sampling_method.addItem("Independent lambda windows", "independent")
+        self.sampling_method.addItem("Lambda Hamiltonian replica exchange", "hrex")
+        self.sampling_method.setToolTip(
+            "Independent mode submits every lambda window separately. Lambda-HREX "
+            "coordinates all lambda states with GROMACS -multidir and -replex and "
+            "requires an external-MPI gmx_mpi executable."
+        )
+        self.exchange_interval = QSpinBox()
+        self.exchange_interval.setRange(1, 10_000_000)
+        self.exchange_interval.setValue(500)
+        self.exchange_interval.setSuffix(" steps")
+        self.exchange_interval.setToolTip(
+            "Attempt exchanges between neighboring lambda Hamiltonians at this "
+            "production-step interval."
+        )
         self.lambda_windows = QSpinBox()
         self.lambda_windows.setRange(2, 1000)
         self.lambda_windows.setValue(21)
@@ -410,9 +455,15 @@ class LigandRBFEGromacsDialog(QDialog):
         self.timestep.setRange(0.0001, 0.01)
         self.timestep.setDecimals(4)
         self.timestep.setValue(0.002)
+        self.temperature = QDoubleSpinBox()
+        self.temperature.setRange(1.0, 1000.0)
+        self.temperature.setDecimals(2)
+        self.temperature.setSingleStep(1.0)
+        self.temperature.setValue(300.0)
+        self.temperature.setSuffix(" K")
         self.em_steps = QSpinBox()
         self.em_steps.setRange(1, 100_000_000)
-        self.em_steps.setValue(50_000)
+        self.em_steps.setValue(5_000)
         self.em_tolerance = QDoubleSpinBox()
         self.em_tolerance.setRange(0.001, 1_000_000.0)
         self.em_tolerance.setDecimals(3)
@@ -452,6 +503,11 @@ class LigandRBFEGromacsDialog(QDialog):
         self.ntmpi.setToolTip(
             "GROMACS thread-MPI ranks inside each array task; one is recommended "
             "for one GPU per alchemical window."
+        )
+        self.hrex_gmx_command = QLineEdit("gmx_mpi")
+        self.hrex_gmx_command.setToolTip(
+            "External-MPI GROMACS executable used only for lambda-HREX. System "
+            "preparation continues to use gmx."
         )
         self.gpus = QSpinBox()
         self.gpus.setRange(0, 16)
@@ -507,6 +563,9 @@ class LigandRBFEGromacsDialog(QDialog):
         lambda_page = QWidget()
         lambda_layout = QFormLayout(lambda_page)
         lambda_layout.setLabelAlignment(Qt.AlignRight)
+        lambda_layout.addRow("Sampling method:", self.sampling_method)
+        self.exchange_interval_label = QLabel("HREX exchange interval:")
+        lambda_layout.addRow(self.exchange_interval_label, self.exchange_interval)
         lambda_layout.addRow("Replicates:", self.replicates)
         lambda_layout.addRow("Lambda schedule:", self.lambda_schedule_mode)
         lambda_layout.addRow("Lambda windows:", self.lambda_windows)
@@ -517,8 +576,6 @@ class LigandRBFEGromacsDialog(QDialog):
         lambda_layout.addRow("Manual bonded lambdas:", self.bonded_lambdas)
         lambda_layout.addRow("Manual restraint lambdas:", self.restraint_lambdas)
         lambda_layout.addRow("Schedule preview:", self.lambda_preview)
-        self.simulation_tabs.addTab(lambda_page, "Lambda Schedule")
-
         stage_page = QWidget()
         stage_layout = QVBoxLayout(stage_page)
         self.stage_protocol_table = QTableWidget(6, 5)
@@ -526,26 +583,76 @@ class LigandRBFEGromacsDialog(QDialog):
             ["Stage", "Integrator", "dt (ps)", "Temperature", "Pressure"]
         )
         stage_rows = (
-            ("EM", "steep", "—", "No coupling", "No coupling"),
-            ("Early NVT", "md", "0.001", "Berendsen", "No coupling"),
+            ("EM", "steep", "—", "no", "no"),
+            ("Early NVT", "md", "0.001", "Berendsen", "no"),
             ("Early NPT", "md", "0.001", "Berendsen", "Berendsen"),
-            ("Transition", "sd", "0.002", "SD", "C-rescale"),
-            ("Final equil.", "sd", "0.002", "SD", "C-rescale"),
-            ("Production", "sd", "0.002", "SD", "C-rescale"),
+            ("Transition", "sd", "0.002", "no", "C-rescale"),
+            ("Final equil.", "sd", "0.002", "no", "C-rescale"),
+            ("Production", "sd", "0.002", "no", "C-rescale"),
         )
+        self._stage_protocol_widgets: list[dict[str, QWidget]] = []
         for row, values in enumerate(stage_rows):
-            for column, value in enumerate(values):
-                self.stage_protocol_table.setItem(
-                    row, column, QTableWidgetItem(value)
-                )
-        self.stage_protocol_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            stage_item = QTableWidgetItem(values[0])
+            stage_item.setFlags(stage_item.flags() & ~Qt.ItemIsEditable)
+            self.stage_protocol_table.setItem(row, 0, stage_item)
+            integrator = QComboBox()
+            integrator.addItems(
+                ["steep", "cg", "l-bfgs"]
+                if row == 0
+                else ["md", "md-vv", "md-vv-avek", "sd"]
+            )
+            integrator.setCurrentText(values[1])
+            timestep = QDoubleSpinBox()
+            timestep.setRange(0.0 if row == 0 else 0.000001, 0.1)
+            timestep.setDecimals(6)
+            timestep.setSingleStep(0.0005)
+            timestep.setValue(0.0 if row == 0 else float(values[2]))
+            timestep.setSuffix(" ps")
+            temperature = QComboBox()
+            temperature.addItem("No coupling / SD", "no")
+            if row > 0:
+                for label, data in (
+                    ("Berendsen (legacy)", "Berendsen"),
+                    ("V-rescale", "V-rescale"),
+                    ("Nose-Hoover", "Nose-Hoover"),
+                ):
+                    temperature.addItem(label, data)
+            temperature.setCurrentIndex(temperature.findData(values[3]))
+            pressure = QComboBox()
+            pressure.addItem("No coupling", "no")
+            if row >= 2:
+                for label, data in (
+                    ("Berendsen (legacy)", "Berendsen"),
+                    ("C-rescale (recommended)", "C-rescale"),
+                    ("Parrinello-Rahman", "Parrinello-Rahman"),
+                ):
+                    pressure.addItem(label, data)
+            pressure.setCurrentIndex(pressure.findData(values[4]))
+            for column, widget in enumerate(
+                (integrator, timestep, temperature, pressure), start=1
+            ):
+                self.stage_protocol_table.setCellWidget(row, column, widget)
+            integrator.currentTextChanged.connect(
+                lambda _value, index=row: self._update_stage_protocol_row(index)
+            )
+            self._stage_protocol_widgets.append(
+                {
+                    "integrator": integrator,
+                    "timestep": timestep,
+                    "temperature": temperature,
+                    "pressure": pressure,
+                }
+            )
         self.stage_protocol_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.stage_protocol_table.verticalHeader().setVisible(False)
         self.stage_protocol_table.horizontalHeader().setStretchLastSection(True)
         self.stage_protocol_table.setMaximumHeight(220)
+        for row in range(len(stage_rows)):
+            self._update_stage_protocol_row(row)
         stage_layout.addWidget(self.stage_protocol_table)
         stage_form = QFormLayout()
         stage_form.setLabelAlignment(Qt.AlignRight)
+        stage_form.addRow("Simulation temperature:", self.temperature)
         stage_form.addRow("EM maximum steps:", self.em_steps)
         stage_form.addRow("EM tolerance (kJ/mol/nm):", self.em_tolerance)
         stage_form.addRow("NVT duration (ns):", self.nvt_duration)
@@ -563,43 +670,60 @@ class LigandRBFEGromacsDialog(QDialog):
         restraint_page = QWidget()
         restraint_layout = QVBoxLayout(restraint_page)
         restraint_note = QLabel(
-            "Heavy-atom positional restraints are reduced between stages and "
-            "fully released for production."
+            "Configure restraints separately for each equilibration stage. "
+            "Each editor uses ASL selections against the structure already "
+            "loaded in the System tab using PyMOL-style selections; production "
+            "is always unrestrained."
         )
         restraint_note.setWordWrap(True)
         restraint_layout.addWidget(restraint_note)
-        self.restraint_protocol_table = QTableWidget(6, 4)
+        self.restraint_protocol_table = QTableWidget(5, 4)
         self.restraint_protocol_table.setHorizontalHeaderLabels(
-            ["Stage", "Protein", "Ligand", "Cofactor"]
+            ["Stage", "Rules", "Restraint summary", "Edit"]
         )
-        restraint_rows = (
-            ("EM", "1000", "1000", "1000"),
-            ("Early NVT", "1000", "1000", "1000"),
-            ("Early NPT", "500", "500", "500"),
-            ("Transition", "Released", "100", "100"),
-            ("Final equil.", "Released", "20", "Released"),
-            ("Production", "Released", "Released", "Released"),
+        self._restraint_stage_rows = (
+            ("em", "EM"),
+            ("nvt", "Early NVT"),
+            ("npt", "Early NPT"),
+            ("transition", "Transition"),
+            ("final", "Final equilibration"),
         )
-        for row, values in enumerate(restraint_rows):
-            for column, value in enumerate(values):
-                self.restraint_protocol_table.setItem(
-                    row, column, QTableWidgetItem(value)
+        for row, (stage_key, stage_label) in enumerate(self._restraint_stage_rows):
+            for column, value in enumerate((stage_label, "", "")):
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.restraint_protocol_table.setItem(row, column, item)
+            edit = QPushButton("Configure Selection…")
+            edit.clicked.connect(
+                lambda _checked=False, key=stage_key, label=stage_label: self._open_asl_restraint_editor(
+                    key, label
                 )
-        self.restraint_protocol_table.setEditTriggers(
-            QAbstractItemView.NoEditTriggers
+            )
+            self.restraint_protocol_table.setCellWidget(row, 3, edit)
+        self.restraint_protocol_table.setToolTip(
+            "Open a stage to add protein, ligand, or cofactor positional "
+            "restraints using topology-stable PyMOL-style selections."
         )
-        self.restraint_protocol_table.setSelectionMode(
-            QAbstractItemView.NoSelection
+        self.restraint_protocol_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.restraint_protocol_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.restraint_protocol_table.cellDoubleClicked.connect(
+            self._open_asl_restraint_editor_for_row
         )
         self.restraint_protocol_table.verticalHeader().setVisible(False)
         self.restraint_protocol_table.horizontalHeader().setStretchLastSection(True)
         self.restraint_protocol_table.setMaximumHeight(220)
         restraint_layout.addWidget(self.restraint_protocol_table)
-        restraint_units = QLabel("Force constants: kJ mol⁻¹ nm⁻²")
+        self._refresh_restraint_stage_table()
+        restraint_units = QLabel(
+            "Selections use stable residue and atom identities; force constants are "
+            "kJ mol⁻¹ nm⁻². Production: all positional restraints released."
+        )
         restraint_units.setStyleSheet("color:#6b7280")
+        restraint_units.setWordWrap(True)
         restraint_layout.addWidget(restraint_units)
         restraint_layout.addStretch()
         self.simulation_tabs.addTab(restraint_page, "Restraints")
+        self.simulation_tabs.addTab(lambda_page, "Lambda Schedule")
 
         alchemical_page = QWidget()
         alchemical_layout = QFormLayout(alchemical_page)
@@ -618,6 +742,7 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("Tasks per job:", self.tasks)
         form.addRow("CPUs per task:", self.cpus)
         form.addRow("GROMACS thread-MPI ranks:", self.ntmpi)
+        form.addRow("HREX GROMACS command:", self.hrex_gmx_command)
         form.addRow("GPUs per job:", self.gpus)
         form.addRow("PME target:", self.pme_target)
         form.addRow("Memory per job:", self.memory)
@@ -638,7 +763,7 @@ class LigandRBFEGromacsDialog(QDialog):
             (
                 ("System", 6),
                 ("FEP Simulation", 1),
-                ("Job Setting", 15),
+                ("Job Setting", 16),
             ),
         )
         self.ligand_preparation = GromacsLigandPrepareDialog(
@@ -678,6 +803,10 @@ class LigandRBFEGromacsDialog(QDialog):
         self.lambda_schedule_mode.currentTextChanged.connect(self._update_lambda_ui)
         self.lambda_function.currentTextChanged.connect(self._update_lambda_ui)
         self.lambda_windows.valueChanged.connect(self._update_lambda_ui)
+        self.lambda_windows.valueChanged.connect(self._update_sampling_method)
+        self.sampling_method.currentIndexChanged.connect(
+            self._update_sampling_method
+        )
         self.replicates.valueChanged.connect(self._update_expected_array_tasks)
         self.coul_lambdas.textChanged.connect(self._update_expected_array_tasks)
         self.network_bundle.editingFinished.connect(
@@ -698,9 +827,149 @@ class LigandRBFEGromacsDialog(QDialog):
             self._update_force_field_selection
         )
         self._update_lambda_ui()
+        self._update_sampling_method()
         self._update_expected_array_tasks()
         self._update_force_field_selection()
         self._update_embedded_system_builder()
+        self._install_parameter_help()
+
+    def _install_parameter_help(self) -> None:
+        """Attach concise scientific and execution help to every input field."""
+        help_text = {
+            "job_name": "Project folder and SLURM job name. Use letters, numbers, '.', '_' or '-'.",
+            "protein_path": "Protein or receptor PDB used to prepare the complex leg.",
+            "ligand_library": "Directory containing separately parameterized GROMACS ligand folders and their manifest.",
+            "network_bundle": "Ligand-network folder containing edges.csv, ligands.sdf, mappings, and the network manifest.",
+            "system_type": "Soluble rebuilds and solvates the complex; membrane preserves a prepared membrane/solvent box.",
+            "prepared_complex_gro": "Coordinates for an already parameterized complex, including membrane and solvent when applicable.",
+            "prepared_complex_topology": "GROMACS topology matching the prepared complex GRO exactly.",
+            "force_field_family": "Compatible force-field family used for protein, ligand, lipid, water, ions, and cofactors.",
+            "force_field": "Installed PMX/GROMACS protein force field containing mutation-capable parameters.",
+            "force_field_table": "Force-field components that will be combined for the system. Each row identifies its role, source, and compatibility notes.",
+            "lipid_force_field": "Lipid parameter set; it must be compatible with the selected protein force-field family.",
+            "nucleic_acid_force_field": "DNA/RNA parameter set included only when nucleic acids are present.",
+            "water_model": "Explicit solvent model used to build soluble boxes and interpret compatible ion parameters.",
+            "ion_force_field": "Ion parameter set matched to the selected water model.",
+            "ligand_force_field": "Small-molecule parameter family used by the prepared ligand topologies.",
+            "cofactor_sdf": "Optional cofactor structure used during system parameterization.",
+            "prepared_cofactor_directory": "Optional existing cofactor parameter directory, such as an ACPYPE result.",
+            "prepared_cofactor_itp": "Optional pre-generated cofactor topology include file.",
+            "box_shape": "Periodic box geometry for newly solvated soluble systems.",
+            "box_distance": "Minimum solute-to-box-edge distance in nanometres.",
+            "neutralize_system": "Add counterions until the initial system has zero net charge.",
+            "ion_strength": "Target bulk salt concentration in mol/L after neutralization.",
+            "charge_change_method": "Treatment for ligand transformations whose integer net charge changes.",
+            "charge_correction_file": "CSV containing a validated finite-size correction when correction-table mode is selected.",
+            "override_membrane_box": "Replace missing or incorrect membrane box vectors with explicitly supplied values.",
+            "membrane_box_lengths": "Membrane box lengths a, b, c in nanometres.",
+            "membrane_box_angles": "Box angles alpha, beta, gamma in degrees.",
+            "sampling_method": "Independent runs one job per lambda window; HREX exchanges configurations between lambda Hamiltonians.",
+            "exchange_interval": "Number of MD steps between neighboring Hamiltonian-exchange attempts during HREX production.",
+            "replicates": "Independent repeats per edge and thermodynamic leg, initialized separately.",
+            "lambda_schedule_mode": "Generated constructs a schedule automatically; manual uses the four explicit lambda vectors below.",
+            "lambda_windows": "Number of alchemical states between ligand A and ligand B.",
+            "lambda_function": "Shape of the generated lambda progression: cosine, linear, or power.",
+            "lambda_power": "Exponent used only for a generated power schedule.",
+            "coul_lambdas": "Electrostatic interpolation value for every manual lambda state.",
+            "vdw_lambdas": "Van der Waals interpolation value for every manual lambda state.",
+            "bonded_lambdas": "Bond, angle, and dihedral interpolation value for every manual lambda state.",
+            "restraint_lambdas": "Alchemical scaling vector for topology restraint terms; standard RBFE normally uses zeros.",
+            "lambda_preview": "Resolved Coulomb, vdW, bonded, and restraint vectors written to the MDP files.",
+            "timestep": "Base integration timestep in picoseconds. Individual protocol stages may use a smaller timestep as shown in the stage table.",
+            "temperature": "Target simulation temperature in kelvin, used for velocity generation and every thermostatted stage.",
+            "em_steps": "Maximum steepest-descent energy-minimization steps.",
+            "em_tolerance": "Energy-minimization convergence threshold in kJ mol⁻¹ nm⁻¹.",
+            "nvt_duration": "Constant-volume temperature-equilibration duration in nanoseconds.",
+            "npt_duration": "Initial pressure-equilibration duration in nanoseconds.",
+            "transition_duration": "Stochastic-dynamics transition duration while strong restraints are reduced.",
+            "final_equilibration_duration": "Final equilibration duration with only minimal selected restraints.",
+            "production": "Production sampling time per lambda window in nanoseconds.",
+            "stage_protocol_table": "Exact integrator, timestep, thermostat, and barostat used for each sequential stage.",
+            "restraint_protocol_table": "Five stage-specific restraint sections. Double-click a row or use Configure Selection to edit PyMOL-style rules and force constants in kJ mol⁻¹ nm⁻².",
+            "mdp_integrator": "Base production integrator for generated alchemical MDP settings; the stage protocol table shows the effective integrator for every stage.",
+            "mdp_constraints": "Bond constraints used by LINCS; h-bonds permits a standard 2 fs timestep.",
+            "mdp_coulomb_cutoff": "Real-space electrostatic cutoff in nanometres before PME treatment.",
+            "mdp_vdw_cutoff": "Van der Waals cutoff in nanometres; force-field-specific overrides may apply.",
+            "mdp_softcore_alpha": "Soft-core strength used to avoid endpoint singularities for appearing/disappearing atoms.",
+            "mdp_lambda_neighbors": "Energy states evaluated from each trajectory: -1 for all-state MBAR, 1 for adjacent BAR.",
+            "mdp_nstdhdl": "MD-step interval for writing dH/dλ and expanded energy data.",
+            "partition": "SLURM partition used for production jobs.",
+            "nodes": "Number of compute nodes requested for each scheduler job.",
+            "tasks": "SLURM tasks per independent-window job; HREX derives one MPI task per lambda replica.",
+            "cpus": "CPU cores assigned to each SLURM task.",
+            "ntmpi": "Thread-MPI ranks used by independent-window GROMACS runs.",
+            "hrex_gmx_command": "External-MPI GROMACS executable required for -multidir/-replex HREX, usually gmx_mpi.",
+            "gpus": "GPUs requested for each SLURM array job.",
+            "pme_target": "Run PME on CPU, GPU, or let GROMACS choose automatically.",
+            "memory": "Total memory requested per SLURM job, for example 16G.",
+            "walltime": "Maximum scheduler runtime in HH:MM:SS form.",
+            "conda_init": "Shell initialization script used before activating the calculation environment.",
+            "conda_environment": "Conda environment name or absolute environment path.",
+            "slurm_log_output": "SLURM standard-output filename pattern; %A is job ID and %a is array index.",
+            "slurm_log_error": "SLURM standard-error filename pattern.",
+            "expected_array_tasks": "Calculated scheduler workload from edges, legs, replicates, windows, and sampling method.",
+            "worker_script": "Optional custom execution worker; leave blank to use the generated built-in runner.",
+        }
+        self._parameter_help = help_text
+        for name, explanation in help_text.items():
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            widget.setToolTip(explanation)
+            widget.setWhatsThis(explanation)
+            widget.setStatusTip(explanation)
+            widget.setAccessibleDescription(explanation)
+
+    def _update_stage_protocol_row(self, row: int) -> None:
+        widgets = self._stage_protocol_widgets[row]
+        integrator = widgets["integrator"].currentText()
+        minimization = row == 0
+        stochastic = integrator == "sd"
+        widgets["timestep"].setEnabled(not minimization)
+        widgets["temperature"].setEnabled(not minimization and not stochastic)
+        widgets["pressure"].setEnabled(not minimization and row >= 2)
+        if minimization or stochastic:
+            widgets["temperature"].setCurrentIndex(
+                widgets["temperature"].findData("no")
+            )
+        elif widgets["temperature"].currentData() == "no":
+            widgets["temperature"].setCurrentIndex(
+                widgets["temperature"].findData("V-rescale")
+            )
+        tooltips = {
+            "integrator": "GROMACS integrator for this stage.",
+            "timestep": "Integration timestep in ps; minimization has no MD timestep.",
+            "temperature": (
+                "Temperature coupling. With integrator=sd, GROMACS uses stochastic "
+                "dynamics and ignores tcoupl."
+            ),
+            "pressure": (
+                "Pressure coupling. C-rescale is suitable for equilibration and "
+                "production; Berendsen is retained only as a legacy option."
+            ),
+        }
+        for name, widget in widgets.items():
+            widget.setToolTip(tooltips[name])
+
+    def _stage_protocol_settings(self) -> dict[str, list[object]]:
+        integrators: list[str] = []
+        timesteps: list[float] = []
+        temperatures: list[str] = []
+        pressures: list[str] = []
+        for row, widgets in enumerate(self._stage_protocol_widgets):
+            integrator = widgets["integrator"].currentText()
+            integrators.append(integrator)
+            timesteps.append(
+                0.0 if row == 0 else widgets["timestep"].value()
+            )
+            temperatures.append(str(widgets["temperature"].currentData()))
+            pressures.append(str(widgets["pressure"].currentData()))
+        return {
+            "integrators": integrators,
+            "timesteps_ps": timesteps,
+            "temperature_coupling": temperatures,
+            "pressure_coupling": pressures,
+        }
 
     @staticmethod
     def _pmx_force_field_directory() -> Path | None:
@@ -1531,6 +1800,231 @@ class LigandRBFEGromacsDialog(QDialog):
             raise ValueError(f"{label} contains a non-numeric value") from error
 
     @staticmethod
+    def _parse_restraint_names(text: str) -> list[str]:
+        return [
+            token.upper()
+            for token in re.split(r"[\s,;]+", text.strip())
+            if token
+        ]
+
+    @staticmethod
+    def _parse_residue_numbers(text: str) -> list[int]:
+        values: set[int] = set()
+        for token in (
+            item for item in re.split(r"[\s,;]+", text.strip()) if item
+        ):
+            if "-" in token:
+                start_text, end_text = token.split("-", 1)
+                try:
+                    start, end = int(start_text), int(end_text)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid protein residue range: {token}"
+                    ) from error
+                if start < 1 or end < start:
+                    raise ValueError(f"Invalid protein residue range: {token}")
+                values.update(range(start, end + 1))
+            else:
+                try:
+                    value = int(token)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid protein residue number: {token}"
+                    ) from error
+                if value < 1:
+                    raise ValueError("Protein residue numbers must be positive")
+                values.add(value)
+        return sorted(values)
+
+    @staticmethod
+    def _default_stage_restraint_rules() -> dict[str, list[dict[str, object]]]:
+        def rules(protein: float, ligand: float, cofactor: float):
+            return [
+                {
+                    "name": "Protein heavy atoms",
+                    "asl": "protein and not element H",
+                    "force": protein,
+                },
+                {
+                    "name": "Ligand heavy atoms",
+                    "asl": "ligand and not element H",
+                    "force": ligand,
+                },
+                {
+                    "name": "Cofactor heavy atoms",
+                    "asl": "cofactor and not element H",
+                    "force": cofactor,
+                },
+            ]
+
+        return {
+            "em": rules(1000.0, 1000.0, 1000.0),
+            "nvt": rules(1000.0, 1000.0, 1000.0),
+            "npt": rules(500.0, 500.0, 500.0),
+            "transition": rules(0.0, 100.0, 100.0),
+            "final": rules(0.0, 20.0, 0.0),
+        }
+
+    def _restraint_structure_description(self) -> str:
+        if self.prepared_complex_gro.text().strip():
+            return self.prepared_complex_gro.text().strip()
+        if self.protein_path.text().strip():
+            return self.protein_path.text().strip()
+        return "System-tab structure inputs (select the protein/complex first)"
+
+    def _open_asl_restraint_editor_for_row(self, row: int, _column: int) -> None:
+        if not 0 <= row < len(self._restraint_stage_rows):
+            return
+        self._open_asl_restraint_editor(*self._restraint_stage_rows[row])
+
+    def _open_asl_restraint_editor(self, stage_key: str, stage_label: str) -> None:
+        editor = ASLRestraintDialog(
+            stage_key=stage_key,
+            stage_label=stage_label,
+            rules=self._stage_restraint_rules[stage_key],
+            structure_description=self._restraint_structure_description(),
+            parent=self,
+        )
+        editor.rules_saved.connect(self._save_stage_restraint_rules)
+        self._restraint_editors[stage_key] = editor
+        editor.finished.connect(
+            lambda _result, key=stage_key: self._restraint_editors.pop(key, None)
+        )
+        show_modeless(self, editor)
+
+    def _save_stage_restraint_rules(
+        self, stage_key: str, rules: list[dict[str, object]]
+    ) -> None:
+        self._stage_restraint_rules[stage_key] = rules
+        component_templates: dict[str, list[dict[str, object]]] = {}
+        for rule in rules:
+            component = str(
+                parse_restraint_asl(str(rule["asl"]))["component"]
+            )
+            component_templates.setdefault(component, []).append(rule)
+        for component, templates in component_templates.items():
+            for other_stage, other_rules in self._stage_restraint_rules.items():
+                if other_stage == stage_key:
+                    continue
+                matching = [
+                    other
+                    for other in other_rules
+                    if parse_restraint_asl(str(other["asl"]))["component"]
+                    == component
+                ]
+                preserved_force = (
+                    float(matching[0]["force"]) if matching else 0.0
+                )
+                other_rules[:] = [
+                    other
+                    for other in other_rules
+                    if parse_restraint_asl(str(other["asl"]))["component"]
+                    != component
+                ]
+                other_rules.extend(
+                    {
+                        "name": template["name"],
+                        "asl": template["asl"],
+                        "force": preserved_force,
+                    }
+                    for template in templates
+                )
+        self._refresh_restraint_stage_table()
+
+    def _refresh_restraint_stage_table(self) -> None:
+        for row, (stage_key, _stage_label) in enumerate(self._restraint_stage_rows):
+            rules = self._stage_restraint_rules[stage_key]
+            active = [rule for rule in rules if float(rule["force"]) > 0]
+            self.restraint_protocol_table.item(row, 1).setText(str(len(active)))
+            summary = []
+            for rule in active:
+                component = str(parse_restraint_asl(str(rule["asl"]))["component"])
+                summary.append(f"{component.title()} {float(rule['force']):g}")
+            self.restraint_protocol_table.item(row, 2).setText(
+                "; ".join(summary) if summary else "Released"
+            )
+
+    def _resolved_restraint_configuration(self) -> dict[str, object]:
+        forces: list[list[float]] = []
+        component_selections: dict[str, list[dict[str, object]]] = {
+            "protein": [],
+            "ligand": [],
+            "cofactor": [],
+        }
+        for stage_key, _stage_label in self._restraint_stage_rows:
+            stage_forces = {name: 0.0 for name in component_selections}
+            for rule in self._stage_restraint_rules[stage_key]:
+                parsed = parse_restraint_asl(str(rule["asl"]))
+                component = str(parsed["component"])
+                force = float(rule["force"])
+                if (
+                    force > 0
+                    and stage_forces[component] > 0
+                    and stage_forces[component] != force
+                ):
+                    raise ValueError(
+                        f"All {component} restraint groups in {stage_key} must "
+                        "use the same force constant"
+                    )
+                if force <= 0:
+                    continue
+                stage_forces[component] = force
+                if parsed not in component_selections[component]:
+                    component_selections[component].append(parsed)
+            forces.append(
+                [stage_forces["protein"], stage_forces["ligand"], stage_forces["cofactor"]]
+            )
+        forces.append([0.0, 0.0, 0.0])
+
+        selections: dict[str, dict[str, object]] = {}
+        for component, parsed_rules in component_selections.items():
+            if not parsed_rules:
+                selections[component] = {
+                    "component": component,
+                    "residue_ids": [],
+                    "residue_names": [],
+                    "atom_names": [],
+                }
+                continue
+            if component == "protein" and any(
+                parsed["residue_names"] for parsed in parsed_rules
+            ):
+                raise ValueError("Protein selections support resi and name, not resn")
+            if component in {"ligand", "cofactor"} and any(
+                parsed["residue_ids"] for parsed in parsed_rules
+            ):
+                raise ValueError(
+                    f"{component.title()} selections support resn and name, not resi"
+                )
+            dimensions = (
+                ("residue_ids", "resi"),
+                ("residue_names", "resn"),
+                ("atom_names", "name"),
+            )
+            varying = []
+            merged: dict[str, object] = {"component": component}
+            for key, label in dimensions:
+                values = [tuple(parsed[key]) for parsed in parsed_rules]
+                if any(not value for value in values):
+                    merged[key] = []
+                    continue
+                unique = set(values)
+                if len(unique) > 1:
+                    varying.append(label)
+                merged[key] = sorted({item for value in values for item in value})
+            if len(varying) > 1:
+                raise ValueError(
+                    f"The {component} groups vary in both {' and '.join(varying)}. "
+                    "Split them using a common atom-name or residue selection so "
+                    "they can be represented exactly in the GROMACS topology."
+                )
+            selections[component] = merged
+        return {"forces": forces, "selections": selections}
+
+    def _restraint_force_rows(self) -> list[list[float]]:
+        return self._resolved_restraint_configuration()["forces"]
+
+    @staticmethod
     def _lambda_text(values: list[float]) -> str:
         return " ".join(f"{value:.4f}" for value in values)
 
@@ -1590,6 +2084,18 @@ class LigandRBFEGromacsDialog(QDialog):
         charge_change_method = str(self.charge_change_method.currentData())
         correction_file = self.charge_correction_file.text().strip()
         cofactor_resname, _cofactor_charge = self._cofactor_identity()
+        restraint_configuration = self._resolved_restraint_configuration()
+        restraint_forces = restraint_configuration["forces"]
+        restraint_selections = restraint_configuration["selections"]
+        stage_protocol = self._stage_protocol_settings()
+        protein_residue_ids = restraint_selections["protein"]["residue_ids"]
+        protein_atom_names = restraint_selections["protein"]["atom_names"]
+        ligand_resnames = restraint_selections["ligand"]["residue_names"]
+        ligand_atom_names = restraint_selections["ligand"]["atom_names"]
+        cofactor_resnames = restraint_selections["cofactor"]["residue_names"] or (
+            [cofactor_resname] if cofactor_resname else []
+        )
+        cofactor_atom_names = restraint_selections["cofactor"]["atom_names"]
         if charge_change_method == "correction" and not correction_file:
             raise ValueError(
                 "Select a charge correction CSV when using the correction-table method"
@@ -1634,7 +2140,7 @@ class LigandRBFEGromacsDialog(QDialog):
             f"box_distance = {self.box_distance.value()}\n"
             f"neutralize = {str(self.neutralize_system.isChecked()).lower()}\n"
             f"ion_concentration = {self.ion_strength.value()}\n"
-            "temperature_k = 300.0\npressure_bar = 1.0\n"
+            f"temperature_k = {self.temperature.value()}\npressure_bar = 1.0\n"
             + (
                 f"prepared_complex_gro = {json.dumps(self.prepared_complex_gro.text().strip())}\n"
                 if self.prepared_complex_gro.text().strip()
@@ -1680,6 +2186,8 @@ class LigandRBFEGromacsDialog(QDialog):
             + "\n"
             "[simulation]\nstart_replicate = 1\n"
             f"replicates = {self.replicates.value()}\n"
+            f"sampling_method = {json.dumps(str(self.sampling_method.currentData()))}\n"
+            f"exchange_interval_steps = {self.exchange_interval.value()}\n"
             f"lambda_windows = {windows}\n"
             f"lambda_schedule_mode = {json.dumps(schedule_mode)}\n"
             f"lambda_function = {json.dumps(self.lambda_function.currentText())}\n"
@@ -1693,11 +2201,25 @@ class LigandRBFEGromacsDialog(QDialog):
             f"transition_ns = {self.transition_duration.value()}\n"
             f"final_equilibration_ns = {self.final_equilibration_duration.value()}\n"
             f"production_ns = {self.production.value()}\n\n"
+            "[stage_protocol]\n"
+            f"integrators = {json.dumps(stage_protocol['integrators'])}\n"
+            f"timesteps_ps = {json.dumps(stage_protocol['timesteps_ps'])}\n"
+            f"temperature_coupling = {json.dumps(stage_protocol['temperature_coupling'])}\n"
+            f"pressure_coupling = {json.dumps(stage_protocol['pressure_coupling'])}\n\n"
             "[restraints]\n"
-            "protein_force_kj_mol_nm2 = 1000.0\n"
-            "ligand_force_kj_mol_nm2 = 1000.0\n"
-            f"cofactor_resnames = {json.dumps([cofactor_resname] if cofactor_resname else [])}\n"
-            "cofactor_force_kj_mol_nm2 = 1000.0\n\n"
+            f"em_forces = {json.dumps(restraint_forces[0])}\n"
+            f"nvt_forces = {json.dumps(restraint_forces[1])}\n"
+            f"npt_forces = {json.dumps(restraint_forces[2])}\n"
+            f"transition_forces = {json.dumps(restraint_forces[3])}\n"
+            f"final_forces = {json.dumps(restraint_forces[4])}\n"
+            f"production_forces = {json.dumps(restraint_forces[5])}\n"
+            f"protein_residue_ids = {json.dumps(protein_residue_ids)}\n"
+            f"protein_atom_names = {json.dumps(protein_atom_names)}\n"
+            f"ligand_resnames = {json.dumps(ligand_resnames)}\n"
+            f"ligand_atom_names = {json.dumps(ligand_atom_names)}\n"
+            f"cofactor_resnames = {json.dumps(cofactor_resnames)}\n"
+            f"cofactor_atom_names = {json.dumps(cofactor_atom_names)}\n\n"
+            f"asl_rules_json = {json.dumps(json.dumps(self._stage_restraint_rules, sort_keys=True))}\n\n"
             "[mdp]\n"
             f"integrator = {json.dumps(self.mdp_integrator.currentText())}\n"
             f"constraints = {json.dumps(self.mdp_constraints.currentText())}\n"
@@ -1707,6 +2229,7 @@ class LigandRBFEGromacsDialog(QDialog):
             f"calc_lambda_neighbors = {self.mdp_lambda_neighbors.value()}\n"
             f"nstdhdl = {self.mdp_nstdhdl.value()}\n\n"
             "[execution]\n"
+            f"hrex_gromacs_command = {json.dumps(self.hrex_gmx_command.text().strip())}\n"
             + (
                 "mdrun_options = "
                 + json.dumps(

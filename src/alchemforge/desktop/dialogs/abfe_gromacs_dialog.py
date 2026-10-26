@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -18,6 +19,9 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -143,9 +147,6 @@ class ABFEGromacsDialog(QDialog):
         self.k_distance = self._spin(4184.0, 1000000.0)
         self.k_angle = self._spin(41.84)
         self.k_dihedral = self._spin(41.84)
-        form.addRow("Boresch distance k:", self.k_distance)
-        form.addRow("Boresch angle k:", self.k_angle)
-        form.addRow("Boresch dihedral k:", self.k_dihedral)
 
         self.replicas = QSpinBox()
         self.replicas.setRange(1, 1000)
@@ -158,12 +159,58 @@ class ABFEGromacsDialog(QDialog):
         self.lambda_power = self._spin(2.0, 20.0)
         self.equilibration = self._spin(1.0)
         self.production = self._spin(5.0)
-        form.addRow("Replicates:", self.replicas)
-        form.addRow("Lambda windows:", self.windows)
-        form.addRow("Lambda function:", self.lambda_function)
-        form.addRow("Lambda power:", self.lambda_power)
-        form.addRow("Equilibration (ns):", self.equilibration)
-        form.addRow("Production/window (ns):", self.production)
+        self.decouple_order = QComboBox()
+        self.decouple_order.addItems(["Coulomb then vdW", "vdW then Coulomb"])
+        self.softcore_alpha = self._spin(0.5, 5.0)
+
+        self.simulation_tabs = QTabWidget()
+        stage_page = QWidget()
+        stage_layout = QVBoxLayout(stage_page)
+        self.stage_protocol_table = QTableWidget(4, 5)
+        self.stage_protocol_table.setHorizontalHeaderLabels(
+            ["Stage", "Integrator", "dt (ps)", "Temperature", "Pressure"]
+        )
+        for row, values in enumerate(
+            (
+                ("EM", "steep", "—", "No coupling", "No coupling"),
+                ("NVT", "md", "0.002", "V-rescale", "No coupling"),
+                ("NPT", "md", "0.002", "V-rescale", "C-rescale"),
+                ("Production", "md", "0.002", "V-rescale", "PR / membrane barostat"),
+            )
+        ):
+            for column, value in enumerate(values):
+                self.stage_protocol_table.setItem(row, column, QTableWidgetItem(value))
+        self.stage_protocol_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.stage_protocol_table.verticalHeader().setVisible(False)
+        self.stage_protocol_table.horizontalHeader().setStretchLastSection(True)
+        stage_layout.addWidget(self.stage_protocol_table)
+        stage_form = QFormLayout()
+        stage_form.addRow("Total NVT + NPT equilibration (ns):", self.equilibration)
+        stage_form.addRow("Production/window (ns):", self.production)
+        stage_layout.addLayout(stage_form)
+        self.simulation_tabs.addTab(stage_page, "Stage Protocol")
+
+        restraint_page = QWidget()
+        restraint_layout = QFormLayout(restraint_page)
+        restraint_layout.addRow("Boresch distance k:", self.k_distance)
+        restraint_layout.addRow("Boresch angle k:", self.k_angle)
+        restraint_layout.addRow("Boresch dihedral k:", self.k_dihedral)
+        self.simulation_tabs.addTab(restraint_page, "Restraints")
+
+        lambda_page = QWidget()
+        lambda_layout = QFormLayout(lambda_page)
+        lambda_layout.addRow("Replicates:", self.replicas)
+        lambda_layout.addRow("Lambda windows:", self.windows)
+        lambda_layout.addRow("Lambda function:", self.lambda_function)
+        lambda_layout.addRow("Lambda power:", self.lambda_power)
+        self.simulation_tabs.addTab(lambda_page, "Lambda Schedule")
+
+        alchemical_page = QWidget()
+        alchemical_layout = QFormLayout(alchemical_page)
+        alchemical_layout.addRow("Decoupling order:", self.decouple_order)
+        alchemical_layout.addRow("Soft-core alpha:", self.softcore_alpha)
+        self.simulation_tabs.addTab(alchemical_page, "Alchemical Controls")
+        form.addRow(self.simulation_tabs)
 
         self.execution_mode = QComboBox()
         self.execution_mode.addItems(["local", "slurm"])
@@ -203,8 +250,7 @@ class ABFEGromacsDialog(QDialog):
             form,
             (
                 ("System", 9),
-                ("Restraints", 3),
-                ("FEP Simulation", 6),
+                ("FEP Simulation", 1),
                 ("Job Setting", 8),
             ),
         )
@@ -288,8 +334,8 @@ lambda_power = {self.lambda_power.value()}
 timestep_ps = 0.002
 equilibration_ns = {self.equilibration.value()}
 production_ns = {self.production.value()}
-decouple_coulomb_first = true
-softcore_alpha = 0.5
+decouple_coulomb_first = {str(self.decouple_order.currentIndex() == 0).lower()}
+softcore_alpha = {self.softcore_alpha.value()}
 
 [execution]
 mode = {json.dumps(self.execution_mode.currentText())}

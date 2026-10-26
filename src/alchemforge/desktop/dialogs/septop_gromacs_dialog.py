@@ -7,6 +7,8 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -18,6 +20,9 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -76,6 +81,9 @@ class SepTopGromacsDialog(QDialog):
         self.equil = QDoubleSpinBox()
         self.equil.setRange(0.001, 1000)
         self.equil.setValue(1.0)
+        self.pressure_equil = QDoubleSpinBox()
+        self.pressure_equil.setRange(0.0, 1000)
+        self.pressure_equil.setValue(1.0)
         self.production = QDoubleSpinBox()
         self.production.setRange(0.001, 1000)
         self.production.setValue(5.0)
@@ -99,6 +107,21 @@ class SepTopGromacsDialog(QDialog):
         self.walltime = QLineEdit("24:00:00")
         self.system_type = QComboBox()
         self.system_type.addItems(["soluble", "membrane"])
+        self.complex_gamma = QDoubleSpinBox()
+        self.complex_gamma.setRange(0.001, 10.0)
+        self.complex_gamma.setValue(0.5)
+        self.solvent_gamma = QDoubleSpinBox()
+        self.solvent_gamma.setRange(0.001, 10.0)
+        self.solvent_gamma.setValue(0.3)
+        self.complex_resname = QLineEdit("LIG")
+        self.solvent_resname = QLineEdit("UNL")
+        self.timestep = QDoubleSpinBox()
+        self.timestep.setRange(0.0001, 0.01)
+        self.timestep.setDecimals(4)
+        self.timestep.setValue(0.002)
+        self.allow_charge_change = QCheckBox(
+            "Allow only when an explicit charge correction is handled separately"
+        )
         form.addRow("Job name:", self.name)
         form.addRow(
             "Ligand network bundle:",
@@ -113,9 +136,59 @@ class SepTopGromacsDialog(QDialog):
             self._directory_row(self.source, "Select MobleyLab source checkout"),
         )
         form.addRow("System type:", self.system_type)
-        form.addRow("Replicates:", self.replicates)
-        form.addRow("NVT per window (ns):", self.equil)
-        form.addRow("Production per window (ns):", self.production)
+
+        self.simulation_tabs = QTabWidget()
+        stage_page = QWidget()
+        stage_layout = QVBoxLayout(stage_page)
+        self.stage_protocol_table = QTableWidget(4, 5)
+        self.stage_protocol_table.setHorizontalHeaderLabels(
+            ["Stage", "Integrator", "dt (ps)", "Temperature", "Pressure"]
+        )
+        for row, values in enumerate(
+            (
+                ("EM", "Template", "—", "No coupling", "No coupling"),
+                ("NVT", "Template", "0.002", "Template", "No coupling"),
+                ("NPT (membrane)", "Template", "0.002", "Template", "Semi-isotropic"),
+                ("Production", "Template", "0.002", "Template", "System-dependent"),
+            )
+        ):
+            for column, value in enumerate(values):
+                self.stage_protocol_table.setItem(row, column, QTableWidgetItem(value))
+        self.stage_protocol_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.stage_protocol_table.verticalHeader().setVisible(False)
+        self.stage_protocol_table.horizontalHeader().setStretchLastSection(True)
+        stage_layout.addWidget(self.stage_protocol_table)
+        stage_form = QFormLayout()
+        stage_form.addRow("NVT per window (ns):", self.equil)
+        stage_form.addRow("Membrane NPT per window (ns):", self.pressure_equil)
+        stage_form.addRow("Production per window (ns):", self.production)
+        stage_layout.addLayout(stage_form)
+        self.simulation_tabs.addTab(stage_page, "Stage Protocol")
+
+        restraint_page = QWidget()
+        restraint_layout = QFormLayout(restraint_page)
+        restraint_layout.addRow("Complex Boresch gamma:", self.complex_gamma)
+        restraint_layout.addRow("Solvent distance gamma:", self.solvent_gamma)
+        restraint_layout.addRow("Complex ligand residue:", self.complex_resname)
+        restraint_layout.addRow("Solvent ligand residue:", self.solvent_resname)
+        self.simulation_tabs.addTab(restraint_page, "Restraints")
+
+        lambda_page = QWidget()
+        lambda_layout = QFormLayout(lambda_page)
+        lambda_layout.addRow("Replicates:", self.replicates)
+        lambda_note = QLabel(
+            "Lambda states are read from the selected SeparatedTopologies MDP templates."
+        )
+        lambda_note.setWordWrap(True)
+        lambda_layout.addRow("Schedule source:", lambda_note)
+        self.simulation_tabs.addTab(lambda_page, "Lambda Schedule")
+
+        alchemical_page = QWidget()
+        alchemical_layout = QFormLayout(alchemical_page)
+        alchemical_layout.addRow("Timestep (ps):", self.timestep)
+        alchemical_layout.addRow("Charge-changing edges:", self.allow_charge_change)
+        self.simulation_tabs.addTab(alchemical_page, "Alchemical Controls")
+        form.addRow(self.simulation_tabs)
         form.addRow("Maximum Slurm jobs:", self.max_jobs)
         form.addRow("Slurm partition:", self.partition)
         form.addRow("Nodes per job:", self.nodes)
@@ -126,7 +199,7 @@ class SepTopGromacsDialog(QDialog):
         form.addRow("Walltime:", self.walltime)
         self.tabs = form_step_tabs(
             form,
-            (("System", 5), ("FEP Simulation", 3), ("Job Setting", 8)),
+            (("System", 5), ("FEP Simulation", 1), ("Job Setting", 8)),
         )
         self.ligand_preparation = GromacsLigandPrepareDialog(
             working_directory=self.working_directory,
@@ -245,8 +318,13 @@ class SepTopGromacsDialog(QDialog):
             "[network]\n"
             + f"existing_network_dir = {json.dumps(network_bundle)}\n"
             + f'method = {json.dumps(self.network.currentText())}\natom_mapper = "lomap"\nmax3d_angstrom = 1.0\nelement_change = false\nrequire_cycle_covering = true\n\n'
-            '[protocol]\ncomplex_gamma = 0.5\nsolvent_gamma = 0.3\ncomplex_ligand_resname = "LIG"\nsolvent_ligand_resname = "UNL"\nallow_charge_change = false\n'
-            + f"replicates = {self.replicates.value()}\nstart_replicate = 1\ntimestep_ps = 0.002\nequilibration_ns = {self.equil.value()}\npressure_equilibration_ns = {self.equil.value()}\nproduction_ns = {self.production.value()}\n\n"
+            "[protocol]\n"
+            + f"complex_gamma = {self.complex_gamma.value()}\n"
+            + f"solvent_gamma = {self.solvent_gamma.value()}\n"
+            + f"complex_ligand_resname = {json.dumps(self.complex_resname.text().strip())}\n"
+            + f"solvent_ligand_resname = {json.dumps(self.solvent_resname.text().strip())}\n"
+            + f"allow_charge_change = {str(self.allow_charge_change.isChecked()).lower()}\n"
+            + f"replicates = {self.replicates.value()}\nstart_replicate = 1\ntimestep_ps = {self.timestep.value()}\nequilibration_ns = {self.equil.value()}\npressure_equilibration_ns = {self.pressure_equil.value()}\nproduction_ns = {self.production.value()}\n\n"
             '[execution]\ngromacs_command = "gmx"\n'
             + (
                 'mdrun_options = ["-ntmpi", "1", "-nb", "gpu", "-pme", "gpu"]\n'

@@ -127,6 +127,123 @@ def render_slurm_array_script(
     )
 
 
+def _without_thread_mpi_options(options: tuple[str, ...]) -> tuple[str, ...]:
+    """Remove rank/thread counts that HREX must derive from its replica count."""
+    result: list[str] = []
+    skip_value = False
+    for option in options:
+        if skip_value:
+            skip_value = False
+            continue
+        if option in {"-ntmpi", "-ntomp"}:
+            skip_value = True
+            continue
+        result.append(option)
+    return tuple(result)
+
+
+def render_slurm_hrex_script(
+    config: LigandRBFEConfig, *, expected_tasks: int
+) -> str:
+    """Render one coordinated lambda-HREX job per edge/leg/replicate."""
+    partition = (
+        f"#SBATCH --partition={_directive(config.slurm_partition, 'Partition')}\n"
+        if config.slurm_partition.strip()
+        else ""
+    )
+    gres = (
+        f"#SBATCH --gres=gpu:{config.slurm_gpus}\n"
+        if config.slurm_gpus > 0
+        else ""
+    )
+    activation = ""
+    if config.slurm_conda_init.strip():
+        activation += f"source {shlex.quote(config.slurm_conda_init)}\n"
+    if config.slurm_conda_environment.strip():
+        activation += f"conda activate {shlex.quote(config.slurm_conda_environment)}\n"
+    options = " ".join(
+        shlex.quote(option)
+        for option in _without_thread_mpi_options(config.mdrun_options)
+    )
+    gmx_command = " ".join(
+        shlex.quote(part) for part in shlex.split(config.hrex_gmx_command)
+    )
+    prep_command = " ".join(
+        shlex.quote(part) for part in shlex.split(config.gmx)
+    )
+    return (
+        "#!/bin/bash\n"
+        f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}_hrex\n"
+        + partition
+        + gres
+        + f"#SBATCH --nodes={config.slurm_nodes}\n"
+        + f"#SBATCH --ntasks={config.lambda_windows}\n"
+        + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
+        + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
+        + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
+        + f"#SBATCH --output={_directive(config.slurm_log_output, 'Log output')}\n"
+        + f"#SBATCH --error={_directive(config.slurm_log_error, 'Log error')}\n"
+        + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
+        + "set -euo pipefail\n\n"
+        + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
+        + 'TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
+        + f"EXPECTED_REPLICAS={config.lambda_windows}\n"
+        + f"EXCHANGE_INTERVAL={config.exchange_interval_steps}\n\n"
+        + activation
+        + 'FEP_DIR="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n'
+        + '[[ -d "$FEP_DIR" ]] || { echo "ERROR: Missing HREX directory: $FEP_DIR" >&2; exit 1; }\n'
+        + 'mapfile -t REPLICA_DIRS < <(find "$FEP_DIR" -maxdepth 1 -type d '
+        + "-name 'lambda_*' -print | sort)\n"
+        + 'REPLICA_COUNT="${#REPLICA_DIRS[@]}"\n'
+        + 'if (( REPLICA_COUNT != EXPECTED_REPLICAS )); then\n'
+        + '    echo "ERROR: Found $REPLICA_COUNT lambda replicas; expected $EXPECTED_REPLICAS" >&2\n'
+        + "    exit 1\n"
+        + "fi\n"
+        + f'OMP_PER_REPLICA="${{SLURM_CPUS_PER_TASK:-{config.slurm_cpus_per_task}}}"\n'
+        + 'export OMP_NUM_THREADS="$OMP_PER_REPLICA"\n'
+        + 'LEG_DIR="$(dirname "$(dirname "$FEP_DIR")")"\n'
+        + 'BASE_GRO="$LEG_DIR/setup/system.gro"\n'
+        + 'TOPOLOGY="$LEG_DIR/setup/topol.top"\n'
+        + '[[ -s "$BASE_GRO" && -s "$TOPOLOGY" ]] || { echo "ERROR: Missing leg setup" >&2; exit 1; }\n\n'
+        + f"GMX_PREP_COMMAND=( {prep_command} )\n"
+        + f"GMX_COMMAND=( {gmx_command} )\n"
+        + 'GMX_VERSION="$("${GMX_COMMAND[@]}" --version 2>&1)"\n'
+        + 'if grep -Eqi "MPI version:.*built in" <<<"$GMX_VERSION"; then\n'
+        + '    echo "ERROR: Lambda-HREX requires an external-MPI GROMACS build (normally gmx_mpi); thread-MPI is not supported by -multidir." >&2\n'
+        + "    exit 1\n"
+        + "fi\n"
+        + f"MDRUN_COMMON=( {options} -ntomp \"$OMP_PER_REPLICA\" )\n\n"
+        + "prepare_stage() {\n"
+        + '    local stage="$1" previous="$2" checkpoint="${3:-}"\n'
+        + '    for replica in "${REPLICA_DIRS[@]}"; do\n'
+        + '        [[ -s "$replica/${stage}.mdp" ]] || { echo "ERROR: Missing $replica/${stage}.mdp" >&2; exit 1; }\n'
+        + '        [[ -s "$replica/${stage}.tpr" ]] && continue\n'
+        + '        local coordinates="$BASE_GRO"\n'
+        + '        [[ "$previous" != "BASE" ]] && coordinates="$replica/${previous}.gro"\n'
+        + '        args=( grompp -f "$replica/${stage}.mdp" -c "$coordinates" -r "$BASE_GRO" -p "$TOPOLOGY" -o "$replica/${stage}.tpr" )\n'
+        + '        if [[ -n "$checkpoint" && -s "$replica/${checkpoint}.cpt" ]]; then args+=( -t "$replica/${checkpoint}.cpt" ); fi\n'
+        + '        "${GMX_PREP_COMMAND[@]}" "${args[@]}"\n'
+        + "    done\n"
+        + "}\n\n"
+        + "run_replicas() {\n"
+        + '    local stage="$1" exchange="$2" complete=1\n'
+        + '    for replica in "${REPLICA_DIRS[@]}"; do [[ -s "$replica/${stage}.gro" ]] || complete=0; done\n'
+        + '    (( complete == 1 )) && { echo "Skipping completed $stage"; return; }\n'
+        + '    args=( mdrun -multidir "${REPLICA_DIRS[@]}" -deffnm "$stage" "${MDRUN_COMMON[@]}" )\n'
+        + '    [[ "$exchange" == "yes" ]] && args+=( -replex "$EXCHANGE_INTERVAL" )\n'
+        + '    if [[ -s "${REPLICA_DIRS[0]}/${stage}.cpt" ]]; then args+=( -cpi "${stage}.cpt" -append ); fi\n'
+        + '    srun --ntasks="$REPLICA_COUNT" "${GMX_COMMAND[@]}" "${args[@]}"\n'
+        + "}\n\n"
+        + 'echo "HREX group: $FEP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
+        + 'prepare_stage em BASE\nrun_replicas em no\n'
+        + 'prepare_stage nvt em\nrun_replicas nvt no\n'
+        + 'prepare_stage npt nvt nvt\nrun_replicas npt no\n'
+        + 'prepare_stage transition npt npt\nrun_replicas transition no\n'
+        + 'prepare_stage equil transition transition\nrun_replicas equil no\n'
+        + 'prepare_stage prod equil equil\nrun_replicas prod yes\n'
+    )
+
+
 def stage_fep_task_directories(
     config: LigandRBFEConfig, network: NetworkPlan
 ) -> list[Path]:
@@ -181,24 +298,39 @@ def write_slurm_array_files(
     project.mkdir(parents=True, exist_ok=True)
     (project / "logs").mkdir(parents=True, exist_ok=True)
     expected_tasks = edge_count * config.tasks_per_edge
+    task_kind = "lambda_groups" if config.sampling_method == "hrex" else "windows"
+    task_formula = (
+        "edges x 2 legs x replicates"
+        if config.sampling_method == "hrex"
+        else "edges x 2 legs x replicates x lambda windows"
+    )
     (project / "slurm_array_summary.txt").write_text(
         f"edges={edge_count}\n"
         "legs=2\n"
         f"replicates={config.replicates}\n"
         f"lambda_windows={config.lambda_windows}\n"
+        f"sampling_method={config.sampling_method}\n"
+        f"exchange_interval_steps={config.exchange_interval_steps}\n"
         f"tasks_per_edge={config.tasks_per_edge}\n"
         f"total_tasks={expected_tasks}\n"
         f"array=0-{expected_tasks - 1}\n",
         encoding="utf-8",
     )
     task_file = project / "production_tasks.txt"
+    manifest_tasks = tasks or []
+    if config.sampling_method == "hrex":
+        manifest_tasks = list(dict.fromkeys(task.parent for task in manifest_tasks))
     task_file.write_text(
-        "".join(f"{task.resolve()}\n" for task in (tasks or [])), encoding="utf-8"
+        "".join(f"{task.resolve()}\n" for task in manifest_tasks), encoding="utf-8"
     )
 
     array_script = project / "gromacs_production_array.sh"
     array_script.write_text(
-        render_slurm_array_script(config, expected_tasks=expected_tasks),
+        (
+            render_slurm_hrex_script(config, expected_tasks=expected_tasks)
+            if config.sampling_method == "hrex"
+            else render_slurm_array_script(config, expected_tasks=expected_tasks)
+        ),
         encoding="utf-8",
     )
     array_script.chmod(array_script.stat().st_mode | 0o100)
@@ -220,12 +352,12 @@ def write_slurm_array_files(
         "fi\n"
         'if (( N_TASKS != EXPECTED_TASKS )); then\n'
         '    echo "ERROR: Found $N_TASKS FEP tasks; expected '
-        '$EXPECTED_TASKS (= edges x 2 legs x replicates x lambda windows)." >&2\n'
+        f'$EXPECTED_TASKS (= {task_formula})." >&2\n'
         "    exit 1\n"
         "fi\n"
         'cd "$PROJECT_DIR"\n'
         'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
-        'echo "Submitting $N_TASKS six-stage FEP tasks as array $ARRAY_SPEC"\n'
+        f'echo "Submitting $N_TASKS six-stage FEP {task_kind} as array $ARRAY_SPEC"\n'
         'sbatch --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE"\n',
         encoding="utf-8",
     )

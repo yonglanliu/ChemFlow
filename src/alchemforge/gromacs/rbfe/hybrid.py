@@ -199,7 +199,12 @@ def stage_hybrid_systems(
             "protein_restraint_force": config.protein_restraint_force,
             "ligand_restraint_force": config.ligand_restraint_force,
             "cofactor_restraint_force": config.cofactor_restraint_force,
+            "protein_residue_ids": list(config.protein_residue_ids),
+            "protein_atom_names": list(config.protein_atom_names),
+            "ligand_resnames": list(config.ligand_resnames),
+            "ligand_atom_names": list(config.ligand_atom_names),
             "cofactor_resnames": list(config.cofactor_resnames),
+            "cofactor_atom_names": list(config.cofactor_atom_names),
             "coion": charge.get("coion", ""),
             "coion_count": int(charge.get("coion_count") or 0),
         }
@@ -314,7 +319,12 @@ def _molecule_type(path: Path) -> str:
     raise ValueError(f"No [ moleculetype ] name found in {path}")
 
 
-def _heavy_atom_indices(text: str, residue_names: set[str] | None = None) -> list[int]:
+def _heavy_atom_indices(
+    text: str,
+    residue_names: set[str] | None = None,
+    residue_ids: set[int] | None = None,
+    atom_names: set[str] | None = None,
+) -> list[int]:
     """Return heavy-atom indices from a GROMACS [ atoms ] section."""
     section = ""
     indices: list[int] = []
@@ -330,7 +340,11 @@ def _heavy_atom_indices(text: str, residue_names: set[str] | None = None) -> lis
             continue
         if residue_names and fields[3].upper() not in residue_names:
             continue
+        if residue_ids and int(fields[2]) not in residue_ids:
+            continue
         atom_name = fields[4].upper()
+        if atom_names and atom_name not in atom_names:
+            continue
         try:
             mass = float(fields[7])
         except ValueError:
@@ -364,9 +378,17 @@ def _restraint_block(
 
 
 def _write_ligand_position_restraints(
-    merged_itp: Path, output: Path, force: float
+    merged_itp: Path,
+    output: Path,
+    force: float,
+    residue_names: tuple[str, ...] = (),
+    atom_names: tuple[str, ...] = (),
 ) -> None:
-    indices = _heavy_atom_indices(merged_itp.read_text(encoding="utf-8"))
+    indices = _heavy_atom_indices(
+        merged_itp.read_text(encoding="utf-8"),
+        set(residue_names) or None,
+        atom_names=set(atom_names) or None,
+    )
     if not indices:
         raise ValueError(f"Hybrid ligand topology has no heavy atoms: {merged_itp}")
     output.write_text(
@@ -390,6 +412,7 @@ def _add_cofactor_restraints(
     source: Path,
     residue_names: tuple[str, ...],
     force: float,
+    atom_names: tuple[str, ...] = (),
 ) -> str:
     """Attach conditional heavy-atom restraints to monolithic or included cofactors."""
     names = {name.upper() for name in residue_names}
@@ -398,7 +421,9 @@ def _add_cofactor_restraints(
 
     # A ParmEd/tleap topology often stores protein and cofactors in one
     # moleculetype. Insert the cofactor atom restraints before [ system ].
-    indices = _heavy_atom_indices(text, names)
+    indices = _heavy_atom_indices(
+        text, names, atom_names=set(atom_names) or None
+    )
     if indices:
         system = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
         if system is None:
@@ -434,7 +459,9 @@ def _add_cofactor_restraints(
         except ValueError:
             continue
         included_indices = _heavy_atom_indices(
-            included_text, None if molecule.upper() in names else names
+            included_text,
+            None if molecule.upper() in names else names,
+            atom_names=set(atom_names) or None,
         )
         if included_indices:
             rewritten.extend(
@@ -448,11 +475,21 @@ def _add_cofactor_restraints(
     return "\n".join(rewritten) + "\n"
 
 
-def _add_protein_restraints(text: str, force: float) -> str:
+def _add_protein_restraints(
+    text: str,
+    force: float,
+    residue_ids: tuple[int, ...] = (),
+    atom_names: tuple[str, ...] = (),
+) -> str:
     """Add protein heavy-atom restraints for monolithic Amber topologies."""
     if re.search(r"(?m)^\s*#\s*ifdef\s+POSRES\b", text):
         return text
-    indices = _heavy_atom_indices(text, _PROTEIN_RESIDUES)
+    indices = _heavy_atom_indices(
+        text,
+        _PROTEIN_RESIDUES,
+        set(residue_ids) or None,
+        set(atom_names) or None,
+    )
     if not indices:
         # Component/pdb2gmx topologies normally provide their own POSRES block;
         # the stage MDP enables it with -DPOSRES.
@@ -668,13 +705,25 @@ def _inject_complex_topology(
     water: str = "",
     hybrid_include_prefix: str = "../hybrid",
     protein_restraint_force: float = 1000.0,
+    protein_residue_ids: tuple[int, ...] = (),
+    protein_atom_names: tuple[str, ...] = (),
     cofactor_resnames: tuple[str, ...] = (),
     cofactor_restraint_force: float = 1000.0,
+    cofactor_atom_names: tuple[str, ...] = (),
 ) -> None:
     text = source.read_text(encoding="utf-8")
-    text = _add_protein_restraints(text, protein_restraint_force)
+    text = _add_protein_restraints(
+        text,
+        protein_restraint_force,
+        protein_residue_ids,
+        protein_atom_names,
+    )
     text = _add_cofactor_restraints(
-        text, source, cofactor_resnames, cofactor_restraint_force
+        text,
+        source,
+        cofactor_resnames,
+        cofactor_restraint_force,
+        cofactor_atom_names,
     )
     text = _alchemize_base_ions(text, coion_atom_indices)
     first_molecule = re.search(r"(?im)^\s*\[\s*moleculetype\s*\]", text)
@@ -1050,6 +1099,8 @@ def assemble_edge(spec_path: Path) -> None:
         hybrid / "merged.itp",
         hybrid / "posre_ligand.itp",
         float(spec.get("ligand_restraint_force", 1000.0)),
+        tuple(spec.get("ligand_resnames", [])),
+        tuple(spec.get("ligand_atom_names", [])),
     )
     molecule = _molecule_type(hybrid / "merged.itp")
     gmx = str(spec["gmx"])
@@ -1089,10 +1140,13 @@ def assemble_edge(spec_path: Path) -> None:
         protein_restraint_force=float(
             spec.get("protein_restraint_force", 1000.0)
         ),
+        protein_residue_ids=tuple(spec.get("protein_residue_ids", [])),
+        protein_atom_names=tuple(spec.get("protein_atom_names", [])),
         cofactor_resnames=tuple(spec.get("cofactor_resnames", [])),
         cofactor_restraint_force=float(
             spec.get("cofactor_restraint_force", 1000.0)
         ),
+        cofactor_atom_names=tuple(spec.get("cofactor_atom_names", [])),
     )
     complex_mdp = complex_dir / "validate.mdp"
     _write_validation_mdp(complex_mdp)

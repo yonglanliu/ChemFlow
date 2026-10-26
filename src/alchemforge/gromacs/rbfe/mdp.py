@@ -387,15 +387,34 @@ def render_rbfe_stage_mdp(
             "RBFE stage must be mini, nvt, npt, transition, final, or prod"
         )
     text = render_rbfe_mdp(config, window, membrane=membrane)
-    strong_restraints = (
-        "-DPOSRES -DPOSRES_LIG -DPOSRES_COFACTOR "
-        "-DPOSRES_FC=1000 -DPOSRES_LIG_FC=1000 "
-        "-DPOSRES_COFACTOR_FC=1000"
-    )
+    stage_index = {
+        "mini": 0,
+        "nvt": 1,
+        "npt": 2,
+        "transition": 3,
+        "final": 4,
+        "prod": 5,
+    }[stage]
+    integrator = config.stage_integrators[stage_index]
+    timestep = config.stage_timesteps_ps[stage_index]
+    temperature_coupling = config.stage_temperature_coupling[stage_index]
+    pressure_coupling = config.stage_pressure_coupling[stage_index]
+
+    def restraint_defines(forces: tuple[float, float, float]) -> str:
+        macros: list[str] = []
+        for macro, symbol, force in (
+            ("POSRES", "POSRES_FC", forces[0]),
+            ("POSRES_LIG", "POSRES_LIG_FC", forces[1]),
+            ("POSRES_COFACTOR", "POSRES_COFACTOR_FC", forces[2]),
+        ):
+            if force > 0:
+                macros.extend((f"-D{macro}", f"-D{symbol}={force:g}"))
+        return " ".join(macros)
+
     if stage == "mini":
         values: dict[str, object] = {
-            "define": strong_restraints,
-            "integrator": "steep",
+            "define": restraint_defines(config.em_restraint_forces),
+            "integrator": integrator,
             "nsteps": config.em_steps,
             "emtol": config.em_tolerance,
             "emstep": 0.01,
@@ -407,67 +426,60 @@ def render_rbfe_stage_mdp(
         }
     elif stage == "nvt":
         values = {
-            "define": strong_restraints,
-            "integrator": "md",
-            "dt": 0.001,
+            "define": restraint_defines(config.nvt_restraint_forces),
+            "integrator": integrator,
+            "dt": timestep,
             "nsteps": config.nvt_steps,
             "continuation": "no",
             "gen-vel": "yes",
             "gen-temp": config.temperature_k,
             "gen-seed": -1,
-            "tcoupl": "Berendsen",
-            "pcoupl": "no",
+            "tcoupl": temperature_coupling,
+            "pcoupl": pressure_coupling,
         }
     elif stage == "npt":
         values = {
-            "define": (
-                "-DPOSRES -DPOSRES_LIG -DPOSRES_COFACTOR "
-                "-DPOSRES_FC=500 -DPOSRES_LIG_FC=500 "
-                "-DPOSRES_COFACTOR_FC=500"
-            ),
-            "integrator": "md",
-            "dt": 0.001,
+            "define": restraint_defines(config.npt_restraint_forces),
+            "integrator": integrator,
+            "dt": timestep,
             "nsteps": config.npt_steps,
             "continuation": "yes",
             "gen-vel": "no",
-            "tcoupl": "Berendsen",
-            "pcoupl": "Berendsen",
+            "tcoupl": temperature_coupling,
+            "pcoupl": pressure_coupling,
         }
     elif stage == "transition":
         values = {
-            "define": (
-                "-DPOSRES_LIG -DPOSRES_COFACTOR "
-                "-DPOSRES_LIG_FC=100 -DPOSRES_COFACTOR_FC=100"
-            ),
-            "integrator": "sd",
-            "dt": 0.002,
+            "define": restraint_defines(config.transition_restraint_forces),
+            "integrator": integrator,
+            "dt": timestep,
             "nsteps": config.transition_steps,
             "continuation": "yes",
             "gen-vel": "no",
-            "tcoupl": "no",
-            "pcoupl": "C-rescale",
+            "tcoupl": temperature_coupling,
+            "pcoupl": pressure_coupling,
         }
     elif stage == "final":
         values = {
-            "define": "-DPOSRES_LIG -DPOSRES_LIG_FC=20",
-            "integrator": "sd",
-            "dt": 0.002,
+            "define": restraint_defines(config.final_restraint_forces),
+            "integrator": integrator,
+            "dt": timestep,
             "nsteps": config.final_equilibration_steps,
             "continuation": "yes",
             "gen-vel": "no",
-            "tcoupl": "no",
-            "pcoupl": "C-rescale",
+            "tcoupl": temperature_coupling,
+            "pcoupl": pressure_coupling,
         }
     else:
         values = {
-            "define": "",
-            "integrator": "sd",
-            "dt": 0.002,
+            "define": restraint_defines(config.production_restraint_forces),
+            "integrator": integrator,
+            "dt": timestep,
             "nsteps": config.production_steps,
             "continuation": "yes",
             "gen-vel": "no",
-            "tcoupl": "no",
-            "pcoupl": "C-rescale",
+            "tcoupl": temperature_coupling,
+            "pcoupl": pressure_coupling,
         }
     for key, value in values.items():
         text = _set_value(text, key, value)

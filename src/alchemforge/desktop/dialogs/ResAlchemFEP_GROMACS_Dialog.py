@@ -1,9 +1,9 @@
 import shutil
-import subprocess
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -16,6 +16,8 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -311,10 +313,7 @@ class ResAlchemFEPDialog(QDialog):
 
     def build_simulation_tab(self):
         widget = QWidget()
-        layout = QFormLayout(widget)
-        layout.setLabelAlignment(Qt.AlignRight)
-        layout.setHorizontalSpacing(14)
-        layout.setVerticalSpacing(10)
+        root = QVBoxLayout(widget)
 
         self.temperature_spin = QDoubleSpinBox()
         self.temperature_spin.setRange(0, 1000)
@@ -374,18 +373,67 @@ class ResAlchemFEPDialog(QDialog):
         self.max_fep_jobs_spin.setRange(1, 1000000)
         self.max_fep_jobs_spin.setValue(3)
 
-        layout.addRow("Temperature:", self.temperature_spin)
-        layout.addRow("Time step:", self.dt_spin)
-        layout.addRow("Lambda mode:", self.lambda_mode_combo)
-        layout.addRow("Lambda windows:", self.nlambda_spin)
-        layout.addRow("Replicates:", self.nrep_spin)
-        layout.addRow("Start replicate:", self.start_rep_spin)
-        layout.addRow("Lambda function:", self.fep_lambda_function_combo)
-        layout.addRow("Lambda power:", self.fep_lambda_power_spin)
-        layout.addRow("FEP NVT time:", self.fep_nvt_time_spin)
-        layout.addRow("FEP NPT time:", self.fep_npt_time_spin)
-        layout.addRow("FEP production time:", self.fep_production_time_spin)
-        layout.addRow("Max FEP jobs:", self.max_fep_jobs_spin)
+        self.simulation_tabs = QTabWidget()
+
+        stage_page = QWidget()
+        stage_layout = QVBoxLayout(stage_page)
+        self.stage_protocol_table = QTableWidget(4, 5)
+        self.stage_protocol_table.setHorizontalHeaderLabels(
+            ["Stage", "Integrator", "dt (ps)", "Temperature", "Pressure"]
+        )
+        for row, values in enumerate(
+            (
+                ("EM", "steep", "—", "No coupling", "No coupling"),
+                ("NVT", "MD", "Configured", "Temperature coupling", "No coupling"),
+                ("NPT", "MD", "Configured", "Temperature coupling", "System-dependent"),
+                ("Production", "FEP MD", "Configured", "Temperature coupling", "System-dependent"),
+            )
+        ):
+            for column, value in enumerate(values):
+                self.stage_protocol_table.setItem(row, column, QTableWidgetItem(value))
+        self.stage_protocol_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.stage_protocol_table.verticalHeader().setVisible(False)
+        self.stage_protocol_table.horizontalHeader().setStretchLastSection(True)
+        stage_layout.addWidget(self.stage_protocol_table)
+        stage_form = QFormLayout()
+        stage_form.setLabelAlignment(Qt.AlignRight)
+        stage_form.addRow("FEP NVT time:", self.fep_nvt_time_spin)
+        stage_form.addRow("FEP NPT time:", self.fep_npt_time_spin)
+        stage_form.addRow("FEP production time:", self.fep_production_time_spin)
+        stage_layout.addLayout(stage_form)
+        self.simulation_tabs.addTab(stage_page, "Stage Protocol")
+
+        restraint_page = QWidget()
+        restraint_layout = QVBoxLayout(restraint_page)
+        restraint_note = QLabel(
+            "ResFEP uses the protein/residue restraints supplied by the prepared "
+            "PMX mutation topology. No Boresch ligand restraint is used."
+        )
+        restraint_note.setWordWrap(True)
+        restraint_layout.addWidget(restraint_note)
+        restraint_layout.addStretch()
+        self.simulation_tabs.addTab(restraint_page, "Restraints")
+
+        lambda_page = QWidget()
+        lambda_layout = QFormLayout(lambda_page)
+        lambda_layout.setLabelAlignment(Qt.AlignRight)
+        lambda_layout.addRow("Lambda mode:", self.lambda_mode_combo)
+        lambda_layout.addRow("Lambda windows:", self.nlambda_spin)
+        lambda_layout.addRow("Replicates:", self.nrep_spin)
+        lambda_layout.addRow("Start replicate:", self.start_rep_spin)
+        lambda_layout.addRow("Lambda function:", self.fep_lambda_function_combo)
+        lambda_layout.addRow("Lambda power:", self.fep_lambda_power_spin)
+        self.simulation_tabs.addTab(lambda_page, "Lambda Schedule")
+
+        alchemical_page = QWidget()
+        alchemical_layout = QFormLayout(alchemical_page)
+        alchemical_layout.setLabelAlignment(Qt.AlignRight)
+        alchemical_layout.addRow("Temperature:", self.temperature_spin)
+        alchemical_layout.addRow("Time step:", self.dt_spin)
+        alchemical_layout.addRow("Max FEP jobs:", self.max_fep_jobs_spin)
+        self.simulation_tabs.addTab(alchemical_page, "Alchemical Controls")
+
+        root.addWidget(self.simulation_tabs)
 
         return widget
 
