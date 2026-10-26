@@ -161,6 +161,10 @@ class LigandRBFEConfig:
     slurm_gpus: int
     slurm_memory: str
     slurm_walltime: str
+    slurm_conda_init: str
+    slurm_conda_environment: str
+    slurm_log_output: str
+    slurm_log_error: str
     mdp_integrator: str
     mdp_constraints: str
     mdp_coulomb_cutoff_nm: float
@@ -393,6 +397,20 @@ class LigandRBFEConfig:
             slurm_gpus=_positive_int(slurm.get("gpus", 1), "[slurm].gpus", 0),
             slurm_memory=str(slurm.get("memory", "16G")),
             slurm_walltime=str(slurm.get("walltime", "24:00:00")),
+            slurm_conda_init=str(
+                slurm.get(
+                    "conda_init",
+                    "/data/liuy48/conda/etc/profile.d/conda.sh",
+                )
+            ),
+            slurm_conda_environment=str(
+                slurm.get(
+                    "conda_environment",
+                    "/data/liuy48/conda/envs/alchemforge",
+                )
+            ),
+            slurm_log_output=str(slurm.get("log_output", "logs/%A_%a.out")),
+            slurm_log_error=str(slurm.get("log_error", "logs/%A_%a.err")),
             mdp_integrator=_choice(
                 mdp.get("integrator", "sd"), "[mdp].integrator", {"sd", "md"}
             ),
@@ -532,6 +550,10 @@ class LigandRBFEConfig:
             "FEP_GPUS": self.slurm_gpus,
             "FEP_MEMORY": self.slurm_memory,
             "FEP_WALLTIME": self.slurm_walltime,
+            "FEP_CONDA_INIT": self.slurm_conda_init,
+            "FEP_CONDA_ENVIRONMENT": self.slurm_conda_environment,
+            "FEP_LOG_OUTPUT": self.slurm_log_output,
+            "FEP_LOG_ERROR": self.slurm_log_error,
             "RBFE_MDP_DIR": str(project_dir / "mdp"),
             "RBFE_MDP_TEMPLATE": str(project_dir / "mdp" / "prod.mdp"),
             "RBFE_COMPLEX_MDP_DIR": str(project_dir / "mdp" / "complex"),

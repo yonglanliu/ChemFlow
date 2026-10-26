@@ -92,3 +92,7 @@ cpus_per_task = 8
 gpus = 1
 memory = "16G"
 walltime = "24:00:00"
+conda_init = "/data/liuy48/conda/etc/profile.d/conda.sh"
+conda_environment = "/data/liuy48/conda/envs/alchemforge"
+log_output = "logs/%A_%a.out"
+log_error = "logs/%A_%a.err"

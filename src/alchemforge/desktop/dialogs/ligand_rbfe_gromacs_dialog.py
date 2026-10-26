@@ -47,7 +47,7 @@ from alchemforge.desktop.modeless import show_modeless
 from alchemforge.gromacs.lambda_schedule import generate_lambda_windows
 from alchemforge.gromacs.membrane import count_lipid_molecules_pdb
 from alchemforge.gromacs.rbfe.config import LigandRBFEConfig
-from alchemforge.gromacs.rbfe.workflow import stage
+from alchemforge.gromacs.rbfe.workflow import stage, write_slurm_array_files
 from alchemforge.gromacs.system_prepare import (
     GromacsSystemPreparationConfig,
     installed_amber_lipid_force_fields,
@@ -126,6 +126,42 @@ class LigandRBFEGromacsDialog(QDialog):
         self._planned_ligands = ligand_copy
         self.show_network_button.setEnabled(
             self._planned_edges.is_file() and ligand_copy.is_file()
+        )
+        self._update_expected_array_tasks()
+
+    def _update_expected_array_tasks(self, *_args) -> None:
+        """Show edges × legs × replicates × lambda windows for the array."""
+        bundle_text = self.network_bundle.text().strip()
+        edges_path = Path(bundle_text) / "edges.csv" if bundle_text else None
+        edge_count = 0
+        if edges_path is not None and edges_path.is_file():
+            try:
+                with edges_path.open(newline="", encoding="utf-8") as handle:
+                    edge_count = sum(1 for _row in csv.DictReader(handle))
+            except OSError:
+                edge_count = 0
+        if self.lambda_schedule_mode.currentText() == "manual":
+            windows = len(
+                [
+                    token
+                    for token in re.split(
+                        r"[\s,;]+", self.coul_lambdas.text().strip()
+                    )
+                    if token
+                ]
+            )
+        else:
+            windows = self.lambda_windows.value()
+        if edge_count == 0 or windows == 0:
+            self.expected_array_tasks.setText(
+                "Select/create a network and define the lambda schedule"
+            )
+            return
+        total = edge_count * 2 * self.replicates.value() * windows
+        self.expected_array_tasks.setText(
+            f"{edge_count} edges × 2 legs × {self.replicates.value()} replicates "
+            f"× {windows} windows = {total} tasks; "
+            f"array 0-{total - 1}%{self.max_jobs.value()}"
         )
 
     def _build_ui(self) -> None:
@@ -392,11 +428,36 @@ class LigandRBFEGromacsDialog(QDialog):
         self.cpus = QSpinBox()
         self.cpus.setRange(1, 512)
         self.cpus.setValue(8)
+        self.ntmpi = QSpinBox()
+        self.ntmpi.setRange(1, 512)
+        self.ntmpi.setValue(1)
+        self.ntmpi.setToolTip(
+            "GROMACS thread-MPI ranks inside each array task; one is recommended "
+            "for one GPU per alchemical window."
+        )
         self.gpus = QSpinBox()
         self.gpus.setRange(0, 16)
         self.gpus.setValue(1)
         self.memory = QLineEdit("16G")
         self.walltime = QLineEdit("24:00:00")
+        self.pme_target = QComboBox()
+        self.pme_target.addItems(["cpu", "gpu", "auto"])
+        self.pme_target.setToolTip(
+            "Use CPU for the Conda OpenCL GROMACS build; use GPU for a "
+            "CUDA-enabled GROMACS build after testing it."
+        )
+        self.conda_init = QLineEdit(
+            "/data/liuy48/conda/etc/profile.d/conda.sh"
+        )
+        self.conda_environment = QLineEdit(
+            "/data/liuy48/conda/envs/alchemforge"
+        )
+        self.slurm_log_output = QLineEdit("logs/%A_%a.out")
+        self.slurm_log_error = QLineEdit("logs/%A_%a.err")
+        self.expected_array_tasks = QLabel("Select or create a ligand network")
+        self.expected_array_tasks.setToolTip(
+            "Edges × 2 thermodynamic legs × replicates × lambda windows"
+        )
         self.worker_script = QLineEdit()
         form.addRow("Replicates:", self.replicates)
         form.addRow("Lambda schedule:", self.lambda_schedule_mode)
@@ -449,9 +510,16 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("Nodes per job:", self.nodes)
         form.addRow("Tasks per job:", self.tasks)
         form.addRow("CPUs per task:", self.cpus)
+        form.addRow("GROMACS thread-MPI ranks:", self.ntmpi)
         form.addRow("GPUs per job:", self.gpus)
+        form.addRow("PME target:", self.pme_target)
         form.addRow("Memory per job:", self.memory)
         form.addRow("Walltime:", self.walltime)
+        form.addRow("Conda initialization:", self.conda_init)
+        form.addRow("Conda environment:", self.conda_environment)
+        form.addRow("Slurm stdout:", self.slurm_log_output)
+        form.addRow("Slurm stderr:", self.slurm_log_error)
+        form.addRow("Expected array tasks:", self.expected_array_tasks)
         form.addRow(
             "Execution worker:",
             self._file_row(
@@ -463,7 +531,7 @@ class LigandRBFEGromacsDialog(QDialog):
             (
                 ("System", 6),
                 ("FEP Simulation", 20),
-                ("Job Setting", 9),
+                ("Job Setting", 16),
             ),
         )
         self.ligand_preparation = GromacsLigandPrepareDialog(
@@ -503,6 +571,12 @@ class LigandRBFEGromacsDialog(QDialog):
         self.lambda_schedule_mode.currentTextChanged.connect(self._update_lambda_ui)
         self.lambda_function.currentTextChanged.connect(self._update_lambda_ui)
         self.lambda_windows.valueChanged.connect(self._update_lambda_ui)
+        self.replicates.valueChanged.connect(self._update_expected_array_tasks)
+        self.max_jobs.valueChanged.connect(self._update_expected_array_tasks)
+        self.coul_lambdas.textChanged.connect(self._update_expected_array_tasks)
+        self.network_bundle.editingFinished.connect(
+            self._update_expected_array_tasks
+        )
         self.lambda_power.valueChanged.connect(self._update_lambda_ui)
         self.cofactor_sdf.textChanged.connect(self._cofactor_input_changed)
         self.ligand_library.editingFinished.connect(
@@ -518,6 +592,7 @@ class LigandRBFEGromacsDialog(QDialog):
             self._update_force_field_selection
         )
         self._update_lambda_ui()
+        self._update_expected_array_tasks()
         self._update_force_field_selection()
         self._update_embedded_system_builder()
 
@@ -1367,6 +1442,7 @@ class LigandRBFEGromacsDialog(QDialog):
             self.restraint_lambdas,
         ):
             field.setEnabled(manual)
+        self._update_expected_array_tasks()
         if manual:
             self.lambda_preview.setPlainText(
                 "Enter all four schedules. The number of Coulomb values sets "
@@ -1516,9 +1592,22 @@ class LigandRBFEGromacsDialog(QDialog):
             "[execution]\n"
             f"max_parallel_jobs = {self.max_jobs.value()}\n"
             + (
-                'mdrun_options = ["-ntmpi", "1", "-nb", "gpu", "-pme", "gpu"]\n'
+                "mdrun_options = "
+                + json.dumps(
+                    [
+                        "-ntmpi",
+                        str(self.ntmpi.value()),
+                        "-nb",
+                        "gpu",
+                        "-pme",
+                        self.pme_target.currentText(),
+                    ]
+                )
+                + "\n"
                 if self.gpus.value() > 0
-                else 'mdrun_options = ["-ntmpi", "1"]\n'
+                else "mdrun_options = "
+                + json.dumps(["-ntmpi", str(self.ntmpi.value())])
+                + "\n"
             )
             + (f"worker_script = {json.dumps(worker)}\n" if worker else "")
             + "\n[slurm]\n"
@@ -1529,6 +1618,10 @@ class LigandRBFEGromacsDialog(QDialog):
             f"gpus = {self.gpus.value()}\n"
             f"memory = {json.dumps(self.memory.text().strip())}\n"
             f"walltime = {json.dumps(self.walltime.text().strip())}\n"
+            f"conda_init = {json.dumps(self.conda_init.text().strip())}\n"
+            f"conda_environment = {json.dumps(self.conda_environment.text().strip())}\n"
+            f"log_output = {json.dumps(self.slurm_log_output.text().strip())}\n"
+            f"log_error = {json.dumps(self.slurm_log_error.text().strip())}\n"
         )
         path.write_text(text, encoding="utf-8")
         return path
@@ -1540,6 +1633,12 @@ class LigandRBFEGromacsDialog(QDialog):
             )
             config_path = self._write_config()
             project = config_path.parent
+            workflow_config = LigandRBFEConfig.load(config_path)
+            edges_path = Path(self.network_bundle.text().strip()) / "edges.csv"
+            with edges_path.open(newline="", encoding="utf-8") as handle:
+                edge_count = sum(1 for _row in csv.DictReader(handle))
+            if edge_count > 0:
+                write_slurm_array_files(workflow_config, edge_count=edge_count)
             combined_runner = project / "build_gromacs_rbfe_workflow.sh"
             combined_runner.write_text(
                 "#!/usr/bin/env bash\n"
