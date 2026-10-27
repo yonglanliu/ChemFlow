@@ -617,6 +617,21 @@ class MainWindow(QMainWindow):
         return page
 
     def start_backend_job(self, task_directory, script_path, config_path):
+        task = Path(task_directory)
+        logs = task / "logs"
+        try:
+            logs.mkdir(parents=True, exist_ok=True)
+            stdout_log = logs / "desktop_runner.out"
+            stderr_log = logs / "desktop_runner.err"
+            stdout_log.write_text("", encoding="utf-8")
+            stderr_log.write_text("", encoding="utf-8")
+        except OSError as error:
+            QMessageBox.critical(
+                self,
+                "Cannot Start Job",
+                f"Cannot create job logs in {logs}: {error}",
+            )
+            return
         process = QProcess(self)
         process.setWorkingDirectory(task_directory)
         process.setProgram(sys.executable)
@@ -637,11 +652,16 @@ class MainWindow(QMainWindow):
             "output": "",
             "process": process,
             "termination_requested": False,
+            "stdout_log": stdout_log,
+            "stderr_log": stderr_log,
         }
         self.job_records.append(record)
         self.job_processes[id(process)] = record
         process.readyReadStandardOutput.connect(lambda: self.read_job_output(process))
         process.readyReadStandardError.connect(lambda: self.read_job_error(process))
+        process.errorOccurred.connect(
+            lambda _error: self.backend_job_process_error(process)
+        )
         process.finished.connect(
             lambda code, status: self.backend_job_finished(process, code, status)
         )
@@ -652,16 +672,32 @@ class MainWindow(QMainWindow):
     def read_job_output(self, process):
         record = self.job_processes.get(id(process))
         if record is not None:
-            record["output"] += bytes(process.readAllStandardOutput()).decode(
-                errors="replace"
-            )
+            output = bytes(process.readAllStandardOutput()).decode(errors="replace")
+            record["output"] += output
+            if output:
+                with record["stdout_log"].open("a", encoding="utf-8") as handle:
+                    handle.write(output)
 
     def read_job_error(self, process):
         record = self.job_processes.get(id(process))
         if record is not None:
-            record["error"] += bytes(process.readAllStandardError()).decode(
-                errors="replace"
-            )
+            error = bytes(process.readAllStandardError()).decode(errors="replace")
+            record["error"] += error
+            if error:
+                with record["stderr_log"].open("a", encoding="utf-8") as handle:
+                    handle.write(error)
+
+    def backend_job_process_error(self, process):
+        record = self.job_processes.get(id(process))
+        if record is None or record.get("termination_requested"):
+            return
+        message = process.errorString().strip() or "Backend process failed to start."
+        if message not in record["error"]:
+            record["error"] += ("\n" if record["error"] else "") + message
+            with record["stderr_log"].open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        record["status"] = "FAILED"
+        self.refresh_jobs_table()
 
     def backend_job_finished(self, process, exit_code, _exit_status):
         self.read_job_output(process)

@@ -168,15 +168,24 @@ class LigandRBFEGromacsDialog(QDialog):
             return
         if self.sampling_method.currentData() == "hrex":
             total = edge_count * 2 * self.replicates.value()
+            last_replicate = (
+                self.start_replicate.value() + self.replicates.value() - 1
+            )
             self.expected_array_tasks.setText(
                 f"{edge_count} edges × 2 legs × {self.replicates.value()} "
-                f"replicates = {total} HREX groups; {windows} lambda replicas/group; "
+                f"replicates (rep_{self.start_replicate.value()}–"
+                f"rep_{last_replicate}) = {total} HREX groups; "
+                f"{windows} lambda replicas/group; "
                 f"array 0-{total - 1}"
             )
         else:
             total = edge_count * 2 * self.replicates.value() * windows
+            last_replicate = (
+                self.start_replicate.value() + self.replicates.value() - 1
+            )
             self.expected_array_tasks.setText(
                 f"{edge_count} edges × 2 legs × {self.replicates.value()} replicates "
+                f"(rep_{self.start_replicate.value()}–rep_{last_replicate}) "
                 f"× {windows} windows = {total} tasks; array 0-{total - 1}"
             )
 
@@ -407,6 +416,9 @@ class LigandRBFEGromacsDialog(QDialog):
         self._update_box_override_controls()
         form.addRow(system_builder)
 
+        self.start_replicate = QSpinBox()
+        self.start_replicate.setRange(1, 1_000_000)
+        self.start_replicate.setValue(1)
         self.replicates = QSpinBox()
         self.replicates.setRange(1, 1000)
         self.replicates.setValue(1)
@@ -527,8 +539,6 @@ class LigandRBFEGromacsDialog(QDialog):
         )
         self.conda_init = QLineEdit()
         self.conda_environment = QLineEdit()
-        self.slurm_log_output = QLineEdit("logs/%A_%a.out")
-        self.slurm_log_error = QLineEdit("logs/%A_%a.err")
         self.expected_array_tasks = QLabel("Select or create a ligand network")
         self.expected_array_tasks.setToolTip(
             "Edges × 2 thermodynamic legs × replicates × lambda windows"
@@ -567,6 +577,7 @@ class LigandRBFEGromacsDialog(QDialog):
         lambda_layout.addRow("Sampling method:", self.sampling_method)
         self.exchange_interval_label = QLabel("HREX exchange interval:")
         lambda_layout.addRow(self.exchange_interval_label, self.exchange_interval)
+        lambda_layout.addRow("Start replicate:", self.start_replicate)
         lambda_layout.addRow("Replicates:", self.replicates)
         lambda_layout.addRow("Lambda schedule:", self.lambda_schedule_mode)
         lambda_layout.addRow("Lambda windows:", self.lambda_windows)
@@ -750,8 +761,6 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("Walltime:", self.walltime)
         form.addRow("Conda initialization:", self.conda_init)
         form.addRow("Conda environment:", self.conda_environment)
-        form.addRow("Slurm stdout:", self.slurm_log_output)
-        form.addRow("Slurm stderr:", self.slurm_log_error)
         form.addRow("Expected array tasks:", self.expected_array_tasks)
         form.addRow(
             "Execution worker:",
@@ -809,6 +818,9 @@ class LigandRBFEGromacsDialog(QDialog):
             self._update_sampling_method
         )
         self.replicates.valueChanged.connect(self._update_expected_array_tasks)
+        self.start_replicate.valueChanged.connect(
+            self._update_expected_array_tasks
+        )
         self.coul_lambdas.textChanged.connect(self._update_expected_array_tasks)
         self.network_bundle.editingFinished.connect(
             self._update_expected_array_tasks
@@ -866,6 +878,7 @@ class LigandRBFEGromacsDialog(QDialog):
             "membrane_box_angles": "Box angles alpha, beta, gamma in degrees.",
             "sampling_method": "Independent runs one job per lambda window; HREX exchanges configurations between lambda Hamiltonians.",
             "exchange_interval": "Number of MD steps between neighboring Hamiltonian-exchange attempts during HREX production.",
+            "start_replicate": "First replicate identifier. For example, start 3 with 3 replicates creates rep_3, rep_4, and rep_5.",
             "replicates": "Independent repeats per edge and thermodynamic leg, initialized separately.",
             "lambda_schedule_mode": "Generated constructs a schedule automatically; manual uses the four explicit lambda vectors below.",
             "lambda_windows": "Number of alchemical states between ligand A and ligand B.",
@@ -906,8 +919,6 @@ class LigandRBFEGromacsDialog(QDialog):
             "walltime": "Maximum scheduler runtime in HH:MM:SS form.",
             "conda_init": "Shell initialization script used before activating the calculation environment.",
             "conda_environment": "Conda environment name or absolute environment path.",
-            "slurm_log_output": "SLURM standard-output filename pattern; %A is job ID and %a is array index.",
-            "slurm_log_error": "SLURM standard-error filename pattern.",
             "expected_array_tasks": "Calculated scheduler workload from edges, legs, replicates, windows, and sampling method.",
             "worker_script": "Optional custom execution worker; leave blank to use the generated built-in runner.",
         }
@@ -2231,7 +2242,7 @@ class LigandRBFEGromacsDialog(QDialog):
                 else ""
             )
             + "\n"
-            "[simulation]\nstart_replicate = 1\n"
+            f"[simulation]\nstart_replicate = {self.start_replicate.value()}\n"
             f"replicates = {self.replicates.value()}\n"
             f"sampling_method = {json.dumps(str(self.sampling_method.currentData()))}\n"
             f"exchange_interval_steps = {self.exchange_interval.value()}\n"
@@ -2306,8 +2317,6 @@ class LigandRBFEGromacsDialog(QDialog):
             f"walltime = {json.dumps(self.walltime.text().strip())}\n"
             f"conda_init = {json.dumps(self.conda_init.text().strip())}\n"
             f"conda_environment = {json.dumps(self.conda_environment.text().strip())}\n"
-            f"log_output = {json.dumps(self.slurm_log_output.text().strip())}\n"
-            f"log_error = {json.dumps(self.slurm_log_error.text().strip())}\n"
         )
         path.write_text(text, encoding="utf-8")
         return path

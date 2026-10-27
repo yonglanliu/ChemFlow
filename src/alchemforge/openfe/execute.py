@@ -100,9 +100,15 @@ def execute(config: OpenFEExecutionConfig) -> list[Path]:
 
 def load_config(path: Path) -> OpenFEExecutionConfig:
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    base = path.expanduser().resolve().parent
+
+    def resolve_config_path(value: str) -> Path:
+        candidate = Path(value).expanduser()
+        return candidate if candidate.is_absolute() else base / candidate
+
     return OpenFEExecutionConfig(
-        json_directory=Path(payload["json_directory"]),
-        output_directory=Path(payload["output_directory"]),
+        json_directory=resolve_config_path(payload["json_directory"]),
+        output_directory=resolve_config_path(payload["output_directory"]),
         max_parallel=int(payload.get("max_parallel", 3)),
         openfe_command=str(payload.get("openfe_command", "openfe")),
         resume=bool(payload.get("resume", True)),

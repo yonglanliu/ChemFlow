@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -182,15 +183,45 @@ class OpenFEWorkflowConfig:
 def stage(config: OpenFEWorkflowConfig) -> tuple[Path, Path]:
     config.validate()
     config.task_directory.mkdir(parents=True, exist_ok=True)
+    inputs_dir = config.task_directory / "inputs"
+    inputs_dir.mkdir(exist_ok=True)
+    staged_inputs = {
+        "protein_pdb": (config.protein_pdb, inputs_dir / "protein.pdb"),
+        "ligand_sdf": (config.ligand_sdf, inputs_dir / "ligands.sdf"),
+    }
+    if config.cofactor_sdf is not None:
+        staged_inputs["cofactor_sdf"] = (
+            config.cofactor_sdf,
+            inputs_dir / "cofactor.sdf",
+        )
+    if config.ligand_network_graphml is not None:
+        staged_inputs["ligand_network_graphml"] = (
+            config.ligand_network_graphml,
+            inputs_dir / "ligand_network.graphml",
+        )
+    for source, destination in staged_inputs.values():
+        if source.resolve() != destination.resolve():
+            shutil.copy2(source, destination)
+
+    payload = config.payload()
+    payload.update(
+        {
+            key: str(destination.relative_to(config.task_directory))
+            for key, (_source, destination) in staged_inputs.items()
+        }
+    )
+    payload.update({"workdir": ".", "json_dir": "json"})
     config_path = config.task_directory / f"{config.workflow}_conf.yaml"
     config_path.write_text(
-        yaml.safe_dump(config.payload(), sort_keys=False), encoding="utf-8"
+        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
     )
     runner = config.task_directory / "run_openfe_workflow.sh"
     module = f"alchemforge.openfe.{config.workflow}.create_json"
     runner.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        'PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'cd "${PROJECT_DIR}"\n'
         'CONFIG="${1:?Usage: $0 /path/to/config.yaml}"\n'
         f'python -m {shlex.quote(module)} --conf_file "${{CONFIG}}"\n',
         encoding="utf-8",
@@ -205,8 +236,8 @@ def stage(config: OpenFEWorkflowConfig) -> tuple[Path, Path]:
     execution_config.write_text(
         yaml.safe_dump(
             {
-                "json_directory": str((config.task_directory / "json").resolve()),
-                "output_directory": str((config.task_directory / "results").resolve()),
+                "json_directory": "json",
+                "output_directory": "results",
                 "max_parallel": config.max_parallel_jobs,
                 "openfe_command": "openfe",
                 "resume": True,
@@ -236,10 +267,13 @@ def stage(config: OpenFEWorkflowConfig) -> tuple[Path, Path]:
         "#!/usr/bin/env bash\n"
         f"#SBATCH --job-name={config.job_name}_generate\n"
         + resources
-        + f"#SBATCH --output={logs_dir}/generate_%j.out\n"
-        + f"#SBATCH --error={logs_dir}/generate_%j.err\n"
+        + "#SBATCH --output=logs/generate_%j.out\n"
+        + "#SBATCH --error=logs/generate_%j.err\n"
         + "set -euo pipefail\n"
-        + f"{shlex.quote(str(runner))} {shlex.quote(str(config_path))}\n",
+        + 'PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\n'
+        + 'cd "${PROJECT_DIR}"\n'
+        + 'echo "OpenFE generation started on $(hostname) at $(date -Is)"\n'
+        + f"./{runner.name} ./{config_path.name}\n",
         encoding="utf-8",
     )
     generate_job.chmod(generate_job.stat().st_mode | 0o100)
@@ -249,11 +283,14 @@ def stage(config: OpenFEWorkflowConfig) -> tuple[Path, Path]:
         "#!/usr/bin/env bash\n"
         f"#SBATCH --job-name={config.job_name}_openfe\n"
         + resources
-        + f"#SBATCH --output={logs_dir}/openfe_%j.out\n"
-        + f"#SBATCH --error={logs_dir}/openfe_%j.err\n"
+        + "#SBATCH --output=logs/openfe_%j.out\n"
+        + "#SBATCH --error=logs/openfe_%j.err\n"
         + "set -euo pipefail\n"
+        + 'PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\n'
+        + 'cd "${PROJECT_DIR}"\n'
+        + 'echo "OpenFE simulations started on $(hostname) at $(date -Is)"\n'
         + "python -m alchemforge.openfe.execute --config "
-        + f"{shlex.quote(str(execution_config))}\n",
+        + f"./{execution_config.name}\n",
         encoding="utf-8",
     )
     execute_job.chmod(execute_job.stat().st_mode | 0o100)
@@ -262,9 +299,12 @@ def stage(config: OpenFEWorkflowConfig) -> tuple[Path, Path]:
     submit.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        f"generation_job_id=$(sbatch --parsable {shlex.quote(str(generate_job))})\n"
+        'PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'cd "${PROJECT_DIR}"\n'
+        "mkdir -p logs\n"
+        f"generation_job_id=$(sbatch --parsable slurm/{generate_job.name})\n"
         'echo "Submitted transformation generation: ${generation_job_id}"\n'
-        f"simulation_job_id=$(sbatch --parsable --dependency=afterok:${{generation_job_id}} {shlex.quote(str(execute_job))})\n"
+        f"simulation_job_id=$(sbatch --parsable --dependency=afterok:${{generation_job_id}} slurm/{execute_job.name})\n"
         'echo "Submitted OpenFE simulations: ${simulation_job_id}"\n',
         encoding="utf-8",
     )

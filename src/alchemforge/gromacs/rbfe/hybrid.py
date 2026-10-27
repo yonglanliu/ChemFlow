@@ -371,7 +371,8 @@ def _restraint_block(
     force_symbol: str,
 ) -> str:
     rows = "\n".join(
-        f"{index:6d} 1 {force_symbol} {force_symbol} {force_symbol}"
+        f"{index:6d} 1 {force_symbol} {force_symbol} {force_symbol} "
+        f"{force_symbol} {force_symbol} {force_symbol}"
         for index in indices
     )
     return (
@@ -380,7 +381,7 @@ def _restraint_block(
         f"#define {force_symbol} {force:g}\n"
         "#endif\n"
         "[ position_restraints ]\n"
-        "; atom  type      fx      fy      fz\n"
+        "; atom  type      fxA     fyA     fzA     fxB     fyB     fzB\n"
         f"{rows}\n"
         "#endif\n"
     )
@@ -444,9 +445,10 @@ def _write_ligand_position_restraints(
         f"#define POSRES_LIG_FC {force:g}\n"
         "#endif\n"
         "[ position_restraints ]\n"
-        "; atom  type      fx      fy      fz\n"
+        "; atom  type      fxA     fyA     fzA     fxB     fyB     fzB\n"
         + "\n".join(
-            f"{index:6d} 1 POSRES_LIG_FC POSRES_LIG_FC POSRES_LIG_FC"
+            f"{index:6d} 1 POSRES_LIG_FC POSRES_LIG_FC POSRES_LIG_FC "
+            "POSRES_LIG_FC POSRES_LIG_FC POSRES_LIG_FC"
             for index in indices
         )
         + "\n",
@@ -760,8 +762,11 @@ def _alchemize_base_ions(text: str, atom_indices: list[int]) -> str:
     restraints = (
         "; AlchemForge: restrain farthest alchemical co-ion(s)\n"
         "[ position_restraints ]\n"
-        "; ai funct fcx fcy fcz\n"
-        + "\n".join(f"{atom} 1 1000 1000 1000" for atom in atom_indices)
+        "; ai funct fcxA fcyA fczA fcxB fcyB fczB\n"
+        + "\n".join(
+            f"{atom} 1 1000 1000 1000 1000 1000 1000"
+            for atom in atom_indices
+        )
         + "\n\n"
     )
     return text[: system_section.start()] + restraints + text[system_section.start() :]

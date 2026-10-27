@@ -25,15 +25,6 @@ def _directive(value: str, label: str) -> str:
     return value
 
 
-def _slurm_log_path(config: LigandRBFEConfig, value: str) -> str:
-    """Resolve a Slurm log pattern against the project, not the submit shell."""
-
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = config.project_dir / path
-    return str(path.resolve(strict=False))
-
-
 def render_slurm_array_script(
     config: LigandRBFEConfig, *, expected_tasks: int
 ) -> str:
@@ -70,8 +61,6 @@ def render_slurm_array_script(
         + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
-        + f"#SBATCH --output={_directive(_slurm_log_path(config, config.slurm_log_output), 'Log output')}\n"
-        + f"#SBATCH --error={_directive(_slurm_log_path(config, config.slurm_log_error), 'Log error')}\n"
         + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
@@ -121,8 +110,12 @@ def render_slurm_array_script(
         + '        if [[ -n "$checkpoint" && -s "$checkpoint" ]]; then\n'
         + '            grompp_args+=( -t "$checkpoint" )\n'
         + "        fi\n"
-        + '        "${GMX_COMMAND[@]}" "${grompp_args[@]}"\n'
+        + '        if ! "${GMX_COMMAND[@]}" "${grompp_args[@]}"; then\n'
+        + '            echo "ERROR: grompp failed for ${stage}; ${stage}.tpr was not created" >&2\n'
+        + "            exit 1\n"
+        + "        fi\n"
         + "    fi\n"
+        + '    [[ -s "${stage}.tpr" ]] || { echo "ERROR: Missing ${stage}.tpr after grompp" >&2; exit 1; }\n'
         + '    mdrun_args=( mdrun -s "${stage}.tpr" -deffnm "$stage" '
         + '"${MDRUN_COMMON[@]}" )\n'
         + '    if [[ -s "${stage}.cpt" ]]; then\n'
@@ -195,8 +188,6 @@ def render_slurm_hrex_script(
         + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
-        + f"#SBATCH --output={_directive(_slurm_log_path(config, config.slurm_log_output), 'Log output')}\n"
-        + f"#SBATCH --error={_directive(_slurm_log_path(config, config.slurm_log_error), 'Log error')}\n"
         + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
@@ -250,7 +241,11 @@ def render_slurm_hrex_script(
         + '        [[ "$previous" != "BASE" ]] && coordinates="$replica/${previous}.gro"\n'
         + '        args=( grompp -f "$replica/${stage}.mdp" -c "$coordinates" -r "$BASE_GRO" -p "$TOPOLOGY" -o "$replica/${stage}.tpr" )\n'
         + '        if [[ -n "$checkpoint" && -s "$replica/${checkpoint}.cpt" ]]; then args+=( -t "$replica/${checkpoint}.cpt" ); fi\n'
-        + '        "${GMX_PREP_COMMAND[@]}" "${args[@]}"\n'
+        + '        if ! "${GMX_PREP_COMMAND[@]}" "${args[@]}"; then\n'
+        + '            echo "ERROR: grompp failed for $replica/${stage}" >&2\n'
+        + "            exit 1\n"
+        + "        fi\n"
+        + '        [[ -s "$replica/${stage}.tpr" ]] || { echo "ERROR: Missing $replica/${stage}.tpr after grompp" >&2; exit 1; }\n'
         + "    done\n"
         + "}\n\n"
         + "run_replicas() {\n"
@@ -324,10 +319,6 @@ def write_slurm_array_files(
     """Write the production task manifest, array runner, and submit helper."""
     project = config.project_dir
     project.mkdir(parents=True, exist_ok=True)
-    for pattern in (config.slurm_log_output, config.slurm_log_error):
-        Path(_slurm_log_path(config, pattern)).parent.mkdir(
-            parents=True, exist_ok=True
-        )
     expected_tasks = edge_count * config.tasks_per_edge
     task_kind = "lambda_groups" if config.sampling_method == "hrex" else "windows"
     task_formula = (
@@ -374,7 +365,6 @@ def write_slurm_array_files(
         f"TASK_FILE={shlex.quote(str(task_file))}\n"
         f"ARRAY_SCRIPT={shlex.quote(str(array_script))}\n"
         f"EXPECTED_TASKS={expected_tasks}\n\n"
-        'mkdir -p "$PROJECT_DIR/logs"\n'
         'N_TASKS="$(awk \'NF {count++} END {print count+0}\' "$TASK_FILE")"\n'
         'if (( N_TASKS == 0 )); then\n'
         '    echo "ERROR: The FEP task manifest is empty: $TASK_FILE" >&2\n'
@@ -389,7 +379,12 @@ def write_slurm_array_files(
         'cd "$PROJECT_DIR"\n'
         'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
         f'echo "Submitting $N_TASKS six-stage FEP {task_kind} as array $ARRAY_SPEC"\n'
-        'sbatch --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE"\n',
+        'SUBMISSION="$(sbatch --parsable --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
+        'JOB_ID="${SUBMISSION%%;*}"\n'
+        'echo "Submitted job array: $JOB_ID ($ARRAY_SPEC)"\n'
+        'echo "Combined output: $PROJECT_DIR/slurm-${JOB_ID}_<array-index>.out"\n'
+        'echo "Inspect: sacct -X -j $JOB_ID --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
+        'echo "Paths: scontrol show job $JOB_ID | grep -E \'StdOut=|StdErr=|WorkDir=|Command=|Reason=\'"\n',
         encoding="utf-8",
     )
     submit_script.chmod(submit_script.stat().st_mode | 0o100)

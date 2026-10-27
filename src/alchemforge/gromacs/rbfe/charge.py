@@ -118,8 +118,8 @@ def _coion_itp(ion: str, force_field: str) -> tuple[str, str]:
         f"1 {atom_type} 1 {residue} {residue} 1 {charge:.1f} {mass:.5f} "
         f"{atom_type} 0.0 {mass:.5f}\n"
         "\n[ position_restraints ]\n"
-        "; ai funct fcx fcy fcz; keep the alchemical ion away from the solute\n"
-        "1 1 1000 1000 1000\n"
+        "; ai funct fcxA fcyA fczA fcxB fcyB fczB; keep ion away from solute\n"
+        "1 1 1000 1000 1000 1000 1000 1000\n"
     )
     return residue, text
 

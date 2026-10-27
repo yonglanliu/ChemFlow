@@ -132,5 +132,3 @@ walltime = "24:00:00"
 # job environment, or set them locally in the desktop Job Setting tab.
 conda_init = ""
 conda_environment = ""
-log_output = "logs/%A_%a.out"
-log_error = "logs/%A_%a.err"

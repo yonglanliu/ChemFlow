@@ -244,8 +244,6 @@ class LigandRBFEConfig:
     slurm_walltime: str
     slurm_conda_init: str
     slurm_conda_environment: str
-    slurm_log_output: str
-    slurm_log_error: str
     mdp_integrator: str
     mdp_constraints: str
     mdp_coulomb_cutoff_nm: float
@@ -656,8 +654,6 @@ class LigandRBFEConfig:
                     "",
                 )
             ),
-            slurm_log_output=str(slurm.get("log_output", "logs/%A_%a.out")),
-            slurm_log_error=str(slurm.get("log_error", "logs/%A_%a.err")),
             mdp_integrator=_choice(
                 mdp.get("integrator", "sd"), "[mdp].integrator", {"sd", "md"}
             ),
@@ -828,8 +824,6 @@ class LigandRBFEConfig:
             "FEP_WALLTIME": self.slurm_walltime,
             "FEP_CONDA_INIT": self.slurm_conda_init,
             "FEP_CONDA_ENVIRONMENT": self.slurm_conda_environment,
-            "FEP_LOG_OUTPUT": self.slurm_log_output,
-            "FEP_LOG_ERROR": self.slurm_log_error,
             "RBFE_MDP_DIR": str(project_dir / "mdp"),
             "RBFE_MDP_TEMPLATE": str(project_dir / "mdp" / "prod.mdp"),
             "RBFE_COMPLEX_MDP_DIR": str(project_dir / "mdp" / "complex"),
