@@ -17,6 +17,20 @@ class TorchGPUCheckResult:
     detail: str
 
 
+def _torch_import_failure(error: ImportError) -> TorchGPUCheckResult:
+    message = str(error).strip() or repr(error)
+    if "GLIBCXX_" in message and "libstdc++.so.6" in message:
+        return TorchGPUCheckResult(
+            False,
+            "PyTorch import failed because an incompatible system libstdc++.so.6 "
+            "was loaded. Ensure the environment contains libstdcxx-ng and put "
+            "$CONDA_PREFIX/lib before system library directories in "
+            "LD_LIBRARY_PATH. Original error: "
+            + message,
+        )
+    return TorchGPUCheckResult(False, f"PyTorch import failed: {message}")
+
+
 def _positive_integer(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -34,7 +48,7 @@ def test_torch_gpu(
     try:
         import torch
     except ImportError as error:
-        return TorchGPUCheckResult(False, f"PyTorch is not installed: {error}")
+        return _torch_import_failure(error)
 
     if not torch.cuda.is_available():
         return TorchGPUCheckResult(

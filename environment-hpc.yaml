@@ -7,6 +7,10 @@ channels:
 dependencies:
   - python=3.11
   - pip
+  # Keep compiled Python extensions on the Conda C/C++ runtime instead of an
+  # older system libstdc++ on enterprise Linux clusters.
+  - libgcc-ng>=12
+  - libstdcxx-ng>=12
   # Hugging Face Graphormer's legacy preprocessing extension requires Cython <3.
   - cython=0.29.37
 
