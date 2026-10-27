@@ -25,6 +25,15 @@ def _directive(value: str, label: str) -> str:
     return value
 
 
+def _slurm_log_path(config: LigandRBFEConfig, value: str) -> str:
+    """Resolve a Slurm log pattern against the project, not the submit shell."""
+
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = config.project_dir / path
+    return str(path.resolve(strict=False))
+
+
 def render_slurm_array_script(
     config: LigandRBFEConfig, *, expected_tasks: int
 ) -> str:
@@ -61,8 +70,8 @@ def render_slurm_array_script(
         + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
-        + f"#SBATCH --output={_directive(config.slurm_log_output, 'Log output')}\n"
-        + f"#SBATCH --error={_directive(config.slurm_log_error, 'Log error')}\n"
+        + f"#SBATCH --output={_directive(_slurm_log_path(config, config.slurm_log_output), 'Log output')}\n"
+        + f"#SBATCH --error={_directive(_slurm_log_path(config, config.slurm_log_error), 'Log error')}\n"
         + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
@@ -92,6 +101,11 @@ def render_slurm_array_script(
         + 'echo "Visible GPU(s):  ${CUDA_VISIBLE_DEVICES:-not set}"\n'
         + "nvidia-smi --query-gpu=index,name,uuid --format=csv,noheader\n\n"
         + f"GMX_COMMAND=( {gmx_command} )\n"
+        + 'if ! command -v "${GMX_COMMAND[0]}" >/dev/null 2>&1; then\n'
+        + '    echo "ERROR: GROMACS executable not found: ${GMX_COMMAND[0]}" >&2\n'
+        + '    echo "Set the GROMACS command in Job Setting to an installed executable (usually gmx)." >&2\n'
+        + "    exit 127\n"
+        + "fi\n"
         + f"MDRUN_COMMON=( -ntomp \"$OMP_NUM_THREADS\" {mdrun_options} )\n\n"
         + "run_stage() {\n"
         + '    local stage="$1"\n'
@@ -181,8 +195,8 @@ def render_slurm_hrex_script(
         + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
-        + f"#SBATCH --output={_directive(config.slurm_log_output, 'Log output')}\n"
-        + f"#SBATCH --error={_directive(config.slurm_log_error, 'Log error')}\n"
+        + f"#SBATCH --output={_directive(_slurm_log_path(config, config.slurm_log_output), 'Log output')}\n"
+        + f"#SBATCH --error={_directive(_slurm_log_path(config, config.slurm_log_error), 'Log error')}\n"
         + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
@@ -207,7 +221,21 @@ def render_slurm_hrex_script(
         + '[[ -s "$BASE_GRO" && -s "$TOPOLOGY" ]] || { echo "ERROR: Missing leg setup" >&2; exit 1; }\n\n'
         + f"GMX_PREP_COMMAND=( {prep_command} )\n"
         + f"GMX_COMMAND=( {gmx_command} )\n"
-        + 'GMX_VERSION="$("${GMX_COMMAND[@]}" --version 2>&1)"\n'
+        + 'if ! command -v "${GMX_PREP_COMMAND[0]}" >/dev/null 2>&1; then\n'
+        + '    echo "ERROR: GROMACS preparation executable not found: ${GMX_PREP_COMMAND[0]}" >&2\n'
+        + '    echo "Set the GROMACS command in Job Setting to an installed executable (usually gmx)." >&2\n'
+        + "    exit 127\n"
+        + "fi\n"
+        + 'if ! command -v "${GMX_COMMAND[0]}" >/dev/null 2>&1; then\n'
+        + '    echo "ERROR: HREX executable not found: ${GMX_COMMAND[0]}" >&2\n'
+        + '    echo "HREX requires an external-MPI GROMACS build, normally gmx_mpi." >&2\n'
+        + "    exit 127\n"
+        + "fi\n"
+        + 'if ! GMX_VERSION="$("${GMX_COMMAND[@]}" --version 2>&1)"; then\n'
+        + '    echo "ERROR: Could not run ${GMX_COMMAND[*]} --version" >&2\n'
+        + '    echo "$GMX_VERSION" >&2\n'
+        + "    exit 1\n"
+        + "fi\n"
         + 'if grep -Eqi "MPI version:.*built in" <<<"$GMX_VERSION"; then\n'
         + '    echo "ERROR: Lambda-HREX requires an external-MPI GROMACS build (normally gmx_mpi); thread-MPI is not supported by -multidir." >&2\n'
         + "    exit 1\n"
@@ -296,7 +324,10 @@ def write_slurm_array_files(
     """Write the production task manifest, array runner, and submit helper."""
     project = config.project_dir
     project.mkdir(parents=True, exist_ok=True)
-    (project / "logs").mkdir(parents=True, exist_ok=True)
+    for pattern in (config.slurm_log_output, config.slurm_log_error):
+        Path(_slurm_log_path(config, pattern)).parent.mkdir(
+            parents=True, exist_ok=True
+        )
     expected_tasks = edge_count * config.tasks_per_edge
     task_kind = "lambda_groups" if config.sampling_method == "hrex" else "windows"
     task_formula = (

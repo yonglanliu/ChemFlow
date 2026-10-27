@@ -409,6 +409,12 @@ def render_rbfe_stage_mdp(
         ):
             if force > 0:
                 macros.extend((f"-D{macro}", f"-D{symbol}={force:g}"))
+        # Membrane-complex lipids follow the protein restraint ramp. Solvent
+        # legs pass membrane=False and never activate this topology block.
+        if membrane and forces[0] > 0:
+            macros.extend(
+                ("-DPOSRES_LIPID", f"-DPOSRES_LIPID_FC={forces[0]:g}")
+            )
         return " ".join(macros)
 
     if stage == "mini":

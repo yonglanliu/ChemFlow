@@ -26,6 +26,15 @@ _PROTEIN_RESIDUES = {
     "SER", "THR", "TRP", "TYR", "VAL",
 }
 
+_LIPID_RESIDUES = {
+    # Amber Lipid14/17/21 split-residue representation.
+    "PA", "PC", "OL", "PE", "PS", "PG", "PI", "CHL",
+    # Common unsplit Amber/CHARMM/GROMACS residue names.
+    "POPC", "POPE", "POPS", "POPG", "DPPC", "DOPC", "DOPE",
+    "DLPC", "DMPC", "DSPC", "SDPC", "SOPC", "POPI", "PIP2",
+    "CHOL", "CER", "SM",
+}
+
 
 @dataclass(frozen=True)
 class PreparedLigand:
@@ -377,6 +386,44 @@ def _restraint_block(
     )
 
 
+def _inline_moleculetype_spans(text: str) -> list[tuple[int, int]]:
+    """Return spans for molecule types defined directly in a topology."""
+    starts = list(re.finditer(r"(?im)^\s*\[\s*moleculetype\s*\]", text))
+    system = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
+    limit = system.start() if system is not None else len(text)
+    spans: list[tuple[int, int]] = []
+    for index, match in enumerate(starts):
+        if match.start() >= limit:
+            continue
+        end = starts[index + 1].start() if index + 1 < len(starts) else limit
+        spans.append((match.start(), min(end, limit)))
+    return spans
+
+
+def _moleculetype_name(text: str) -> str:
+    """Read a molecule name from one inline moleculetype span."""
+    in_section = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        section = re.fullmatch(r"\[\s*([^]]+?)\s*]", stripped)
+        if section:
+            in_section = section.group(1).casefold() == "moleculetype"
+            continue
+        if in_section and stripped and not stripped.startswith((";", "#")):
+            return stripped.split()[0]
+    return ""
+
+
+def _insert_restraint_blocks(
+    text: str,
+    blocks: list[tuple[int, str]],
+) -> str:
+    """Insert blocks at stable offsets, working from the end of the topology."""
+    for position, block in sorted(blocks, reverse=True):
+        text = text[:position] + block.rstrip() + "\n\n" + text[position:]
+    return text
+
+
 def _write_ligand_position_restraints(
     merged_itp: Path,
     output: Path,
@@ -415,30 +462,36 @@ def _add_cofactor_restraints(
     atom_names: tuple[str, ...] = (),
 ) -> str:
     """Attach conditional heavy-atom restraints to monolithic or included cofactors."""
-    names = {name.upper() for name in residue_names}
-    if not names:
-        return text
+    # System preparation standardizes an explicitly parameterized cofactor to
+    # COF. Keep user-provided residue names too, so an unrenamed component is
+    # handled identically.
+    names = {name.upper() for name in residue_names} | {"COF"}
 
-    # A ParmEd/tleap topology often stores protein and cofactors in one
-    # moleculetype. Insert the cofactor atom restraints before [ system ].
-    indices = _heavy_atom_indices(
-        text, names, atom_names=set(atom_names) or None
-    )
-    if indices:
-        system = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
-        if system is None:
-            raise ValueError("Base topology has no [ system ] section")
-        text = (
-            text[: system.start()]
-            + _restraint_block(
-                indices,
-                "POSRES_COFACTOR",
-                force,
-                "POSRES_COFACTOR_FC",
-            )
-            + "\n"
-            + text[system.start() :]
+    blocks: list[tuple[int, str]] = []
+    for start, end in _inline_moleculetype_spans(text):
+        span = text[start:end]
+        molecule_name = _moleculetype_name(span).upper()
+        selected_names = None if molecule_name in names else names
+        indices = _heavy_atom_indices(
+            span,
+            selected_names,
+            atom_names=set(atom_names) or None,
         )
+        if indices and not re.search(
+            r"(?m)^\s*#\s*ifdef\s+POSRES_COFACTOR\b", span
+        ):
+            blocks.append(
+                (
+                    end,
+                    _restraint_block(
+                        indices,
+                        "POSRES_COFACTOR",
+                        force,
+                        "POSRES_COFACTOR_FC",
+                    ),
+                )
+            )
+    text = _insert_restraint_blocks(text, blocks)
 
     # A component topology may keep the cofactor in a directly included ITP.
     # Placing the restraint block immediately after that include associates it
@@ -481,28 +534,48 @@ def _add_protein_restraints(
     residue_ids: tuple[int, ...] = (),
     atom_names: tuple[str, ...] = (),
 ) -> str:
-    """Add protein heavy-atom restraints for monolithic Amber topologies."""
-    if re.search(r"(?m)^\s*#\s*ifdef\s+POSRES\b", text):
-        return text
-    indices = _heavy_atom_indices(
-        text,
-        _PROTEIN_RESIDUES,
-        set(residue_ids) or None,
-        set(atom_names) or None,
-    )
-    if not indices:
-        # Component/pdb2gmx topologies normally provide their own POSRES block;
-        # the stage MDP enables it with -DPOSRES.
-        return text
-    system = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
-    if system is None:
-        raise ValueError("Base topology has no [ system ] section")
-    return (
-        text[: system.start()]
-        + _restraint_block(indices, "POSRES", force, "POSRES_FC")
-        + "\n"
-        + text[system.start() :]
-    )
+    """Attach protein restraints to each inline protein molecule type."""
+    blocks: list[tuple[int, str]] = []
+    for start, end in _inline_moleculetype_spans(text):
+        span = text[start:end]
+        if re.search(r"(?m)^\s*#\s*ifdef\s+POSRES\b", span):
+            continue
+        indices = _heavy_atom_indices(
+            span,
+            _PROTEIN_RESIDUES,
+            set(residue_ids) or None,
+            set(atom_names) or None,
+        )
+        if indices:
+            blocks.append(
+                (end, _restraint_block(indices, "POSRES", force, "POSRES_FC"))
+            )
+    # Component/pdb2gmx topologies normally provide their own POSRES block in
+    # an included ITP. Only direct molecule definitions need injection here.
+    return _insert_restraint_blocks(text, blocks)
+
+
+def _add_lipid_restraints(text: str, force: float) -> str:
+    """Attach complex-only heavy-atom restraints to inline lipid molecules."""
+    blocks: list[tuple[int, str]] = []
+    for start, end in _inline_moleculetype_spans(text):
+        span = text[start:end]
+        if re.search(r"(?m)^\s*#\s*ifdef\s+POSRES_LIPID\b", span):
+            continue
+        indices = _heavy_atom_indices(span, _LIPID_RESIDUES)
+        if indices:
+            blocks.append(
+                (
+                    end,
+                    _restraint_block(
+                        indices,
+                        "POSRES_LIPID",
+                        force,
+                        "POSRES_LIPID_FC",
+                    ),
+                )
+            )
+    return _insert_restraint_blocks(text, blocks)
 
 
 def _atomtype_definitions(path: Path) -> dict[str, str]:
@@ -718,6 +791,7 @@ def _inject_complex_topology(
         protein_residue_ids,
         protein_atom_names,
     )
+    text = _add_lipid_restraints(text, protein_restraint_force)
     text = _add_cofactor_restraints(
         text,
         source,
@@ -808,9 +882,6 @@ def _write_solvent_topology(
         f'#include "{hybrid_include_prefix}/solvent_atomtypes.itp"',
         f'#include "{hybrid_include_prefix}/ffmerged.itp"',
         f'#include "{hybrid_include_prefix}/merged.itp"',
-        "#ifdef POSRES_LIG",
-        f'#include "{hybrid_include_prefix}/posre_ligand.itp"',
-        "#endif",
     ]
     lines.extend(
         [
