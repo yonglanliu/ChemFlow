@@ -178,6 +178,21 @@ def render_slurm_hrex_script(
     prep_command = " ".join(
         shlex.quote(part) for part in shlex.split(config.gmx)
     )
+    module_load = ""
+    if config.hrex_module.strip():
+        module_name = _directive(config.hrex_module.strip(), "HREX module")
+        module_load = (
+            'if ! type module >/dev/null 2>&1; then\n'
+            '    echo "ERROR: The environment-modules command is unavailable; '
+            f'cannot load {shlex.quote(module_name)}." >&2\n'
+            "    exit 127\n"
+            "fi\n"
+            f"module load {shlex.quote(module_name)}\n"
+        )
+    if config.hrex_mpi_launcher == "mpirun":
+        mpi_launcher = 'MPI_LAUNCHER=( mpirun -np "$REPLICA_COUNT" )\n'
+    else:
+        mpi_launcher = 'MPI_LAUNCHER=( srun --ntasks="$REPLICA_COUNT" )\n'
     return (
         "#!/bin/bash\n"
         f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}_hrex\n"
@@ -195,6 +210,7 @@ def render_slurm_hrex_script(
         + f"EXPECTED_REPLICAS={config.lambda_windows}\n"
         + f"EXCHANGE_INTERVAL={config.exchange_interval_steps}\n\n"
         + activation
+        + module_load
         + 'FEP_DIR="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n'
         + '[[ -d "$FEP_DIR" ]] || { echo "ERROR: Missing HREX directory: $FEP_DIR" >&2; exit 1; }\n'
         + 'mapfile -t REPLICA_DIRS < <(find "$FEP_DIR" -maxdepth 1 -type d '
@@ -204,6 +220,7 @@ def render_slurm_hrex_script(
         + '    echo "ERROR: Found $REPLICA_COUNT lambda replicas; expected $EXPECTED_REPLICAS" >&2\n'
         + "    exit 1\n"
         + "fi\n"
+        + mpi_launcher
         + f'OMP_PER_REPLICA="${{SLURM_CPUS_PER_TASK:-{config.slurm_cpus_per_task}}}"\n'
         + 'export OMP_NUM_THREADS="$OMP_PER_REPLICA"\n'
         + 'LEG_DIR="$(dirname "$(dirname "$FEP_DIR")")"\n'
@@ -220,6 +237,10 @@ def render_slurm_hrex_script(
         + 'if ! command -v "${GMX_COMMAND[0]}" >/dev/null 2>&1; then\n'
         + '    echo "ERROR: HREX executable not found: ${GMX_COMMAND[0]}" >&2\n'
         + '    echo "HREX requires an external-MPI GROMACS build, normally gmx_mpi." >&2\n'
+        + "    exit 127\n"
+        + "fi\n"
+        + 'if ! command -v "${MPI_LAUNCHER[0]}" >/dev/null 2>&1; then\n'
+        + '    echo "ERROR: HREX MPI launcher not found: ${MPI_LAUNCHER[0]}" >&2\n'
         + "    exit 127\n"
         + "fi\n"
         + 'if ! GMX_VERSION="$("${GMX_COMMAND[@]}" --version 2>&1)"; then\n'
@@ -255,7 +276,7 @@ def render_slurm_hrex_script(
         + '    args=( mdrun -multidir "${REPLICA_DIRS[@]}" -deffnm "$stage" "${MDRUN_COMMON[@]}" )\n'
         + '    [[ "$exchange" == "yes" ]] && args+=( -replex "$EXCHANGE_INTERVAL" )\n'
         + '    if [[ -s "${REPLICA_DIRS[0]}/${stage}.cpt" ]]; then args+=( -cpi "${stage}.cpt" -append ); fi\n'
-        + '    srun --ntasks="$REPLICA_COUNT" "${GMX_COMMAND[@]}" "${args[@]}"\n'
+        + '    "${MPI_LAUNCHER[@]}" "${GMX_COMMAND[@]}" "${args[@]}"\n'
         + "}\n\n"
         + 'echo "HREX group: $FEP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
         + 'prepare_stage em BASE\nrun_replicas em no\n'

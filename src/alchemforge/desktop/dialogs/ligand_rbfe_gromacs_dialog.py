@@ -195,6 +195,8 @@ class LigandRBFEGromacsDialog(QDialog):
         self.exchange_interval.setVisible(hrex)
         self.exchange_interval_label.setVisible(hrex)
         self.ntmpi.setEnabled(not hrex)
+        self.hrex_module.setEnabled(hrex)
+        self.hrex_mpi_launcher.setEnabled(hrex)
         self.hrex_gmx_command.setEnabled(hrex)
         self.tasks.setEnabled(not hrex)
         self.tasks.setValue(self.lambda_windows.value() if hrex else 1)
@@ -526,6 +528,35 @@ class LigandRBFEGromacsDialog(QDialog):
             "External-MPI GROMACS executable used only for lambda-HREX. System "
             "preparation continues to use gmx."
         )
+        self.hrex_module = QComboBox()
+        self.hrex_module.setEditable(True)
+        self.hrex_module.addItems(
+            [
+                "",
+                "gromacs/2026.3-gcc13.2",
+                "gromacs/2026.3-intel2024",
+                "gromacs/2024.4-gcc11.3",
+                "gromacs/2024.4-intel2022",
+                "gromacs/2024.4+plumed2.9.3",
+                "gromacs/2024.1-intel2024",
+                "gromacs/2024-intel2022",
+                "gromacs/2023.2-gcc9.2.0",
+                "gromacs/2023.2-intel2022",
+                "gromacs/2022.4",
+                "gromacs/2022.4+plumed2.8.2",
+                "gromacs/2021.3",
+            ]
+        )
+        self.hrex_module.setToolTip(
+            "Optional HPC environment module loaded only by HREX Slurm jobs. "
+            "The field is editable for modules not listed here."
+        )
+        self.hrex_mpi_launcher = QComboBox()
+        self.hrex_mpi_launcher.addItems(["mpirun", "srun"])
+        self.hrex_mpi_launcher.setToolTip(
+            "MPI launcher used to start all HREX replicas as one MPI universe. "
+            "Use mpirun for the listed OpenMPI GROMACS modules."
+        )
         self.gpus = QSpinBox()
         self.gpus.setRange(0, 16)
         self.gpus.setValue(1)
@@ -754,6 +785,8 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("Tasks per job:", self.tasks)
         form.addRow("CPUs per task:", self.cpus)
         form.addRow("GROMACS thread-MPI ranks:", self.ntmpi)
+        form.addRow("HREX GROMACS module:", self.hrex_module)
+        form.addRow("HREX MPI launcher:", self.hrex_mpi_launcher)
         form.addRow("HREX GROMACS command:", self.hrex_gmx_command)
         form.addRow("GPUs per job:", self.gpus)
         form.addRow("PME target:", self.pme_target)
@@ -773,7 +806,7 @@ class LigandRBFEGromacsDialog(QDialog):
             (
                 ("System", 6),
                 ("FEP Simulation", 1),
-                ("Job Setting", 14),
+                ("Job Setting", 16),
             ),
         )
         self.ligand_preparation = GromacsLigandPrepareDialog(
@@ -912,6 +945,8 @@ class LigandRBFEGromacsDialog(QDialog):
             "tasks": "SLURM tasks per independent-window job; HREX derives one MPI task per lambda replica.",
             "cpus": "CPU cores assigned to each SLURM task.",
             "ntmpi": "Thread-MPI ranks used by independent-window GROMACS runs.",
+            "hrex_module": "Optional HPC module loaded before HREX execution, for example gromacs/2026.3-gcc13.2.",
+            "hrex_mpi_launcher": "Starts all HREX replicas in one MPI universe; use mpirun for OpenMPI modules and srun only when the cluster supports direct MPI integration.",
             "hrex_gmx_command": "External-MPI GROMACS executable required for -multidir/-replex HREX, usually gmx_mpi.",
             "gpus": "GPUs requested for each SLURM array job.",
             "pme_target": "Run PME on CPU, GPU, or let GROMACS choose automatically.",
@@ -2287,6 +2322,8 @@ class LigandRBFEGromacsDialog(QDialog):
             f"calc_lambda_neighbors = {self.mdp_lambda_neighbors.value()}\n"
             f"nstdhdl = {self.mdp_nstdhdl.value()}\n\n"
             "[execution]\n"
+            f"hrex_module = {json.dumps(self.hrex_module.currentText().strip())}\n"
+            f"hrex_mpi_launcher = {json.dumps(self.hrex_mpi_launcher.currentText())}\n"
             f"hrex_gromacs_command = {json.dumps(self.hrex_gmx_command.text().strip())}\n"
             + (
                 "mdrun_options = "

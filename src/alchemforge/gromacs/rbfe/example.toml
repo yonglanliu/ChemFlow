@@ -115,6 +115,10 @@ nstdhdl = 100
 
 [execution]
 mdrun_options = ["-ntmpi", "1"]
+# Optional HPC module loaded only for HREX jobs.
+# hrex_module = "gromacs/2026.3-gcc13.2"
+# Use mpirun for OpenMPI modules; use srun only with working direct-MPI support.
+hrex_mpi_launcher = "mpirun"
 # Used only for HREX. It must be a GROMACS executable built with external MPI.
 hrex_gromacs_command = "gmx_mpi"
 # Required for execution after PMX hybrid topologies have been prepared.

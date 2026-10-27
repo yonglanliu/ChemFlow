@@ -233,6 +233,8 @@ class LigandRBFEConfig:
     final_equilibration_ns: float
     production_ns: float
     mdrun_options: tuple[str, ...]
+    hrex_module: str
+    hrex_mpi_launcher: str
     hrex_gmx_command: str
     worker_script: Path | None
     slurm_partition: str
@@ -374,6 +376,12 @@ class LigandRBFEConfig:
         hrex_gmx_command = str(
             execution.get("hrex_gromacs_command", "gmx_mpi")
         ).strip()
+        hrex_module = str(execution.get("hrex_module", "")).strip()
+        hrex_mpi_launcher = _choice(
+            execution.get("hrex_mpi_launcher", "mpirun"),
+            "[execution].hrex_mpi_launcher",
+            {"mpirun", "srun"},
+        )
         if sampling_method == "hrex" and not hrex_gmx_command:
             raise ValueError(
                 "[execution].hrex_gromacs_command is required for lambda-HREX"
@@ -631,6 +639,8 @@ class LigandRBFEConfig:
                 execution.get("mdrun_options", ["-ntmpi", "1"]),
                 "[execution].mdrun_options",
             ),
+            hrex_module=hrex_module,
+            hrex_mpi_launcher=hrex_mpi_launcher,
             hrex_gmx_command=hrex_gmx_command,
             worker_script=resolve(worker) if worker else None,
             slurm_partition=str(slurm.get("partition", "gpu")),
