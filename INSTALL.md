@@ -219,6 +219,55 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 A CPU-only PyTorch build reports `torch.version.cuda` as `None`. Recreate or
 update the environment with `environment-hpc.yaml` in that case.
 
+### NumPy or PyTorch reports `GLIBCXX_3.4.29 not found`
+
+This means the dynamic loader selected the operating system's older
+`libstdc++.so.6` instead of the runtime installed in the active Conda
+environment. First update the HPC environment so `libgcc-ng` and
+`libstdcxx-ng` are present:
+
+```bash
+mamba env update \
+  --name chemflow \
+  --file environment-hpc.yaml \
+  --prune
+mamba activate chemflow
+```
+
+Confirm that the environment library provides the required symbol:
+
+```bash
+strings "$CONDA_PREFIX/lib/libstdc++.so.6" | grep GLIBCXX_3.4.29
+```
+
+Then test with the Conda library directory first in the loader search path:
+
+```bash
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+python -c "import numpy, torch; print(numpy.__version__, torch.__version__)"
+chemflow gpu-test
+```
+
+If this fixes the import, save the setting only for this environment rather
+than exporting it globally:
+
+```bash
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
+printf '%s\n' \
+  'export _CHEMFLOW_OLD_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"' \
+  'export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+  > "$CONDA_PREFIX/etc/conda/activate.d/chemflow-runtime.sh"
+
+mkdir -p "$CONDA_PREFIX/etc/conda/deactivate.d"
+printf '%s\n' \
+  'export LD_LIBRARY_PATH="${_CHEMFLOW_OLD_LD_LIBRARY_PATH-}"' \
+  'unset _CHEMFLOW_OLD_LD_LIBRARY_PATH' \
+  > "$CONDA_PREFIX/etc/conda/deactivate.d/chemflow-runtime.sh"
+```
+
+Re-activate the environment after creating these scripts. Avoid replacing the
+system `/lib64/libstdc++.so.6`.
+
 ### Remove and recreate only the ChemFlow environment
 
 ```bash
