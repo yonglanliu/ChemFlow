@@ -96,11 +96,20 @@ def render_slurm_array_script(
         + "    exit 127\n"
         + "fi\n"
         + f"MDRUN_COMMON=( -ntomp \"$OMP_NUM_THREADS\" {mdrun_options} )\n\n"
+        + "validate_minimization() {\n"
+        + '    local log_file="$1"\n'
+        + '    if [[ ! -s "$log_file" ]] || grep -Eqi '
+        + "'force on at least one atom is not finite|Maximum force[[:space:]]*=[[:space:]]*(inf|nan)|Potential Energy[[:space:]]*=[[:space:]]*(inf|nan)' \"$log_file\"; then\n"
+        + '        echo "ERROR: Invalid energy minimization in $log_file; check for overlapping atoms." >&2\n'
+        + "        exit 1\n"
+        + "    fi\n"
+        + "}\n\n"
         + "run_stage() {\n"
         + '    local stage="$1"\n'
         + '    local coordinates="$2"\n'
         + '    local checkpoint="${3:-}"\n'
         + '    if [[ -s "${stage}.gro" ]]; then\n'
+        + '        [[ "$stage" == "em" ]] && validate_minimization "${stage}.log"\n'
         + '        echo "Skipping completed ${stage}: ${stage}.gro exists"\n'
         + "        return\n"
         + "    fi\n"
@@ -124,6 +133,7 @@ def render_slurm_array_script(
         + '    "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
         + '    [[ -s "${stage}.gro" ]] || { '
         + 'echo "ERROR: ${stage} did not produce ${stage}.gro" >&2; exit 1; }\n'
+        + '    [[ "$stage" == "em" ]] && validate_minimization "${stage}.log"\n'
         + "}\n\n"
         + 'run_stage em "$BASE_GRO"\n'
         + 'run_stage nvt em.gro\n'
@@ -253,6 +263,17 @@ def render_slurm_hrex_script(
         + "    exit 1\n"
         + "fi\n"
         + f"MDRUN_COMMON=( {options} -ntomp \"$OMP_PER_REPLICA\" )\n\n"
+        + "validate_minimizations() {\n"
+        + '    local replica log_file\n'
+        + '    for replica in "${REPLICA_DIRS[@]}"; do\n'
+        + '        log_file="$replica/em.log"\n'
+        + '        if [[ ! -s "$log_file" ]] || grep -Eqi '
+        + "'force on at least one atom is not finite|Maximum force[[:space:]]*=[[:space:]]*(inf|nan)|Potential Energy[[:space:]]*=[[:space:]]*(inf|nan)' \"$log_file\"; then\n"
+        + '            echo "ERROR: Invalid energy minimization in $log_file; check for overlapping atoms." >&2\n'
+        + "            exit 1\n"
+        + "        fi\n"
+        + "    done\n"
+        + "}\n\n"
         + "prepare_stage() {\n"
         + '    local stage="$1" previous="$2" checkpoint="${3:-}"\n'
         + '    for replica in "${REPLICA_DIRS[@]}"; do\n'
@@ -272,11 +293,16 @@ def render_slurm_hrex_script(
         + "run_replicas() {\n"
         + '    local stage="$1" exchange="$2" complete=1\n'
         + '    for replica in "${REPLICA_DIRS[@]}"; do [[ -s "$replica/${stage}.gro" ]] || complete=0; done\n'
-        + '    (( complete == 1 )) && { echo "Skipping completed $stage"; return; }\n'
+        + '    if (( complete == 1 )); then\n'
+        + '        [[ "$stage" == "em" ]] && validate_minimizations\n'
+        + '        echo "Skipping completed $stage"\n'
+        + "        return\n"
+        + "    fi\n"
         + '    args=( mdrun -multidir "${REPLICA_DIRS[@]}" -deffnm "$stage" "${MDRUN_COMMON[@]}" )\n'
         + '    [[ "$exchange" == "yes" ]] && args+=( -replex "$EXCHANGE_INTERVAL" )\n'
         + '    if [[ -s "${REPLICA_DIRS[0]}/${stage}.cpt" ]]; then args+=( -cpi "${stage}.cpt" -append ); fi\n'
         + '    "${MPI_LAUNCHER[@]}" "${GMX_COMMAND[@]}" "${args[@]}"\n'
+        + '    [[ "$stage" == "em" ]] && validate_minimizations\n'
         + "}\n\n"
         + 'echo "HREX group: $FEP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
         + 'prepare_stage em BASE\nrun_replicas em no\n'
@@ -327,6 +353,7 @@ def stage_fep_task_directories(
                                 window,
                                 stage_name,
                                 membrane=membrane,
+                                position_restraints=leg == "complex",
                             ),
                             encoding="utf-8",
                         )
@@ -430,9 +457,9 @@ def stage(
 
     mdp_dir = project / "mdp"
     mdp_dir.mkdir(parents=True, exist_ok=True)
-    for leg, membrane in (
-        ("complex", config.membrane.enabled),
-        ("solvent", False),
+    for leg, membrane, position_restraints in (
+        ("complex", config.membrane.enabled, True),
+        ("solvent", False, False),
     ):
         leg_dir = mdp_dir / leg
         leg_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +473,11 @@ def stage(
         ):
             (leg_dir / filename).write_text(
                 render_rbfe_stage_mdp(
-                    config, 0, stage_name, membrane=membrane
+                    config,
+                    0,
+                    stage_name,
+                    membrane=membrane,
+                    position_restraints=position_restraints,
                 ),
                 encoding="utf-8",
             )
@@ -559,7 +590,11 @@ def _render_mdp(args: argparse.Namespace) -> int:
     membrane = config.membrane.enabled and args.leg == "complex"
     args.output.write_text(
         render_rbfe_stage_mdp(
-            config, args.window, args.stage, membrane=membrane
+            config,
+            args.window,
+            args.stage,
+            membrane=membrane,
+            position_restraints=args.leg == "complex",
         ),
         encoding="utf-8",
     )

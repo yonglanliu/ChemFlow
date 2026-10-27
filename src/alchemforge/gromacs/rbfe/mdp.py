@@ -379,6 +379,7 @@ def render_rbfe_stage_mdp(
     stage: str,
     *,
     membrane: bool | None = None,
+    position_restraints: bool = True,
 ) -> str:
     """Render one stage of the six-stage RBFE protocol."""
     stage = stage.casefold()
@@ -401,6 +402,8 @@ def render_rbfe_stage_mdp(
     pressure_coupling = config.stage_pressure_coupling[stage_index]
 
     def restraint_defines(forces: tuple[float, float, float]) -> str:
+        if not position_restraints:
+            return ""
         macros: list[str] = []
         for macro, symbol, force in (
             ("POSRES", "POSRES_FC", forces[0]),

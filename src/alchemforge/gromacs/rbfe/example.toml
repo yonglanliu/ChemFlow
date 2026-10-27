@@ -82,12 +82,12 @@ production_ns = 5.0
 # Order: EM, NVT, NPT, transition, final equilibration, production.
 integrators = ["steep", "md", "md", "sd", "sd", "sd"]
 timesteps_ps = [0.0, 0.001, 0.001, 0.002, 0.002, 0.002]
-temperature_coupling = ["no", "Berendsen", "Berendsen", "no", "no", "no"]
-pressure_coupling = ["no", "no", "Berendsen", "C-rescale", "C-rescale", "C-rescale"]
+temperature_coupling = ["no", "V-rescale", "V-rescale", "no", "no", "no"]
+pressure_coupling = ["no", "no", "C-rescale", "C-rescale", "C-rescale", "C-rescale"]
 
 [restraints]
 # Values are [protein, ligand, cofactor] in kJ mol^-1 nm^-2.
-em_forces = [1000.0, 1000.0, 1000.0]
+em_forces = [0.0, 0.0, 0.0]
 nvt_forces = [1000.0, 1000.0, 1000.0]
 npt_forces = [500.0, 500.0, 500.0]
 transition_forces = [0.0, 100.0, 100.0]

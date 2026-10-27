@@ -627,8 +627,8 @@ class LigandRBFEGromacsDialog(QDialog):
         )
         stage_rows = (
             ("EM", "steep", "—", "no", "no"),
-            ("Early NVT", "md", "0.001", "Berendsen", "no"),
-            ("Early NPT", "md", "0.001", "Berendsen", "Berendsen"),
+            ("Early NVT", "md", "0.001", "V-rescale", "no"),
+            ("Early NPT", "md", "0.001", "V-rescale", "C-rescale"),
             ("Transition", "sd", "0.002", "no", "C-rescale"),
             ("Final equil.", "sd", "0.002", "no", "C-rescale"),
             ("Production", "sd", "0.002", "no", "C-rescale"),
@@ -1951,7 +1951,7 @@ class LigandRBFEGromacsDialog(QDialog):
             ]
 
         return {
-            "em": rules(1000.0, 1000.0, 1000.0),
+            "em": rules(0.0, 0.0, 0.0),
             "nvt": rules(1000.0, 1000.0, 1000.0),
             "npt": rules(500.0, 500.0, 500.0),
             "transition": rules(0.0, 100.0, 100.0),

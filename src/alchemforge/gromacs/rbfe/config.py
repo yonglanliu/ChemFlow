@@ -316,7 +316,7 @@ class LigandRBFEConfig:
                 restraints.get(key, default), f"[restraints].{key}"
             )
             for stage, key, default in (
-                ("em", "em_forces", [1000, 1000, 1000]),
+                ("em", "em_forces", [0, 0, 0]),
                 ("nvt", "nvt_forces", [1000, 1000, 1000]),
                 ("npt", "npt_forces", [500, 500, 500]),
                 ("transition", "transition_forces", [0, 100, 100]),
@@ -579,7 +579,7 @@ class LigandRBFEConfig:
             ),
             stage_temperature_coupling=_stage_choices(
                 stage_protocol.get("temperature_coupling"),
-                ("no", "Berendsen", "Berendsen", "no", "no", "no"),
+                ("no", "V-rescale", "V-rescale", "no", "no", "no"),
                 "[stage_protocol].temperature_coupling",
                 {
                     "no": "no",
@@ -590,7 +590,7 @@ class LigandRBFEConfig:
             ),
             stage_pressure_coupling=_stage_choices(
                 stage_protocol.get("pressure_coupling"),
-                ("no", "no", "Berendsen", "C-rescale", "C-rescale", "C-rescale"),
+                ("no", "no", "C-rescale", "C-rescale", "C-rescale", "C-rescale"),
                 "[stage_protocol].pressure_coupling",
                 {
                     "no": "no",
