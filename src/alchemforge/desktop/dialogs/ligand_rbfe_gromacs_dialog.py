@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -243,6 +245,8 @@ class LigandRBFEGromacsDialog(QDialog):
         self.delete_force_field_button = QPushButton("Delete Force Field")
         self.add_force_field_button.clicked.connect(self._add_force_field)
         self.delete_force_field_button.clicked.connect(self._delete_force_field)
+        self.force_field_discovery_status = QLabel()
+        self.force_field_discovery_status.setWordWrap(True)
         self._populate_force_field_table()
         self.lipid_force_field = QComboBox()
         self.lipid_force_field.addItems(
@@ -350,13 +354,14 @@ class LigandRBFEGromacsDialog(QDialog):
         force_field_buttons.addWidget(self.add_force_field_button)
         force_field_buttons.addWidget(self.delete_force_field_button)
         force_field_layout.addLayout(force_field_buttons, 1, 0, 1, 4)
+        force_field_layout.addWidget(self.force_field_discovery_status, 2, 0, 1, 4)
         force_field_note = QLabel(
             "Amber entries use TIP3P/Joung–Cheatham ions, GAFF2 ligands, and "
             "Lipid17 or Lipid21. CHARMM36m uses the matching components included in its bundle."
         )
         force_field_note.setWordWrap(True)
         force_field_note.setStyleSheet("color:#6b7280")
-        force_field_layout.addWidget(force_field_note, 2, 0, 1, 4)
+        force_field_layout.addWidget(force_field_note, 3, 0, 1, 4)
         form.addRow(force_fields)
         form.addRow("System type:", self.system_type)
         system_builder = QGroupBox("System preparation")
@@ -520,12 +525,8 @@ class LigandRBFEGromacsDialog(QDialog):
             "Use CPU for the Conda OpenCL GROMACS build; use GPU for a "
             "CUDA-enabled GROMACS build after testing it."
         )
-        self.conda_init = QLineEdit(
-            "/data/liuy48/conda/etc/profile.d/conda.sh"
-        )
-        self.conda_environment = QLineEdit(
-            "/data/liuy48/conda/envs/alchemforge"
-        )
+        self.conda_init = QLineEdit()
+        self.conda_environment = QLineEdit()
         self.slurm_log_output = QLineEdit("logs/%A_%a.out")
         self.slurm_log_error = QLineEdit("logs/%A_%a.err")
         self.expected_array_tasks = QLabel("Select or create a ligand network")
@@ -972,13 +973,41 @@ class LigandRBFEGromacsDialog(QDialog):
         }
 
     @staticmethod
-    def _pmx_force_field_directory() -> Path | None:
+    def _pmx_force_field_directories() -> list[Path]:
+        candidates: list[Path] = []
         try:
             import pmx
         except ImportError:
-            return None
-        directory = Path(pmx.__file__).resolve().parent / "data" / "mutff"
-        return directory if directory.is_dir() else None
+            pmx = None
+        if pmx is not None:
+            candidates.append(Path(pmx.__file__).resolve().parent / "data" / "mutff")
+        candidates.extend(
+            Path(sys.prefix).glob("lib/python*/site-packages/pmx/data/mutff")
+        )
+        executable = shutil.which("pmx")
+        if executable:
+            prefix = Path(executable).resolve().parent.parent
+            candidates.extend(
+                prefix.glob("lib/python*/site-packages/pmx/data/mutff")
+            )
+            candidates.append(prefix / "share" / "pmx" / "data" / "mutff")
+        pmx_home = os.environ.get("PMX_HOME")
+        if pmx_home:
+            home = Path(pmx_home).expanduser()
+            candidates.extend((home / "data" / "mutff", home / "mutff"))
+        gmxlibrary = os.environ.get("GMXLIB")
+        if gmxlibrary:
+            candidates.extend(
+                Path(value).expanduser()
+                for value in gmxlibrary.split(os.pathsep)
+                if value
+            )
+        directories: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved.is_dir() and resolved not in directories:
+                directories.append(resolved)
+        return directories
 
     @staticmethod
     def _lipid_force_field_display(path: Path) -> str:
@@ -1021,16 +1050,16 @@ class LigandRBFEGromacsDialog(QDialog):
         )
 
     def _populate_force_field_table(self) -> None:
-        directory = self._pmx_force_field_directory()
-        if directory is None:
-            return
+        directories = self._pmx_force_field_directories()
         fields = sorted(
-            (
+            {
                 path
+                for directory in directories
                 for path in directory.glob("*.ff")
                 if path.name.casefold().startswith("amber99")
+                or path.name.casefold().startswith("amber14")
                 or path.name.casefold() == "charmm36m-mut.ff"
-            ),
+            },
             key=lambda path: path.name.casefold(),
         )
         for path in fields:
@@ -1043,6 +1072,24 @@ class LigandRBFEGromacsDialog(QDialog):
                 break
         if self.force_field_table.currentRow() < 0 and fields:
             self.force_field_table.selectRow(0)
+        if fields:
+            self.force_field_discovery_status.setText(
+                f"Detected {len(fields)} PMX mutation force fields in: "
+                + ", ".join(str(path) for path in directories)
+            )
+            self.force_field_discovery_status.setStyleSheet("color:#52708f")
+        else:
+            searched = [
+                str(Path(sys.prefix) / "lib/python*/site-packages/pmx/data/mutff"),
+                "PMX_HOME/data/mutff",
+                "GMXLIB",
+            ]
+            self.force_field_discovery_status.setText(
+                "No PMX mutation force fields were detected. Active Python: "
+                f"{sys.executable}. Searched: " + ", ".join(searched) + ". "
+                "Install PMX in this environment or use Add Force Field."
+            )
+            self.force_field_discovery_status.setStyleSheet("color:#b42318")
 
     def _add_force_field(self) -> None:
         choice = QMessageBox(self)

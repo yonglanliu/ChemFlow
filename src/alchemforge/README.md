@@ -23,9 +23,9 @@ requirements file can be found:
 
 ```bash
 conda env create \
-  --prefix /data/liuy48/conda/envs/alchemforge \
+  --name alchemforge \
   --file environment-alchemforge-hpc.yaml
-conda activate /data/liuy48/conda/envs/alchemforge
+conda activate alchemforge
 
 python -m pip install -e src --no-deps --no-build-isolation
 ```
@@ -35,6 +35,10 @@ The cluster supplies the NVIDIA driver. The HPC environment installs the CUDA
 an allocated GPU compute node, not from a login node. GPUs newer than the CUDA
 12.6 architecture set (for example, Blackwell) require a newer CUDA environment
 rather than this P100-compatible file.
+
+No installation path is assumed. On clusters that require explicit Conda
+initialization in batch jobs, configure the initialization script and
+environment on the desktop's **Job Setting** tab.
 
 GROMACS ABFE also requires the Python 3 `develop` branch of PMX. It is not
 available from Bioconda on macOS ARM, so install it after activating the

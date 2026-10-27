@@ -140,7 +140,7 @@ ChemFlow includes an uncertainty bootstrap workflow for multitask model evaluati
 Example:
 
 ```bash
-CHEMFLOW_BIN="${CHEMFLOW_BIN:-/Users/yonglanliu/Desktop/ChemFlow/.venv/bin/chemflow}"
+CHEMFLOW_BIN="${CHEMFLOW_BIN:-chemflow}"
 
 "$CHEMFLOW_BIN" uncertainty bootstrap \
     --input /path/to/predictions.csv \

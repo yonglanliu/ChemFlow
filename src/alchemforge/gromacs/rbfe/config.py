@@ -647,13 +647,13 @@ class LigandRBFEConfig:
             slurm_conda_init=str(
                 slurm.get(
                     "conda_init",
-                    "/data/liuy48/conda/etc/profile.d/conda.sh",
+                    "",
                 )
             ),
             slurm_conda_environment=str(
                 slurm.get(
                     "conda_environment",
-                    "/data/liuy48/conda/envs/alchemforge",
+                    "",
                 )
             ),
             slurm_log_output=str(slurm.get("log_output", "logs/%A_%a.out")),
