@@ -773,7 +773,7 @@ class LigandRBFEGromacsDialog(QDialog):
             (
                 ("System", 6),
                 ("FEP Simulation", 1),
-                ("Job Setting", 16),
+                ("Job Setting", 14),
             ),
         )
         self.ligand_preparation = GromacsLigandPrepareDialog(
