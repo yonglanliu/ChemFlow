@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from alchemforge.gpu_test import add_gpu_test_parser
 from alchemforge.gromacs.abfe.workflow import add_abfe_gromacs_parser
 from alchemforge.gromacs.rbfe.workflow import add_ligand_rbfe_parser
 from alchemforge.gromacs.resFEP.workflow import add_resfep_parser
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_abfe_gromacs_parser(workflows)
     add_septop_gromacs_parser(workflows)
     add_pdbfix_parser(workflows)
+    add_gpu_test_parser(workflows)
     return parser
 
 

@@ -59,6 +59,24 @@ Launch the desktop application with:
 alchemforge-desktop
 ```
 
+On an allocated GPU compute node, run the self-contained OpenMM and GROMACS
+smoke tests with:
+
+```bash
+alchemforge gpu-test
+```
+
+The GROMACS test creates and removes a temporary argon system. To test the
+installed GPU backend against a real prepared system instead, provide its TPR:
+
+```bash
+alchemforge gpu-test --tpr production.tpr
+```
+
+The command exits with status 0 only when both backends complete their short
+calculations and GROMACS reports GPU offload. Use `--keep-workdir` to retain
+the generated diagnostic files.
+
 The `Jobs` page monitors local background processes and submitted SLURM jobs.
 Select an active row and click `Terminate Selected Job` to stop it. Local jobs
 are launched in an isolated process group so termination also reaches the
