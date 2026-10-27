@@ -52,6 +52,16 @@ inputs, preserves independent test sets and predefined splits, records the
 resolved command, and keeps Chemprop baselines distinct from pretrained
 CheMeleon experiments.
 
+### Censored regression targets
+
+CheMeleon, Chemprop, Hugging Face Graphormer, KERMT, and ChemBERTa support
+one-sided regression observations. Set `DatasetConfig.relation_column` to a
+column containing `=`, `<`, `<=`, `>`, or `>=`; for multitask data, supply a
+list in `target_column` order or a target-to-column TOML table. If the option is
+omitted, `<target>_relation` is detected automatically (as is `relation` for a
+single target). A lower or upper bound contributes loss only when the model
+prediction violates that bound. Classification targets cannot be censored.
+
 ### Standard deep-learning test evaluation
 
 Graphormer, CheMeleon, ChemBERTa, Chemprop, and KERMT can run the same final
@@ -83,12 +93,17 @@ and the before/after calibration table are also exported as CSV files.
 The model dataset loaders support molecule-aware global splits, predefined
 split labels, and completely independent test files. Invalid molecules and the
 resolved assignments are written to `rejected_rows.csv` and `data_splits.csv`.
+The test set is optional for CheMeleon, Chemprop, Hugging Face Graphormer,
+KERMT, and ChemBERTa. If `test_dataset_path`, predefined test rows, and a
+positive `test_fraction` are all absent, training uses only train/validation
+data and skips post-training test evaluation. The default `test_fraction` is
+`0.0`.
 
 ```toml
 [DatasetConfig]
 split_type = "scaffold_balanced"
 val_fraction = 0.1
-test_fraction = 0.1
+test_fraction = 0.1 # Optional; use 0.0 or omit to skip test evaluation.
 ```
 
 Supported generated splits are `random`, `random_with_repeated_smiles`,
@@ -100,7 +115,7 @@ For predefined splits:
 [DatasetConfig]
 split_column = "split"
 val_fraction = 0.1
-test_fraction = 0.1
+test_fraction = 0.1 # Ignored for predefined rows; omit test rows to skip testing.
 ```
 
 When `split_column` is provided, the loader respects the existing split rather than randomly splitting the data.
@@ -183,6 +198,14 @@ This produces bootstrap confidence intervals and distribution plots for each tas
 - optional native Qt desktop workspace
 - multi-GPU and single-GPU support
 
+All epoch-based ChemFlow trainers accept `checkpoint_every_n_epochs` in their
+training configuration. A positive value retains full restart snapshots under
+the run's checkpoint directory (for example, `10` saves epochs 10, 20, and so
+on); `0` disables retained snapshots. Existing best and rolling `last`
+checkpoints are unaffected. This applies to CheMeleon, Hugging Face
+Graphormer, ChemBERTa, KERMT, Chemprop, GPT, and LSTM. Traditional scikit-learn
+models do not have epochs and therefore do not use this option.
+
 ### Native desktop workspace
 
 Install the optional desktop dependencies and launch ChemFlow Studio:
@@ -203,10 +226,10 @@ admet-desktop
 Ketcher is installed as an offline chemical structure editor for the desktop;
 drawn molecules stay on the local computer.
 
-The desktop combines local and Slurm/HPC training, a persistent job monitor,
-prediction, similarity search, molecular generation, and uncertainty
-evaluation. The training center supports conventional ML, Graphormer,
-Chemprop, CheMeleon, ChemBERTa, KERMT, GPT, and LSTM. See the
+The desktop combines physicochemical and ADME endpoints in one property
+prediction workspace, alongside general model inference, similarity search,
+molecular generation, and a persistent activity console. Training and
+standalone uncertainty evaluation remain available through the command-line interface. See the
 [desktop guide](src/chemflow/desktop/README.md) for details.
 
 ---
