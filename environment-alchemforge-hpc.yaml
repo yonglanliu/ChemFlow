@@ -37,6 +37,11 @@ dependencies:
   - matplotlib
   - "rdkit>=2024.03,<2026.03"
   - openbabel
+  # Keep RDKit's drawing stack within one conda-forge ABI family. On clusters,
+  # ensure LD_LIBRARY_PATH does not select an older system libfreetype first.
+  - cairo
+  - "freetype>=2.13"
+  - fontconfig
   - pyyaml
   - mpi4py
   - alchemlyb
