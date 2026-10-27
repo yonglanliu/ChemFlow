@@ -25,7 +25,6 @@ dependencies:
   # Portable KERMT runtime dependencies. The remaining shared dependencies
   # (PyTorch, RDKit, scikit-learn, TensorBoard, Hugging Face Hub, and
   # protobuf) are installed from requirements.txt below.
-  - "descriptastorus>=2.7.0.5,<3"
   - optuna
   - pytest
   - wandb
@@ -33,4 +32,5 @@ dependencies:
 
   # Pip installs the remaining pinned packages and this local project.
   - pip:
+      - descriptastorus==2.8.0
       - -r requirements.txt
