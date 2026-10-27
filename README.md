@@ -258,8 +258,11 @@ Tests live in `tests/`, while one-off dataset and maintenance programs live in
 ## Installation
 
 ChemFlow requires Python 3.11. The recommended installation uses
-[Miniforge](https://github.com/conda-forge/miniforge) and Mamba. Two environment
-specifications are provided:
+[Miniforge](https://github.com/conda-forge/miniforge) and Mamba. For a complete
+clean-install, update, GPU-verification, and troubleshooting guide, see
+[`INSTALL.md`](INSTALL.md).
+
+Two environment specifications are provided:
 
 - `environment.yaml` for local development, CPU systems, and Apple Silicon.
 - `environment-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs. It uses
@@ -347,22 +350,15 @@ login node:
 
 ```bash
 nvidia-smi
-
-python - <<'PY'
-import torch
-
-print("PyTorch:", torch.__version__)
-print("CUDA runtime:", torch.version.cuda)
-print("CUDA available:", torch.cuda.is_available())
-print("GPU count:", torch.cuda.device_count())
-if torch.cuda.is_available():
-    print("GPU:", torch.cuda.get_device_name(0))
-PY
+chemflow gpu-test
 ```
 
-For an HPC installation, `CUDA available` should report `True`. A `False`
-result on a login node does not necessarily indicate a broken installation,
-because many clusters expose GPUs only inside scheduled jobs.
+The command performs actual CUDA matrix multiplications through PyTorch and
+returns a nonzero exit status when CUDA is unavailable or execution fails. Use
+`chemflow gpu-test --device 1` to select another visible GPU, or increase the
+workload with `--matrix-size` and `--iterations`. A failed result on a login
+node does not necessarily indicate a broken installation, because many
+clusters expose GPUs only inside scheduled jobs.
 
 If you modify `requirements.txt`, synchronize the active environment with:
 
