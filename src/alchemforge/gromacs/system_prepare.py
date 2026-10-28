@@ -1138,6 +1138,10 @@ constraints = none
     if not gmx:
         raise ValueError("GROMACS command is required")
     quoted_gmx = shlex.join(gmx)
+    # Keep generated helpers on the same interpreter as the desktop/CLI.
+    # A worker shell may otherwise resolve plain `python` from an HPC module
+    # or the base environment and fail to find AlchemForge dependencies.
+    quoted_python = shlex.quote(sys.executable)
     commands = ["#!/usr/bin/env bash", "set -euo pipefail", 'cd "$(dirname "$0")"']
     if config.mode == "pdb2gmx":
         commands.extend(
@@ -1161,7 +1165,7 @@ constraints = none
                     'if [ -z "${AMBERHOME:-}" ]; then export AMBERHOME="$(cd '
                     '"$(dirname "$(command -v tleap)")/.." && pwd)"; fi'
                 ),
-                "python -c 'import parmed'",
+                f"{quoted_python} -c 'import parmed'",
             ]
         )
         if config.prepared_ligand_directory is None:
@@ -1210,18 +1214,18 @@ constraints = none
             )
         commands.extend(
             [
-                "python assemble_amber_complex.py",
+                f"{quoted_python} assemble_amber_complex.py",
                 "tleap -f tleap.in",
             ]
         )
         if config.neutralize and config.system_type == "membrane":
             commands.extend(
                 [
-                    "python neutralize_amber_system.py",
+                    f"{quoted_python} neutralize_amber_system.py",
                     'if [ -s tleap_neutralize.in ]; then tleap -f tleap_neutralize.in; fi',
                 ]
             )
-        commands.append("python convert_amber_to_gromacs.py")
+        commands.append(f"{quoted_python} convert_amber_to_gromacs.py")
     if config.box_lengths_nm is not None:
         lengths = " ".join(f"{value:g}" for value in config.box_lengths_nm)
         angles = " ".join(f"{value:g}" for value in config.box_angles_deg)
