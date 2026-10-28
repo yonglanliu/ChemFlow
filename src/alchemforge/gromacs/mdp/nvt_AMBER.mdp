@@ -1,0 +1,72 @@
+; nvt_FEP_AMBER.mdp
+; Membrane system — ff19SB / GAFF2 / Lipid17-21
+; Per-lambda-window NVT equilibration. init-lambda-state must match
+; the EM stage for this window, and continues on to NPT/production
+; with the SAME value.
+; See README.md for full parameter explanations and FF comparison.
+
+define                    = -DPOSRES -DPOSRES_LIG -DPOSRES_COFACTOR
+
+integrator                = md
+nsteps                    = 150000
+dt                        = 0.001
+nstenergy                 = 5000
+nstlog                    = 5000
+nstcalcenergy             = 5000
+nstxout-compressed        = 10000
+nstxout                   = 0
+nstvout                   = 0
+nstfout                   = 0
+
+cutoff-scheme             = Verlet
+nstlist                   = 20
+rlist                     = 1.0
+
+coulombtype               = PME
+rcoulomb                  = 1.0
+
+vdwtype                   = Cut-off
+vdw-modifier              = Potential-shift
+rvdw                      = 1.0
+
+constraints               = h-bonds
+constraint_algorithm      = LINCS
+
+tcoupl                    = V-rescale
+tc-grps                   = SOLU_MEMB SOLV
+tau_t                     = 1.0   1.0
+ref_t                     = 300   300
+
+gen-vel                   = yes
+gen_temp                  = 300
+gen-seed                  = -1
+
+nstcomm                   = 100
+comm_mode                 = linear
+comm_grps                 = SOLU_MEMB SOLV
+
+pcoupl                    = no
+
+; ================================================================
+;                       Free Energy / FEP
+; ================================================================
+free-energy               = yes
+init-lambda-state         = {LAMBDA_STATE}
+delta-lambda              = 0
+calc-lambda-neighbors     = -1
+
+coul-lambdas              = 0.00 0.00 0.00 0.00 0.00 0.25 0.50 0.75 1.00 1.00 1.00 1.00 1.00
+vdw-lambdas               = 0.00 0.25 0.50 0.75 1.00 1.00 1.00 1.00 1.00 1.00 1.00 1.00 1.00
+bonded-lambdas            = 0.00 0.25 0.50 0.75 1.00 1.00 1.00 1.00 1.00 1.00 1.00 1.00 1.00
+restraint-lambdas         = 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00
+
+sc-alpha                  = 0.5
+sc-power                  = 1
+sc-sigma                  = 0.3
+sc-coul                   = no
+sc-r-power                = 6
+
+couple-moltype            =
+couple-lambda0            = vdw-q
+couple-lambda1            = vdw-q
+couple-intramol           = no

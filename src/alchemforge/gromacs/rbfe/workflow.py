@@ -144,7 +144,11 @@ def render_slurm_array_script(
         + '    if [[ -s "${stage}.cpt" ]]; then\n'
         + '        mdrun_args+=( -cpi "${stage}.cpt" -append )\n'
         + "    fi\n"
-        + '    "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
+        + '    if [[ "$stage" == "em" ]]; then\n'
+        + '        OMP_NUM_THREADS=1 "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
+        + "    else\n"
+        + '        "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
+        + "    fi\n"
         + '    [[ -s "${stage}.gro" ]] || { '
         + 'echo "ERROR: ${stage} did not produce ${stage}.gro" >&2; exit 1; }\n'
         + '    [[ "$stage" == "em" ]] && validate_minimization "${stage}.log"\n'
@@ -433,23 +437,30 @@ def write_slurm_array_files(
             f"PROD_TASK_FILE={shlex.quote(str(task_file))}\n"
             f"PROD_SCRIPT={shlex.quote(str(array_script))}\n"
             f"EXPECTED_EQUIL_TASKS={equilibration_tasks}\n"
-            f"EXPECTED_PROD_TASKS={expected_tasks}\n\n"
+            f"EXPECTED_PROD_TASKS={expected_tasks}\n"
+            f"WINDOWS_PER_GROUP={config.lambda_windows}\n\n"
             'N_EQUIL="$(awk \'NF {count++} END {print count+0}\' "$EQUIL_TASK_FILE")"\n'
             'N_PROD="$(awk \'NF {count++} END {print count+0}\' "$PROD_TASK_FILE")"\n'
             '[[ "$N_EQUIL" -eq "$EXPECTED_EQUIL_TASKS" ]] || { echo "ERROR: Found $N_EQUIL equilibration tasks; expected $EXPECTED_EQUIL_TASKS" >&2; exit 1; }\n'
             '[[ "$N_PROD" -eq "$EXPECTED_PROD_TASKS" ]] || { echo "ERROR: Found $N_PROD HREX production groups; expected $EXPECTED_PROD_TASKS" >&2; exit 1; }\n'
+            '[[ "$N_EQUIL" -eq "$((N_PROD * WINDOWS_PER_GROUP))" ]] || { echo "ERROR: Equilibration tasks are not grouped into $WINDOWS_PER_GROUP windows per HREX system" >&2; exit 1; }\n'
             'cd "$PROJECT_DIR"\n'
-            'EQUIL_ARRAY="0-$((N_EQUIL - 1))"\n'
-            'PROD_ARRAY="0-$((N_PROD - 1))"\n'
-            'echo "Submitting $N_EQUIL independent lambda equilibration tasks as array $EQUIL_ARRAY"\n'
-            'EQUIL_SUBMISSION="$(sbatch --parsable --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
-            'EQUIL_JOB_ID="${EQUIL_SUBMISSION%%;*}"\n'
-            'echo "Submitting $N_PROD HREX production groups after successful equilibration"\n'
-            'PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --array="$PROD_ARRAY" "$PROD_SCRIPT" "$PROD_TASK_FILE")"\n'
-            'PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
-            'echo "Equilibration array: $EQUIL_JOB_ID ($EQUIL_ARRAY)"\n'
-            'echo "HREX production array: $PROD_JOB_ID ($PROD_ARRAY; afterok:$EQUIL_JOB_ID)"\n'
-            'echo "Inspect: sacct -X -j ${EQUIL_JOB_ID},${PROD_JOB_ID} --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
+            'echo "Submitting $N_PROD independent system groups; each HREX production starts after only its own $WINDOWS_PER_GROUP lambda equilibrations"\n'
+            'ALL_JOB_IDS=()\n'
+            'for ((GROUP_INDEX=0; GROUP_INDEX<N_PROD; GROUP_INDEX++)); do\n'
+            '    EQUIL_START=$((GROUP_INDEX * WINDOWS_PER_GROUP))\n'
+            '    EQUIL_END=$((EQUIL_START + WINDOWS_PER_GROUP - 1))\n'
+            '    EQUIL_ARRAY="${EQUIL_START}-${EQUIL_END}"\n'
+            '    PROD_ARRAY="${GROUP_INDEX}-${GROUP_INDEX}"\n'
+            '    EQUIL_SUBMISSION="$(sbatch --parsable --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
+            '    EQUIL_JOB_ID="${EQUIL_SUBMISSION%%;*}"\n'
+            '    PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --array="$PROD_ARRAY" "$PROD_SCRIPT" "$PROD_TASK_FILE")"\n'
+            '    PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
+            '    ALL_JOB_IDS+=("$EQUIL_JOB_ID" "$PROD_JOB_ID")\n'
+            '    echo "Group $((GROUP_INDEX + 1))/$N_PROD: equilibration $EQUIL_JOB_ID [$EQUIL_ARRAY] -> HREX $PROD_JOB_ID [$PROD_ARRAY]"\n'
+            'done\n'
+            'JOB_ID_LIST="$(IFS=,; echo "${ALL_JOB_IDS[*]}")"\n'
+            'echo "Inspect all: sacct -X -j $JOB_ID_LIST --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
         )
     else:
         submit_text = (
