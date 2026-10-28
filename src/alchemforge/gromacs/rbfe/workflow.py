@@ -26,9 +26,12 @@ def _directive(value: str, label: str) -> str:
 
 
 def render_slurm_array_script(
-    config: LigandRBFEConfig, *, expected_tasks: int
+    config: LigandRBFEConfig,
+    *,
+    expected_tasks: int,
+    equilibration_only: bool = False,
 ) -> str:
-    """Render the sequential six-stage protocol for each FEP window."""
+    """Render an independent staged protocol for each FEP window."""
     partition = (
         f"#SBATCH --partition={_directive(config.slurm_partition, 'Partition')}\n"
         if config.slurm_partition.strip()
@@ -47,17 +50,24 @@ def render_slurm_array_script(
             "conda activate "
             f"{shlex.quote(config.slurm_conda_environment)}\n"
         )
+    if equilibration_only and config.hrex_module.strip():
+        module_name = _directive(config.hrex_module.strip(), "HREX module")
+        activation += (
+            'type module >/dev/null 2>&1 || { echo "ERROR: module command is unavailable" >&2; exit 127; }\n'
+            f"module load {shlex.quote(module_name)}\n"
+        )
     mdrun_options = " ".join(
         shlex.quote(option) for option in config.mdrun_options
     )
     gmx_command = " ".join(shlex.quote(part) for part in shlex.split(config.gmx))
     return (
         "#!/bin/bash\n"
-        f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}\n"
+        f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}"
+        + ("_equil\n" if equilibration_only else "\n")
         + partition
         + gres
         + f"#SBATCH --nodes={config.slurm_nodes}\n"
-        + f"#SBATCH --ntasks={config.slurm_tasks}\n"
+        + f"#SBATCH --ntasks={1 if equilibration_only else config.slurm_tasks}\n"
         + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
@@ -78,8 +88,8 @@ def render_slurm_array_script(
         + 'TOPOLOGY="$LEG_DIR/setup/topol.top"\n'
         + 'for required in "$BASE_GRO" "$TOPOLOGY" "$TASK_DIR/em.mdp" '
         + '"$TASK_DIR/nvt.mdp" "$TASK_DIR/npt.mdp" '
-        + '"$TASK_DIR/transition.mdp" "$TASK_DIR/equil.mdp" '
-        + '"$TASK_DIR/prod.mdp"; do\n'
+        + '"$TASK_DIR/transition.mdp" "$TASK_DIR/equil.mdp"'
+        + ('; do\n' if equilibration_only else ' "$TASK_DIR/prod.mdp"; do\n')
         + '    [[ -s "$required" ]] || { echo "ERROR: Missing $required" >&2; exit 1; }\n'
         + "done\n\n"
         + 'cd "$TASK_DIR"\n\n'
@@ -96,6 +106,7 @@ def render_slurm_array_script(
         + "    exit 127\n"
         + "fi\n"
         + f"MDRUN_COMMON=( -ntomp \"$OMP_NUM_THREADS\" {mdrun_options} )\n\n"
+        + "MDRUN_EM=( -ntmpi 1 -ntomp 1 -nb cpu -pme cpu )\n\n"
         + "validate_minimization() {\n"
         + '    local log_file="$1"\n'
         + '    if [[ ! -s "$log_file" ]] || grep -Eqi '
@@ -125,8 +136,11 @@ def render_slurm_array_script(
         + "        fi\n"
         + "    fi\n"
         + '    [[ -s "${stage}.tpr" ]] || { echo "ERROR: Missing ${stage}.tpr after grompp" >&2; exit 1; }\n'
-        + '    mdrun_args=( mdrun -s "${stage}.tpr" -deffnm "$stage" '
-        + '"${MDRUN_COMMON[@]}" )\n'
+        + '    if [[ "$stage" == "em" ]]; then\n'
+        + '        mdrun_args=( mdrun -s "${stage}.tpr" -deffnm "$stage" "${MDRUN_EM[@]}" )\n'
+        + "    else\n"
+        + '        mdrun_args=( mdrun -s "${stage}.tpr" -deffnm "$stage" "${MDRUN_COMMON[@]}" )\n'
+        + "    fi\n"
         + '    if [[ -s "${stage}.cpt" ]]; then\n'
         + '        mdrun_args+=( -cpi "${stage}.cpt" -append )\n'
         + "    fi\n"
@@ -140,7 +154,7 @@ def render_slurm_array_script(
         + 'run_stage npt nvt.gro nvt.cpt\n'
         + 'run_stage transition npt.gro npt.cpt\n'
         + 'run_stage equil transition.gro transition.cpt\n'
-        + 'run_stage prod equil.gro equil.cpt\n'
+        + ("" if equilibration_only else 'run_stage prod equil.gro equil.cpt\n')
     )
 
 
@@ -210,7 +224,8 @@ def render_slurm_hrex_script(
         + gres
         + f"#SBATCH --nodes={config.slurm_nodes}\n"
         + f"#SBATCH --ntasks={config.lambda_windows}\n"
-        + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
+        + "#SBATCH --cpus-per-task=1\n"
+        + "#SBATCH --ntasks-per-core=1\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
         + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
@@ -231,7 +246,7 @@ def render_slurm_hrex_script(
         + "    exit 1\n"
         + "fi\n"
         + mpi_launcher
-        + f'OMP_PER_REPLICA="${{SLURM_CPUS_PER_TASK:-{config.slurm_cpus_per_task}}}"\n'
+        + 'OMP_PER_REPLICA="${SLURM_CPUS_PER_TASK:-1}"\n'
         + 'export OMP_NUM_THREADS="$OMP_PER_REPLICA"\n'
         + 'LEG_DIR="$(dirname "$(dirname "$FEP_DIR")")"\n'
         + 'BASE_GRO="$LEG_DIR/setup/system.gro"\n'
@@ -263,17 +278,6 @@ def render_slurm_hrex_script(
         + "    exit 1\n"
         + "fi\n"
         + f"MDRUN_COMMON=( {options} -ntomp \"$OMP_PER_REPLICA\" )\n\n"
-        + "validate_minimizations() {\n"
-        + '    local replica log_file\n'
-        + '    for replica in "${REPLICA_DIRS[@]}"; do\n'
-        + '        log_file="$replica/em.log"\n'
-        + '        if [[ ! -s "$log_file" ]] || grep -Eqi '
-        + "'force on at least one atom is not finite|Maximum force[[:space:]]*=[[:space:]]*(inf|nan)|Potential Energy[[:space:]]*=[[:space:]]*(inf|nan)' \"$log_file\"; then\n"
-        + '            echo "ERROR: Invalid energy minimization in $log_file; check for overlapping atoms." >&2\n'
-        + "            exit 1\n"
-        + "        fi\n"
-        + "    done\n"
-        + "}\n\n"
         + "prepare_stage() {\n"
         + '    local stage="$1" previous="$2" checkpoint="${3:-}"\n'
         + '    for replica in "${REPLICA_DIRS[@]}"; do\n'
@@ -290,27 +294,23 @@ def render_slurm_hrex_script(
         + '        [[ -s "$replica/${stage}.tpr" ]] || { echo "ERROR: Missing $replica/${stage}.tpr after grompp" >&2; exit 1; }\n'
         + "    done\n"
         + "}\n\n"
-        + "run_replicas() {\n"
-        + '    local stage="$1" exchange="$2" complete=1\n'
+        + "run_hrex_production() {\n"
+        + '    local stage="prod" complete=1\n'
         + '    for replica in "${REPLICA_DIRS[@]}"; do [[ -s "$replica/${stage}.gro" ]] || complete=0; done\n'
         + '    if (( complete == 1 )); then\n'
-        + '        [[ "$stage" == "em" ]] && validate_minimizations\n'
-        + '        echo "Skipping completed $stage"\n'
+        + '        echo "Skipping completed HREX production"\n'
         + "        return\n"
         + "    fi\n"
         + '    args=( mdrun -multidir "${REPLICA_DIRS[@]}" -deffnm "$stage" "${MDRUN_COMMON[@]}" )\n'
-        + '    [[ "$exchange" == "yes" ]] && args+=( -replex "$EXCHANGE_INTERVAL" )\n'
+        + '    args+=( -replex "$EXCHANGE_INTERVAL" )\n'
         + '    if [[ -s "${REPLICA_DIRS[0]}/${stage}.cpt" ]]; then args+=( -cpi "${stage}.cpt" -append ); fi\n'
         + '    "${MPI_LAUNCHER[@]}" "${GMX_COMMAND[@]}" "${args[@]}"\n'
-        + '    [[ "$stage" == "em" ]] && validate_minimizations\n'
         + "}\n\n"
-        + 'echo "HREX group: $FEP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
-        + 'prepare_stage em BASE\nrun_replicas em no\n'
-        + 'prepare_stage nvt em\nrun_replicas nvt no\n'
-        + 'prepare_stage npt nvt nvt\nrun_replicas npt no\n'
-        + 'prepare_stage transition npt npt\nrun_replicas transition no\n'
-        + 'prepare_stage equil transition transition\nrun_replicas equil no\n'
-        + 'prepare_stage prod equil equil\nrun_replicas prod yes\n'
+        + 'echo "HREX production group: $FEP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
+        + 'for replica in "${REPLICA_DIRS[@]}"; do\n'
+        + '    [[ -s "$replica/equil.gro" ]] || { echo "ERROR: Independent equilibration is incomplete: $replica/equil.gro" >&2; exit 1; }\n'
+        + 'done\n'
+        + 'prepare_stage prod equil equil\nrun_hrex_production\n'
     )
 
 
@@ -364,17 +364,16 @@ def stage_fep_task_directories(
 def write_slurm_array_files(
     config: LigandRBFEConfig, *, edge_count: int, tasks: list[Path] | None = None
 ) -> tuple[Path, Path, Path]:
-    """Write the production task manifest, array runner, and submit helper."""
+    """Write staged equilibration/production manifests and Slurm runners."""
     project = config.project_dir
     project.mkdir(parents=True, exist_ok=True)
     expected_tasks = edge_count * config.tasks_per_edge
-    task_kind = "lambda_groups" if config.sampling_method == "hrex" else "windows"
-    task_formula = (
-        "edges x 2 legs x replicates"
-        if config.sampling_method == "hrex"
-        else "edges x 2 legs x replicates x lambda windows"
+    window_tasks = list(tasks or [])
+    group_tasks = list(dict.fromkeys(task.parent for task in window_tasks))
+    equilibration_tasks = (
+        edge_count * 2 * config.replicates * config.lambda_windows
     )
-    (project / "slurm_array_summary.txt").write_text(
+    summary = (
         f"edges={edge_count}\n"
         "legs=2\n"
         f"replicates={config.replicates}\n"
@@ -383,13 +382,16 @@ def write_slurm_array_files(
         f"exchange_interval_steps={config.exchange_interval_steps}\n"
         f"tasks_per_edge={config.tasks_per_edge}\n"
         f"total_tasks={expected_tasks}\n"
-        f"array=0-{expected_tasks - 1}\n",
-        encoding="utf-8",
+        f"array=0-{expected_tasks - 1}\n"
     )
-    task_file = project / "production_tasks.txt"
-    manifest_tasks = tasks or []
     if config.sampling_method == "hrex":
-        manifest_tasks = list(dict.fromkeys(task.parent for task in manifest_tasks))
+        summary += (
+            f"equilibration_tasks={equilibration_tasks}\n"
+            f"equilibration_array=0-{equilibration_tasks - 1}\n"
+        )
+    (project / "slurm_array_summary.txt").write_text(summary, encoding="utf-8")
+    task_file = project / "production_tasks.txt"
+    manifest_tasks = group_tasks if config.sampling_method == "hrex" else window_tasks
     task_file.write_text(
         "".join(f"{task.resolve()}\n" for task in manifest_tasks), encoding="utf-8"
     )
@@ -406,35 +408,70 @@ def write_slurm_array_files(
     array_script.chmod(array_script.stat().st_mode | 0o100)
 
     submit_script = project / "submit_production_array.sh"
-    submit_script.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n\n"
-        f"PROJECT_DIR={shlex.quote(str(project))}\n"
-        f"TASK_FILE={shlex.quote(str(task_file))}\n"
-        f"ARRAY_SCRIPT={shlex.quote(str(array_script))}\n"
-        f"EXPECTED_TASKS={expected_tasks}\n\n"
-        'N_TASKS="$(awk \'NF {count++} END {print count+0}\' "$TASK_FILE")"\n'
-        'if (( N_TASKS == 0 )); then\n'
-        '    echo "ERROR: The FEP task manifest is empty: $TASK_FILE" >&2\n'
-        '    echo "Run Create Workflow and wait for staging to finish." >&2\n'
-        "    exit 1\n"
-        "fi\n"
-        'if (( N_TASKS != EXPECTED_TASKS )); then\n'
-        '    echo "ERROR: Found $N_TASKS FEP tasks; expected '
-        f'$EXPECTED_TASKS (= {task_formula})." >&2\n'
-        "    exit 1\n"
-        "fi\n"
-        'cd "$PROJECT_DIR"\n'
-        'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
-        f'echo "Submitting $N_TASKS six-stage FEP {task_kind} as array $ARRAY_SPEC"\n'
-        'SUBMISSION="$(sbatch --parsable --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
-        'JOB_ID="${SUBMISSION%%;*}"\n'
-        'echo "Submitted job array: $JOB_ID ($ARRAY_SPEC)"\n'
-        'echo "Combined output: $PROJECT_DIR/slurm-${JOB_ID}_<array-index>.out"\n'
-        'echo "Inspect: sacct -X -j $JOB_ID --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
-        'echo "Paths: scontrol show job $JOB_ID | grep -E \'StdOut=|StdErr=|WorkDir=|Command=|Reason=\'"\n',
-        encoding="utf-8",
-    )
+    if config.sampling_method == "hrex":
+        equil_task_file = project / "equilibration_tasks.txt"
+        equil_task_file.write_text(
+            "".join(f"{task.resolve()}\n" for task in window_tasks),
+            encoding="utf-8",
+        )
+        equil_script = project / "gromacs_equilibration_array.sh"
+        equil_script.write_text(
+            render_slurm_array_script(
+                config,
+                expected_tasks=equilibration_tasks,
+                equilibration_only=True,
+            ),
+            encoding="utf-8",
+        )
+        equil_script.chmod(equil_script.stat().st_mode | 0o100)
+        submit_text = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n\n"
+            f"PROJECT_DIR={shlex.quote(str(project))}\n"
+            f"EQUIL_TASK_FILE={shlex.quote(str(equil_task_file))}\n"
+            f"EQUIL_SCRIPT={shlex.quote(str(equil_script))}\n"
+            f"PROD_TASK_FILE={shlex.quote(str(task_file))}\n"
+            f"PROD_SCRIPT={shlex.quote(str(array_script))}\n"
+            f"EXPECTED_EQUIL_TASKS={equilibration_tasks}\n"
+            f"EXPECTED_PROD_TASKS={expected_tasks}\n\n"
+            'N_EQUIL="$(awk \'NF {count++} END {print count+0}\' "$EQUIL_TASK_FILE")"\n'
+            'N_PROD="$(awk \'NF {count++} END {print count+0}\' "$PROD_TASK_FILE")"\n'
+            '[[ "$N_EQUIL" -eq "$EXPECTED_EQUIL_TASKS" ]] || { echo "ERROR: Found $N_EQUIL equilibration tasks; expected $EXPECTED_EQUIL_TASKS" >&2; exit 1; }\n'
+            '[[ "$N_PROD" -eq "$EXPECTED_PROD_TASKS" ]] || { echo "ERROR: Found $N_PROD HREX production groups; expected $EXPECTED_PROD_TASKS" >&2; exit 1; }\n'
+            'cd "$PROJECT_DIR"\n'
+            'EQUIL_ARRAY="0-$((N_EQUIL - 1))"\n'
+            'PROD_ARRAY="0-$((N_PROD - 1))"\n'
+            'echo "Submitting $N_EQUIL independent lambda equilibration tasks as array $EQUIL_ARRAY"\n'
+            'EQUIL_SUBMISSION="$(sbatch --parsable --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
+            'EQUIL_JOB_ID="${EQUIL_SUBMISSION%%;*}"\n'
+            'echo "Submitting $N_PROD HREX production groups after successful equilibration"\n'
+            'PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --array="$PROD_ARRAY" "$PROD_SCRIPT" "$PROD_TASK_FILE")"\n'
+            'PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
+            'echo "Equilibration array: $EQUIL_JOB_ID ($EQUIL_ARRAY)"\n'
+            'echo "HREX production array: $PROD_JOB_ID ($PROD_ARRAY; afterok:$EQUIL_JOB_ID)"\n'
+            'echo "Inspect: sacct -X -j ${EQUIL_JOB_ID},${PROD_JOB_ID} --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
+        )
+    else:
+        submit_text = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n\n"
+            f"PROJECT_DIR={shlex.quote(str(project))}\n"
+            f"TASK_FILE={shlex.quote(str(task_file))}\n"
+            f"ARRAY_SCRIPT={shlex.quote(str(array_script))}\n"
+            f"EXPECTED_TASKS={expected_tasks}\n\n"
+            "# Task formula: edges x 2 legs x replicates x lambda windows\n"
+            'N_TASKS="$(awk \'NF {count++} END {print count+0}\' "$TASK_FILE")"\n'
+            '[[ "$N_TASKS" -eq "$EXPECTED_TASKS" ]] || { echo "ERROR: Found $N_TASKS FEP tasks; expected $EXPECTED_TASKS" >&2; exit 1; }\n'
+            'cd "$PROJECT_DIR"\n'
+            'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
+            'echo "Submitting $N_TASKS independent six-stage FEP windows as array $ARRAY_SPEC"\n'
+            'SUBMISSION="$(sbatch --parsable --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
+            'JOB_ID="${SUBMISSION%%;*}"\n'
+            'echo "Submitted job array: $JOB_ID ($ARRAY_SPEC)"\n'
+            'echo "Combined output: $PROJECT_DIR/slurm-${JOB_ID}_<array-index>.out"\n'
+            'echo "Inspect: sacct -X -j $JOB_ID --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
+        )
+    submit_script.write_text(submit_text, encoding="utf-8")
     submit_script.chmod(submit_script.stat().st_mode | 0o100)
     return task_file, array_script, submit_script
 
