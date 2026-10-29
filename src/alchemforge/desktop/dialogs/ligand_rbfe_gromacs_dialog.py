@@ -621,7 +621,7 @@ class LigandRBFEGromacsDialog(QDialog):
         lambda_layout.addRow("Schedule preview:", self.lambda_preview)
         stage_page = QWidget()
         stage_layout = QVBoxLayout(stage_page)
-        self.stage_protocol_table = QTableWidget(6, 5)
+        self.stage_protocol_table = QTableWidget(4, 5)
         self.stage_protocol_table.setHorizontalHeaderLabels(
             ["Stage", "Integrator", "dt (ps)", "Temperature", "Pressure"]
         )
@@ -629,8 +629,6 @@ class LigandRBFEGromacsDialog(QDialog):
             ("EM", "steep", "—", "no", "no"),
             ("Early NVT", "md", "0.001", "V-rescale", "no"),
             ("Early NPT", "md", "0.001", "V-rescale", "C-rescale"),
-            ("Transition", "sd", "0.002", "no", "C-rescale"),
-            ("Final equil.", "sd", "0.002", "no", "C-rescale"),
             ("Production", "sd", "0.002", "no", "C-rescale"),
         )
         self._stage_protocol_widgets: list[dict[str, QWidget]] = []
@@ -700,11 +698,6 @@ class LigandRBFEGromacsDialog(QDialog):
         stage_form.addRow("EM tolerance (kJ/mol/nm):", self.em_tolerance)
         stage_form.addRow("NVT duration (ns):", self.nvt_duration)
         stage_form.addRow("NPT duration (ns):", self.npt_duration)
-        stage_form.addRow("Transition duration (ns):", self.transition_duration)
-        stage_form.addRow(
-            "Final equilibration duration (ns):",
-            self.final_equilibration_duration,
-        )
         stage_form.addRow("Production duration (ns):", self.production)
         stage_layout.addLayout(stage_form)
         stage_layout.addStretch()
@@ -720,16 +713,13 @@ class LigandRBFEGromacsDialog(QDialog):
         )
         restraint_note.setWordWrap(True)
         restraint_layout.addWidget(restraint_note)
-        self.restraint_protocol_table = QTableWidget(5, 4)
+        self.restraint_protocol_table = QTableWidget(2, 4)
         self.restraint_protocol_table.setHorizontalHeaderLabels(
             ["Stage", "Rules", "Restraint summary", "Edit"]
         )
         self._restraint_stage_rows = (
-            ("em", "EM"),
             ("nvt", "Early NVT"),
             ("npt", "Early NPT"),
-            ("transition", "Transition"),
-            ("final", "Final equilibration"),
         )
         for row, (stage_key, stage_label) in enumerate(self._restraint_stage_rows):
             for column, value in enumerate((stage_label, "", "")):
@@ -1011,11 +1001,16 @@ class LigandRBFEGromacsDialog(QDialog):
             )
             temperatures.append(str(widgets["temperature"].currentData()))
             pressures.append(str(widgets["pressure"].currentData()))
+        # The configuration loader retains its historical six-slot schema for
+        # compatibility. Map the visible Production row onto the unused legacy
+        # transition/final slots as well; generated workflows execute only EM,
+        # NVT, NPT, and Production.
+        order = (0, 1, 2, 3, 3, 3)
         return {
-            "integrators": integrators,
-            "timesteps_ps": timesteps,
-            "temperature_coupling": temperatures,
-            "pressure_coupling": pressures,
+            "integrators": [integrators[index] for index in order],
+            "timesteps_ps": [timesteps[index] for index in order],
+            "temperature_coupling": [temperatures[index] for index in order],
+            "pressure_coupling": [pressures[index] for index in order],
         }
 
     @staticmethod
@@ -1951,11 +1946,8 @@ class LigandRBFEGromacsDialog(QDialog):
             ]
 
         return {
-            "em": rules(0.0, 0.0, 0.0),
             "nvt": rules(1000.0, 1000.0, 1000.0),
             "npt": rules(500.0, 500.0, 500.0),
-            "transition": rules(0.0, 100.0, 100.0),
-            "final": rules(0.0, 20.0, 0.0),
         }
 
     def _restraint_structure_description(self) -> str:
@@ -2038,7 +2030,7 @@ class LigandRBFEGromacsDialog(QDialog):
             )
 
     def _resolved_restraint_configuration(self) -> dict[str, object]:
-        forces: list[list[float]] = []
+        forces_by_stage: dict[str, list[float]] = {}
         component_selections: dict[str, list[dict[str, object]]] = {
             "protein": [],
             "ligand": [],
@@ -2064,10 +2056,20 @@ class LigandRBFEGromacsDialog(QDialog):
                 stage_forces[component] = force
                 if parsed not in component_selections[component]:
                     component_selections[component].append(parsed)
-            forces.append(
-                [stage_forces["protein"], stage_forces["ligand"], stage_forces["cofactor"]]
-            )
-        forces.append([0.0, 0.0, 0.0])
+            forces_by_stage[stage_key] = [
+                stage_forces["protein"],
+                stage_forces["ligand"],
+                stage_forces["cofactor"],
+            ]
+        released = [0.0, 0.0, 0.0]
+        forces = [
+            list(released),
+            forces_by_stage["nvt"],
+            forces_by_stage["npt"],
+            list(released),
+            list(released),
+            list(released),
+        ]
 
         selections: dict[str, dict[str, object]] = {}
         for component, parsed_rules in component_selections.items():
@@ -2291,8 +2293,6 @@ class LigandRBFEGromacsDialog(QDialog):
             f"em_tolerance = {self.em_tolerance.value()}\n"
             f"nvt_ns = {self.nvt_duration.value()}\n"
             f"npt_ns = {self.npt_duration.value()}\n"
-            f"transition_ns = {self.transition_duration.value()}\n"
-            f"final_equilibration_ns = {self.final_equilibration_duration.value()}\n"
             f"production_ns = {self.production.value()}\n\n"
             "[stage_protocol]\n"
             f"integrators = {json.dumps(stage_protocol['integrators'])}\n"

@@ -87,8 +87,7 @@ def render_slurm_array_script(
         + 'BASE_GRO="$LEG_DIR/setup/system.gro"\n'
         + 'TOPOLOGY="$LEG_DIR/setup/topol.top"\n'
         + 'for required in "$BASE_GRO" "$TOPOLOGY" "$TASK_DIR/em.mdp" '
-        + '"$TASK_DIR/nvt.mdp" "$TASK_DIR/npt.mdp" '
-        + '"$TASK_DIR/transition.mdp" "$TASK_DIR/equil.mdp"'
+        + '"$TASK_DIR/nvt.mdp" "$TASK_DIR/npt.mdp"'
         + ('; do\n' if equilibration_only else ' "$TASK_DIR/prod.mdp"; do\n')
         + '    [[ -s "$required" ]] || { echo "ERROR: Missing $required" >&2; exit 1; }\n'
         + "done\n\n"
@@ -160,9 +159,7 @@ def render_slurm_array_script(
         + 'run_stage em "$BASE_GRO"\n'
         + 'run_stage nvt em.gro\n'
         + 'run_stage npt nvt.gro nvt.cpt\n'
-        + 'run_stage transition npt.gro npt.cpt\n'
-        + 'run_stage equil transition.gro transition.cpt\n'
-        + ("" if equilibration_only else 'run_stage prod equil.gro equil.cpt\n')
+        + ("" if equilibration_only else 'run_stage prod npt.gro npt.cpt\n')
     )
 
 
@@ -318,9 +315,9 @@ def render_slurm_hrex_script(
         + "}\n\n"
         + 'echo "HREX production group: $FEP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
         + 'for replica in "${REPLICA_DIRS[@]}"; do\n'
-        + '    [[ -s "$replica/equil.gro" ]] || { echo "ERROR: Independent equilibration is incomplete: $replica/equil.gro" >&2; exit 1; }\n'
+        + '    [[ -s "$replica/npt.gro" ]] || { echo "ERROR: NPT equilibration is incomplete: $replica/npt.gro" >&2; exit 1; }\n'
         + 'done\n'
-        + 'prepare_stage prod equil equil\nrun_hrex_production\n'
+        + 'prepare_stage prod npt npt\nrun_hrex_production\n'
     )
 
 
@@ -353,8 +350,6 @@ def stage_fep_task_directories(
                         ("em.mdp", "mini"),
                         ("nvt.mdp", "nvt"),
                         ("npt.mdp", "npt"),
-                        ("transition.mdp", "transition"),
-                        ("equil.mdp", "final"),
                         ("prod.mdp", "prod"),
                     ):
                         (task / filename).write_text(
@@ -521,8 +516,6 @@ def stage(
             ("em.mdp", "mini"),
             ("nvt.mdp", "nvt"),
             ("npt.mdp", "npt"),
-            ("transition.mdp", "transition"),
-            ("equil.mdp", "final"),
             ("prod.mdp", "prod"),
         ):
             (leg_dir / filename).write_text(
@@ -543,8 +536,6 @@ def stage(
         "em.mdp",
         "nvt.mdp",
         "npt.mdp",
-        "transition.mdp",
-        "equil.mdp",
         "prod.mdp",
     ):
         shutil.copy2(
