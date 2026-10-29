@@ -606,7 +606,7 @@ def _validate(args: argparse.Namespace) -> int:
 def _stage(args: argparse.Namespace) -> int:
     config = _load(args)
     config.validate_inputs()
-    generated, network = stage(config)
+    generated, network = stage(config, reuse_network=args.reuse_network)
     print(f"Staged ligand-RBFE project: {config.project_dir}")
     print(f"Generated shell configuration: {generated}")
     print(
@@ -665,6 +665,14 @@ def add_ligand_rbfe_parser(
 
     stage_parser = commands.add_parser("stage", help="Stage inputs and manifest")
     stage_parser.add_argument("config", type=Path)
+    stage_parser.add_argument(
+        "--reuse-network",
+        action="store_true",
+        help=(
+            "Reuse the existing project network and edge setups when staging "
+            "additional replicate directories"
+        ),
+    )
     stage_parser.set_defaults(func=_stage)
 
     run = commands.add_parser("run", help="Run the configured GROMACS worker")
