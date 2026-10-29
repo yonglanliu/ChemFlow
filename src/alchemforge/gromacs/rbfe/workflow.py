@@ -119,6 +119,10 @@ def render_slurm_array_script(
         + '    local stage="$1"\n'
         + '    local coordinates="$2"\n'
         + '    local checkpoint="${3:-}"\n'
+        + '    local restraint_reference="$BASE_GRO"\n'
+        + '    if [[ "$stage" != "em" && -s "em.gro" ]]; then\n'
+        + '        restraint_reference="em.gro"\n'
+        + "    fi\n"
         + '    if [[ -s "${stage}.gro" ]]; then\n'
         + '        [[ "$stage" == "em" ]] && validate_minimization "${stage}.log"\n'
         + '        echo "Skipping completed ${stage}: ${stage}.gro exists"\n'
@@ -126,7 +130,7 @@ def render_slurm_array_script(
         + "    fi\n"
         + '    if [[ ! -s "${stage}.tpr" ]]; then\n'
         + '        grompp_args=( grompp -f "${stage}.mdp" -c "$coordinates" '
-        + '-r "$BASE_GRO" -p "$TOPOLOGY" -o "${stage}.tpr" )\n'
+        + '-r "$restraint_reference" -p "$TOPOLOGY" -o "${stage}.tpr" )\n'
         + '        if [[ -n "$checkpoint" && -s "$checkpoint" ]]; then\n'
         + '            grompp_args+=( -t "$checkpoint" )\n'
         + "        fi\n"
@@ -289,7 +293,9 @@ def render_slurm_hrex_script(
         + '        [[ -s "$replica/${stage}.tpr" ]] && continue\n'
         + '        local coordinates="$BASE_GRO"\n'
         + '        [[ "$previous" != "BASE" ]] && coordinates="$replica/${previous}.gro"\n'
-        + '        args=( grompp -f "$replica/${stage}.mdp" -c "$coordinates" -r "$BASE_GRO" -p "$TOPOLOGY" -o "$replica/${stage}.tpr" )\n'
+        + '        local restraint_reference="$BASE_GRO"\n'
+        + '        [[ -s "$replica/em.gro" ]] && restraint_reference="$replica/em.gro"\n'
+        + '        args=( grompp -f "$replica/${stage}.mdp" -c "$coordinates" -r "$restraint_reference" -p "$TOPOLOGY" -o "$replica/${stage}.tpr" )\n'
         + '        if [[ -n "$checkpoint" && -s "$replica/${checkpoint}.cpt" ]]; then args+=( -t "$replica/${checkpoint}.cpt" ); fi\n'
         + '        if ! "${GMX_PREP_COMMAND[@]}" "${args[@]}"; then\n'
         + '            echo "ERROR: grompp failed for $replica/${stage}" >&2\n'
