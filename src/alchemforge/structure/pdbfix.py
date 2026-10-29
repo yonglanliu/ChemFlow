@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shlex
 import shutil
 import subprocess
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -227,8 +229,14 @@ def stage(
         encoding="utf-8",
     )
     runner = task_directory / "run_pdbfixer.sh"
-    source_runner = Path(__file__).with_name("run_pdbfixer.sh")
-    runner.write_text(source_runner.read_text(encoding="utf-8"), encoding="utf-8")
+    python = shlex.quote(sys.executable)
+    runner.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n\n"
+        'MANIFEST="${1:?Usage: $0 /path/to/pdbfixer_manifest.json}"\n'
+        f"{python} -m alchemforge.structure.pdbfix \"$MANIFEST\"\n",
+        encoding="utf-8",
+    )
     runner.chmod(runner.stat().st_mode | 0o100)
     return runner, manifest, tasks
 
