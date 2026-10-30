@@ -380,7 +380,7 @@ def render_rbfe_stage_mdp(
     membrane: bool | None = None,
     position_restraints: bool = True,
 ) -> str:
-    """Render one stage of the six-stage RBFE protocol."""
+    """Render one stage of the four-stage RBFE protocol."""
     stage = stage.casefold()
     if stage not in {"mini", "nvt", "npt", "transition", "final", "prod"}:
         raise ValueError(

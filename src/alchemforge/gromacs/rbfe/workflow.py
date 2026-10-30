@@ -83,7 +83,8 @@ def render_slurm_array_script(
         + '    echo "ERROR: No accessible FEP task directory for array index $TASK_INDEX" >&2\n'
         + "    exit 1\n"
         + "fi\n\n"
-        + 'LEG_DIR="$(dirname "$(dirname "$(dirname "$TASK_DIR")")")"\n'
+        + 'REP_DIR="$(dirname "$TASK_DIR")"\n'
+        + 'LEG_DIR="$(dirname "$REP_DIR")"\n'
         + 'BASE_GRO="$LEG_DIR/setup/system.gro"\n'
         + 'TOPOLOGY="$LEG_DIR/setup/topol.top"\n'
         + 'for required in "$BASE_GRO" "$TOPOLOGY" "$TASK_DIR/em.mdp" '
@@ -241,9 +242,9 @@ def render_slurm_hrex_script(
         + f"EXCHANGE_INTERVAL={config.exchange_interval_steps}\n\n"
         + activation
         + module_load
-        + 'FEP_DIR="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n'
-        + '[[ -d "$FEP_DIR" ]] || { echo "ERROR: Missing HREX directory: $FEP_DIR" >&2; exit 1; }\n'
-        + 'mapfile -t REPLICA_DIRS < <(find "$FEP_DIR" -maxdepth 1 -type d '
+        + 'REP_DIR="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n'
+        + '[[ -d "$REP_DIR" ]] || { echo "ERROR: Missing HREX replicate directory: $REP_DIR" >&2; exit 1; }\n'
+        + 'mapfile -t REPLICA_DIRS < <(find "$REP_DIR" -maxdepth 1 -type d '
         + "-name 'lambda_*' -print | sort)\n"
         + 'REPLICA_COUNT="${#REPLICA_DIRS[@]}"\n'
         + 'if (( REPLICA_COUNT != EXPECTED_REPLICAS )); then\n'
@@ -253,7 +254,7 @@ def render_slurm_hrex_script(
         + mpi_launcher
         + 'OMP_PER_REPLICA="${SLURM_CPUS_PER_TASK:-1}"\n'
         + 'export OMP_NUM_THREADS="$OMP_PER_REPLICA"\n'
-        + 'LEG_DIR="$(dirname "$(dirname "$FEP_DIR")")"\n'
+        + 'LEG_DIR="$(dirname "$REP_DIR")"\n'
         + 'BASE_GRO="$LEG_DIR/setup/system.gro"\n'
         + 'TOPOLOGY="$LEG_DIR/setup/topol.top"\n'
         + '[[ -s "$BASE_GRO" && -s "$TOPOLOGY" ]] || { echo "ERROR: Missing leg setup" >&2; exit 1; }\n\n'
@@ -313,7 +314,7 @@ def render_slurm_hrex_script(
         + '    if [[ -s "${REPLICA_DIRS[0]}/${stage}.cpt" ]]; then args+=( -cpi "${stage}.cpt" -append ); fi\n'
         + '    "${MPI_LAUNCHER[@]}" "${GMX_COMMAND[@]}" "${args[@]}"\n'
         + "}\n\n"
-        + 'echo "HREX production group: $FEP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
+        + 'echo "HREX production group: $REP_DIR; replicas: $REPLICA_COUNT; exchange every $EXCHANGE_INTERVAL steps"\n'
         + 'for replica in "${REPLICA_DIRS[@]}"; do\n'
         + '    [[ -s "$replica/npt.gro" ]] || { echo "ERROR: NPT equilibration is incomplete: $replica/npt.gro" >&2; exit 1; }\n'
         + 'done\n'
@@ -324,7 +325,7 @@ def render_slurm_hrex_script(
 def stage_fep_task_directories(
     config: LigandRBFEConfig, network: NetworkPlan
 ) -> list[Path]:
-    """Create one sequential six-stage task per FEP window."""
+    """Create one sequential four-stage task per FEP window."""
     with network.edges_csv.open(newline="", encoding="utf-8") as handle:
         edge_ids = [row["edge_id"].strip() for row in csv.DictReader(handle)]
     tasks: list[Path] = []
@@ -342,7 +343,6 @@ def stage_fep_task_directories(
                         / edge_id
                         / leg
                         / f"rep_{replicate}"
-                        / "fep"
                         / f"lambda_{window:03d}"
                     )
                     task.mkdir(parents=True, exist_ok=True)
@@ -476,7 +476,7 @@ def write_slurm_array_files(
             '[[ "$N_TASKS" -eq "$EXPECTED_TASKS" ]] || { echo "ERROR: Found $N_TASKS FEP tasks; expected $EXPECTED_TASKS" >&2; exit 1; }\n'
             'cd "$PROJECT_DIR"\n'
             'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
-            'echo "Submitting $N_TASKS independent six-stage FEP windows as array $ARRAY_SPEC"\n'
+            'echo "Submitting $N_TASKS independent four-stage FEP windows as array $ARRAY_SPEC"\n'
             'SUBMISSION="$(sbatch --parsable --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
             'JOB_ID="${SUBMISSION%%;*}"\n'
             'echo "Submitted job array: $JOB_ID ($ARRAY_SPEC)"\n'

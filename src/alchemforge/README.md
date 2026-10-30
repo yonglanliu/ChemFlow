@@ -203,7 +203,9 @@ Ligand RBFE with GROMACS uses `gromacs/rbfe/example.toml`. It accepts one
 prepared protein PDB and one multi-molecule ligand SDF. Staging uses OpenFE's
 LoMap or Kartograf mapper to write a GraphML network, an edge table, and a
 JSON atom mapping for every selected edge. Execution additionally requires a
-GROMACS/PMX worker script:
+GROMACS/PMX worker script. See the complete
+[GROMACS LigandFEP-RBFE tutorial](gromacs/rbfe/README.md) for desktop setup,
+HREX submission, restarts, and adding replicates without rebuilding systems:
 
 ```bash
 alchemforge ligand-rbfe validate my_ligand_rbfe.toml
