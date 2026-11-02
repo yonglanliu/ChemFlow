@@ -27,6 +27,13 @@ dependencies:
   - matplotlib
   - "rdkit>=2024.03,<2026.03"
   - openbabel
+  # Install the complete font-rendering stack from conda-forge so RDKit,
+  # Matplotlib, and Qt do not mix incompatible HarfBuzz/FreeType libraries.
+  - cairo
+  - "freetype>=2.13"
+  - fontconfig
+  - harfbuzz
+  - pango
   - pyyaml
   - mpi4py
   - alchemlyb

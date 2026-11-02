@@ -42,6 +42,8 @@ dependencies:
   - cairo
   - "freetype>=2.13"
   - fontconfig
+  - harfbuzz
+  - pango
   - pyyaml
   - mpi4py
   - alchemlyb
