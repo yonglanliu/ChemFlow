@@ -54,7 +54,7 @@ from alchemforge.desktop.modeless import show_modeless
 from alchemforge.gromacs.lambda_schedule import generate_lambda_windows
 from alchemforge.gromacs.membrane import count_lipid_molecules_pdb
 from alchemforge.gromacs.rbfe.config import LigandRBFEConfig
-from alchemforge.gromacs.rbfe.workflow import stage, write_slurm_array_files
+from alchemforge.gromacs.rbfe.workflow import stage
 from alchemforge.gromacs.system_prepare import (
     GromacsSystemPreparationConfig,
     installed_amber_lipid_force_fields,
@@ -621,21 +621,31 @@ class LigandRBFEGromacsDialog(QDialog):
         lambda_layout.addRow("Schedule preview:", self.lambda_preview)
         stage_page = QWidget()
         stage_layout = QVBoxLayout(stage_page)
-        self.stage_protocol_table = QTableWidget(4, 5)
-        self.stage_protocol_table.setHorizontalHeaderLabels(
-            ["Stage", "Integrator", "dt (ps)", "Temperature", "Pressure"]
+        stage_note = QLabel(
+            "Configure each simulation stage independently. Only parameters "
+            "used by that stage are shown; target temperature is shared by "
+            "the three molecular-dynamics stages."
         )
+        stage_note.setWordWrap(True)
+        stage_layout.addWidget(stage_note)
+        shared_conditions = QFormLayout()
+        shared_conditions.setLabelAlignment(Qt.AlignRight)
+        shared_conditions.addRow("Target temperature:", self.temperature)
+        stage_layout.addLayout(shared_conditions)
+
+        self.stage_protocol_tabs = QTabWidget()
         stage_rows = (
             ("EM", "steep", "—", "no", "no"),
-            ("Early NVT", "md", "0.001", "V-rescale", "no"),
-            ("Early NPT", "md", "0.001", "V-rescale", "C-rescale"),
+            ("NVT", "md", "0.001", "V-rescale", "no"),
+            ("NPT", "md", "0.001", "V-rescale", "C-rescale"),
             ("Production", "sd", "0.002", "no", "C-rescale"),
         )
         self._stage_protocol_widgets: list[dict[str, QWidget]] = []
         for row, values in enumerate(stage_rows):
-            stage_item = QTableWidgetItem(values[0])
-            stage_item.setFlags(stage_item.flags() & ~Qt.ItemIsEditable)
-            self.stage_protocol_table.setItem(row, 0, stage_item)
+            detail_page = QWidget()
+            detail_layout = QVBoxLayout(detail_page)
+            detail_form = QFormLayout()
+            detail_form.setLabelAlignment(Qt.AlignRight)
             integrator = QComboBox()
             integrator.addItems(
                 ["steep", "cg", "l-bfgs"]
@@ -669,10 +679,6 @@ class LigandRBFEGromacsDialog(QDialog):
                 ):
                     pressure.addItem(label, data)
             pressure.setCurrentIndex(pressure.findData(values[4]))
-            for column, widget in enumerate(
-                (integrator, timestep, temperature, pressure), start=1
-            ):
-                self.stage_protocol_table.setCellWidget(row, column, widget)
             integrator.currentTextChanged.connect(
                 lambda _value, index=row: self._update_stage_protocol_row(index)
             )
@@ -684,23 +690,50 @@ class LigandRBFEGromacsDialog(QDialog):
                     "pressure": pressure,
                 }
             )
-        self.stage_protocol_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.stage_protocol_table.verticalHeader().setVisible(False)
-        self.stage_protocol_table.horizontalHeader().setStretchLastSection(True)
-        self.stage_protocol_table.setMaximumHeight(220)
+
+            detail_form.addRow(
+                "Minimization algorithm:" if row == 0 else "Integrator:",
+                integrator,
+            )
+            if row == 0:
+                detail_form.addRow("Maximum steps:", self.em_steps)
+                detail_form.addRow("Force tolerance (kJ/mol/nm):", self.em_tolerance)
+                explanation = QLabel(
+                    "Energy minimization has no MD timestep, thermostat, "
+                    "barostat, or velocity generation. Periodic interactions "
+                    "remain enabled for solvated systems."
+                )
+            else:
+                detail_form.addRow("Timestep:", timestep)
+                duration = (
+                    self.nvt_duration
+                    if row == 1
+                    else self.npt_duration
+                    if row == 2
+                    else self.production
+                )
+                detail_form.addRow("Duration (ns):", duration)
+                detail_form.addRow("Thermostat:", temperature)
+                if row >= 2:
+                    detail_form.addRow("Barostat:", pressure)
+                explanation = QLabel(
+                    "NVT keeps the volume fixed; pressure coupling is not used."
+                    if row == 1
+                    else "NPT equilibrates temperature and pressure before production."
+                    if row == 2
+                    else "Production collects free-energy data. Stochastic dynamics "
+                    "controls temperature internally when integrator = sd."
+                )
+            explanation.setWordWrap(True)
+            explanation.setStyleSheet("color:#6b7280")
+            detail_layout.addLayout(detail_form)
+            detail_layout.addWidget(explanation)
+            detail_layout.addStretch()
+            self.stage_protocol_tabs.addTab(detail_page, values[0])
+
         for row in range(len(stage_rows)):
             self._update_stage_protocol_row(row)
-        stage_layout.addWidget(self.stage_protocol_table)
-        stage_form = QFormLayout()
-        stage_form.setLabelAlignment(Qt.AlignRight)
-        stage_form.addRow("Simulation temperature:", self.temperature)
-        stage_form.addRow("EM maximum steps:", self.em_steps)
-        stage_form.addRow("EM tolerance (kJ/mol/nm):", self.em_tolerance)
-        stage_form.addRow("NVT duration (ns):", self.nvt_duration)
-        stage_form.addRow("NPT duration (ns):", self.npt_duration)
-        stage_form.addRow("Production duration (ns):", self.production)
-        stage_layout.addLayout(stage_form)
-        stage_layout.addStretch()
+        stage_layout.addWidget(self.stage_protocol_tabs)
         self.simulation_tabs.addTab(stage_page, "Stage Protocol")
 
         restraint_page = QWidget()
@@ -912,7 +945,7 @@ class LigandRBFEGromacsDialog(QDialog):
             "bonded_lambdas": "Bond, angle, and dihedral interpolation value for every manual lambda state.",
             "restraint_lambdas": "Alchemical scaling vector for topology restraint terms; standard RBFE normally uses zeros.",
             "lambda_preview": "Resolved Coulomb, vdW, bonded, and restraint vectors written to the MDP files.",
-            "timestep": "Base integration timestep in picoseconds. Individual protocol stages may use a smaller timestep as shown in the stage table.",
+            "timestep": "Legacy base timestep in picoseconds; effective timesteps are configured separately in the NVT, NPT, and Production tabs.",
             "temperature": "Target simulation temperature in kelvin, used for velocity generation and every thermostatted stage.",
             "em_steps": "Maximum steepest-descent energy-minimization steps.",
             "em_tolerance": "Energy-minimization convergence threshold in kJ mol⁻¹ nm⁻¹.",
@@ -921,9 +954,9 @@ class LigandRBFEGromacsDialog(QDialog):
             "transition_duration": "Stochastic-dynamics transition duration while strong restraints are reduced.",
             "final_equilibration_duration": "Final equilibration duration with only minimal selected restraints.",
             "production": "Production sampling time per lambda window in nanoseconds.",
-            "stage_protocol_table": "Exact integrator, timestep, thermostat, and barostat used for each sequential stage.",
-            "restraint_protocol_table": "Five stage-specific restraint sections. Double-click a row or use Configure Selection to edit PyMOL-style rules and force constants in kJ mol⁻¹ nm⁻².",
-            "mdp_integrator": "Base production integrator for generated alchemical MDP settings; the stage protocol table shows the effective integrator for every stage.",
+            "stage_protocol_tabs": "Stage-specific controls; parameters that do not apply to a stage are omitted.",
+            "restraint_protocol_table": "NVT- and NPT-specific restraint sections. Double-click a row or use Configure Selection to edit PyMOL-style rules and force constants in kJ mol⁻¹ nm⁻².",
+            "mdp_integrator": "Legacy base integrator; the effective integrator is configured independently in each stage tab.",
             "mdp_constraints": "Bond constraints used by LINCS; h-bonds permits a standard 2 fs timestep.",
             "mdp_coulomb_cutoff": "Real-space electrostatic cutoff in nanometres before PME treatment.",
             "mdp_vdw_cutoff": "Van der Waals cutoff in nanometres; force-field-specific overrides may apply.",
@@ -2365,12 +2398,6 @@ class LigandRBFEGromacsDialog(QDialog):
             )
             config_path = self._write_config()
             project = config_path.parent
-            workflow_config = LigandRBFEConfig.load(config_path)
-            edges_path = Path(self.network_bundle.text().strip()) / "edges.csv"
-            with edges_path.open(newline="", encoding="utf-8") as handle:
-                edge_count = sum(1 for _row in csv.DictReader(handle))
-            if edge_count > 0:
-                write_slurm_array_files(workflow_config, edge_count=edge_count)
             combined_runner = project / "build_gromacs_rbfe_workflow.sh"
             combined_runner.write_text(
                 "#!/usr/bin/env bash\n"
@@ -2381,10 +2408,10 @@ class LigandRBFEGromacsDialog(QDialog):
                 f"test -s {shlex.quote(str(output / 'topol.top'))}\n"
                 f"{shlex.quote(sys.executable)} -m alchemforge.cli "
                 f"ligand-rbfe stage {shlex.quote(str(config_path))}\n"
-                f"test -s {shlex.quote(str(project / 'build_hybrid_systems.sh'))} "
-                "|| { echo 'RBFE staging did not create build_hybrid_systems.sh' "
+                f"test -s {shlex.quote(str(project / 'gromacs_model_build_array.sh'))} "
+                "|| { echo 'RBFE staging did not create the scheduled model-build array' "
                 ">&2; exit 1; }\n"
-                f"bash {shlex.quote(str(project / 'build_hybrid_systems.sh'))}\n",
+                f"test -s {shlex.quote(str(project / 'submit_production_array.sh'))}\n",
                 encoding="utf-8",
             )
             combined_runner.chmod(combined_runner.stat().st_mode | 0o100)
@@ -2401,8 +2428,9 @@ class LigandRBFEGromacsDialog(QDialog):
             "GROMACS RBFE Build Started",
             f"Project: {project}\n\n"
             "The Job Monitor will assemble and parameterize the complete system, "
-            "validate the ligand-free base system, build one PMX hybrid topology "
-            "per network transformation, and create both complex and solvent legs.",
+            "validate the ligand-free base system and stage scalable Slurm arrays. "
+            "Each PMX edge model and its complex/solvent legs will be built on "
+            "the cluster before its simulation jobs begin.",
         )
 
     def show_network(self) -> None:

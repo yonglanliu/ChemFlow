@@ -25,6 +25,53 @@ def _directive(value: str, label: str) -> str:
     return value
 
 
+def render_slurm_model_build_script(
+    config: LigandRBFEConfig, *, expected_tasks: int
+) -> str:
+    """Render one scheduler array that constructs each edge model independently."""
+    partition = (
+        f"#SBATCH --partition={_directive(config.slurm_partition, 'Partition')}\n"
+        if config.slurm_partition.strip()
+        else ""
+    )
+    gres = (
+        f"#SBATCH --gres=gpu:{config.slurm_gpus}\n"
+        if config.slurm_gpus > 0
+        else ""
+    )
+    activation = ""
+    if config.slurm_conda_init.strip():
+        activation += f"source {shlex.quote(config.slurm_conda_init)}\n"
+    if config.slurm_conda_environment.strip():
+        activation += f"conda activate {shlex.quote(config.slurm_conda_environment)}\n"
+    return (
+        "#!/bin/bash\n"
+        f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}_build\n"
+        + partition
+        + gres
+        + f"#SBATCH --nodes={config.slurm_nodes}\n"
+        + "#SBATCH --ntasks=1\n"
+        + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
+        + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
+        + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
+        + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
+        + "set -euo pipefail\n\n"
+        + 'TASK_FILE="${1:?Provide model_build_tasks.txt}"\n'
+        + 'TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
+        + activation
+        + 'BUILD_SCRIPT="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n'
+        + '[[ -s "$BUILD_SCRIPT" ]] || { echo "ERROR: Missing edge builder: $BUILD_SCRIPT" >&2; exit 1; }\n'
+        + 'EDGE_DIR="$(dirname "$BUILD_SCRIPT")"\n'
+        + 'REQUIRED=( "$EDGE_DIR/complex/setup/system.gro" "$EDGE_DIR/complex/setup/topol.top" "$EDGE_DIR/solvent/setup/system.gro" "$EDGE_DIR/solvent/setup/topol.top" )\n'
+        + 'COMPLETE=1\nfor path in "${REQUIRED[@]}"; do [[ -s "$path" ]] || COMPLETE=0; done\n'
+        + 'if (( COMPLETE == 1 )); then echo "Skipping completed model: $EDGE_DIR"; exit 0; fi\n'
+        + 'echo "Building edge model on $(hostname): $EDGE_DIR"\n'
+        + 'bash "$BUILD_SCRIPT"\n'
+        + 'for path in "${REQUIRED[@]}"; do [[ -s "$path" ]] || { echo "ERROR: Model build did not create $path" >&2; exit 1; }; done\n'
+        + 'echo "Completed edge model: $EDGE_DIR"\n'
+    )
+
+
 def render_slurm_array_script(
     config: LigandRBFEConfig,
     *,
@@ -322,9 +369,7 @@ def render_slurm_hrex_script(
     )
 
 
-def stage_fep_task_directories(
-    config: LigandRBFEConfig, network: NetworkPlan
-) -> list[Path]:
+def stage_fep_task_directories(config: LigandRBFEConfig, network: NetworkPlan) -> list[Path]:
     """Create one sequential four-stage task per FEP window."""
     with network.edges_csv.open(newline="", encoding="utf-8") as handle:
         edge_ids = [row["edge_id"].strip() for row in csv.DictReader(handle)]
@@ -336,15 +381,15 @@ def stage_fep_task_directories(
                 config.start_replicate,
                 config.start_replicate + config.replicates,
             ):
+                replicate_dir = (
+                    config.project_dir
+                    / "edges"
+                    / edge_id
+                    / leg
+                    / f"rep_{replicate}"
+                )
                 for window in range(config.lambda_windows):
-                    task = (
-                        config.project_dir
-                        / "edges"
-                        / edge_id
-                        / leg
-                        / f"rep_{replicate}"
-                        / f"lambda_{window:03d}"
-                    )
+                    task = replicate_dir / f"lambda_{window:03d}"
                     task.mkdir(parents=True, exist_ok=True)
                     for filename, stage_name in (
                         ("em.mdp", "mini"),
@@ -367,13 +412,18 @@ def stage_fep_task_directories(
 
 
 def write_slurm_array_files(
-    config: LigandRBFEConfig, *, edge_count: int, tasks: list[Path] | None = None
+    config: LigandRBFEConfig,
+    *,
+    edge_count: int,
+    tasks: list[Path] | None = None,
+    model_build_tasks: list[Path] | None = None,
 ) -> tuple[Path, Path, Path]:
     """Write staged equilibration/production manifests and Slurm runners."""
     project = config.project_dir
     project.mkdir(parents=True, exist_ok=True)
     expected_tasks = edge_count * config.tasks_per_edge
     window_tasks = list(tasks or [])
+    build_tasks = list(model_build_tasks or [])
     group_tasks = list(dict.fromkeys(task.parent for task in window_tasks))
     equilibration_tasks = (
         edge_count * 2 * config.replicates * config.lambda_windows
@@ -395,6 +445,24 @@ def write_slurm_array_files(
             f"equilibration_array=0-{equilibration_tasks - 1}\n"
         )
     (project / "slurm_array_summary.txt").write_text(summary, encoding="utf-8")
+    build_task_file: Path | None = None
+    build_script: Path | None = None
+    if build_tasks:
+        if len(build_tasks) != edge_count:
+            raise ValueError(
+                f"Expected {edge_count} edge model builders, found {len(build_tasks)}"
+            )
+        build_task_file = project / "model_build_tasks.txt"
+        build_task_file.write_text(
+            "".join(f"{task.resolve()}\n" for task in build_tasks),
+            encoding="utf-8",
+        )
+        build_script = project / "gromacs_model_build_array.sh"
+        build_script.write_text(
+            render_slurm_model_build_script(config, expected_tasks=edge_count),
+            encoding="utf-8",
+        )
+        build_script.chmod(build_script.stat().st_mode | 0o100)
     task_file = project / "production_tasks.txt"
     manifest_tasks = group_tasks if config.sampling_method == "hrex" else window_tasks
     task_file.write_text(
@@ -413,6 +481,21 @@ def write_slurm_array_files(
     array_script.chmod(array_script.stat().st_mode | 0o100)
 
     submit_script = project / "submit_production_array.sh"
+    build_variables = ""
+    build_submission = 'BUILD_JOB_ID=""\n'
+    if build_task_file is not None and build_script is not None:
+        build_variables = (
+            f"BUILD_TASK_FILE={shlex.quote(str(build_task_file))}\n"
+            f"BUILD_SCRIPT={shlex.quote(str(build_script))}\n"
+            f"EXPECTED_BUILD_TASKS={edge_count}\n"
+        )
+        build_submission = (
+            'N_BUILD="$(awk \'NF {count++} END {print count+0}\' "$BUILD_TASK_FILE")"\n'
+            '[[ "$N_BUILD" -eq "$EXPECTED_BUILD_TASKS" ]] || { echo "ERROR: Found $N_BUILD model builders; expected $EXPECTED_BUILD_TASKS" >&2; exit 1; }\n'
+            'BUILD_SUBMISSION="$(sbatch --parsable --array="0-$((N_BUILD - 1))" "$BUILD_SCRIPT" "$BUILD_TASK_FILE")"\n'
+            'BUILD_JOB_ID="${BUILD_SUBMISSION%%;*}"\n'
+            'echo "Submitted parallel edge-model build array: $BUILD_JOB_ID"\n'
+        )
     if config.sampling_method == "hrex":
         equil_task_file = project / "equilibration_tasks.txt"
         equil_task_file.write_text(
@@ -430,54 +513,60 @@ def write_slurm_array_files(
         )
         equil_script.chmod(equil_script.stat().st_mode | 0o100)
         submit_text = (
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n\n"
+            "#!/usr/bin/env bash\nset -euo pipefail\n\n"
             f"PROJECT_DIR={shlex.quote(str(project))}\n"
             f"EQUIL_TASK_FILE={shlex.quote(str(equil_task_file))}\n"
             f"EQUIL_SCRIPT={shlex.quote(str(equil_script))}\n"
             f"PROD_TASK_FILE={shlex.quote(str(task_file))}\n"
             f"PROD_SCRIPT={shlex.quote(str(array_script))}\n"
-            f"EXPECTED_EQUIL_TASKS={equilibration_tasks}\n"
+            + build_variables
+            + f"EXPECTED_EQUIL_TASKS={equilibration_tasks}\n"
             f"EXPECTED_PROD_TASKS={expected_tasks}\n"
             f"WINDOWS_PER_GROUP={config.lambda_windows}\n\n"
             'N_EQUIL="$(awk \'NF {count++} END {print count+0}\' "$EQUIL_TASK_FILE")"\n'
             'N_PROD="$(awk \'NF {count++} END {print count+0}\' "$PROD_TASK_FILE")"\n'
             '[[ "$N_EQUIL" -eq "$EXPECTED_EQUIL_TASKS" ]] || { echo "ERROR: Found $N_EQUIL equilibration tasks; expected $EXPECTED_EQUIL_TASKS" >&2; exit 1; }\n'
-            '[[ "$N_PROD" -eq "$EXPECTED_PROD_TASKS" ]] || { echo "ERROR: Found $N_PROD HREX production groups; expected $EXPECTED_PROD_TASKS" >&2; exit 1; }\n'
-            '[[ "$N_EQUIL" -eq "$((N_PROD * WINDOWS_PER_GROUP))" ]] || { echo "ERROR: Equilibration tasks are not grouped into $WINDOWS_PER_GROUP windows per HREX system" >&2; exit 1; }\n'
+            '[[ "$N_PROD" -eq "$EXPECTED_PROD_TASKS" ]] || { echo "ERROR: Found $N_PROD HREX groups; expected $EXPECTED_PROD_TASKS" >&2; exit 1; }\n'
             'cd "$PROJECT_DIR"\n'
-            'echo "Submitting $N_PROD independent system groups; each HREX production starts after only its own $WINDOWS_PER_GROUP lambda equilibrations"\n'
-            'ALL_JOB_IDS=()\n'
+            + build_submission
+            + 'ALL_JOB_IDS=()\n'
+            + '[[ -n "$BUILD_JOB_ID" ]] && ALL_JOB_IDS+=("$BUILD_JOB_ID")\n'
             'for ((GROUP_INDEX=0; GROUP_INDEX<N_PROD; GROUP_INDEX++)); do\n'
             '    EQUIL_START=$((GROUP_INDEX * WINDOWS_PER_GROUP))\n'
             '    EQUIL_END=$((EQUIL_START + WINDOWS_PER_GROUP - 1))\n'
             '    EQUIL_ARRAY="${EQUIL_START}-${EQUIL_END}"\n'
             '    PROD_ARRAY="${GROUP_INDEX}-${GROUP_INDEX}"\n'
-            '    EQUIL_SUBMISSION="$(sbatch --parsable --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
+            '    if [[ -n "$BUILD_JOB_ID" ]]; then\n'
+            '        EQUIL_SUBMISSION="$(sbatch --parsable --dependency="afterok:${BUILD_JOB_ID}" --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
+            '    else\n'
+            '        EQUIL_SUBMISSION="$(sbatch --parsable --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
+            '    fi\n'
             '    EQUIL_JOB_ID="${EQUIL_SUBMISSION%%;*}"\n'
             '    PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --array="$PROD_ARRAY" "$PROD_SCRIPT" "$PROD_TASK_FILE")"\n'
             '    PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
             '    ALL_JOB_IDS+=("$EQUIL_JOB_ID" "$PROD_JOB_ID")\n'
-            '    echo "Group $((GROUP_INDEX + 1))/$N_PROD: equilibration $EQUIL_JOB_ID [$EQUIL_ARRAY] -> HREX $PROD_JOB_ID [$PROD_ARRAY]"\n'
             'done\n'
             'JOB_ID_LIST="$(IFS=,; echo "${ALL_JOB_IDS[*]}")"\n'
             'echo "Inspect all: sacct -X -j $JOB_ID_LIST --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
         )
     else:
         submit_text = (
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n\n"
+            "#!/usr/bin/env bash\nset -euo pipefail\n\n"
             f"PROJECT_DIR={shlex.quote(str(project))}\n"
             f"TASK_FILE={shlex.quote(str(task_file))}\n"
             f"ARRAY_SCRIPT={shlex.quote(str(array_script))}\n"
-            f"EXPECTED_TASKS={expected_tasks}\n\n"
-            "# Task formula: edges x 2 legs x replicates x lambda windows\n"
+            + build_variables
+            + f"EXPECTED_TASKS={expected_tasks}\n\n"
             'N_TASKS="$(awk \'NF {count++} END {print count+0}\' "$TASK_FILE")"\n'
             '[[ "$N_TASKS" -eq "$EXPECTED_TASKS" ]] || { echo "ERROR: Found $N_TASKS FEP tasks; expected $EXPECTED_TASKS" >&2; exit 1; }\n'
             'cd "$PROJECT_DIR"\n'
-            'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
-            'echo "Submitting $N_TASKS independent four-stage FEP windows as array $ARRAY_SPEC"\n'
-            'SUBMISSION="$(sbatch --parsable --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
+            + build_submission
+            + 'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
+            'if [[ -n "$BUILD_JOB_ID" ]]; then\n'
+            '    SUBMISSION="$(sbatch --parsable --dependency="afterok:${BUILD_JOB_ID}" --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
+            'else\n'
+            '    SUBMISSION="$(sbatch --parsable --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
+            'fi\n'
             'JOB_ID="${SUBMISSION%%;*}"\n'
             'echo "Submitted job array: $JOB_ID ($ARRAY_SPEC)"\n'
             'echo "Combined output: $PROJECT_DIR/slurm-${JOB_ID}_<array-index>.out"\n'
@@ -579,10 +668,20 @@ def stage(
         correction_file=config.charge_correction_file,
         force_field=config.force_field,
     )
-    stage_hybrid_systems(config, network)
+    hybrid_builder = stage_hybrid_systems(config, network)
+    model_build_tasks: list[Path] = []
+    if hybrid_builder is not None:
+        with network.edges_csv.open(newline="", encoding="utf-8") as handle:
+            model_build_tasks = [
+                project / "edges" / row["edge_id"].strip() / "build_hybrid.sh"
+                for row in csv.DictReader(handle)
+            ]
     tasks = stage_fep_task_directories(config, network)
     write_slurm_array_files(
-        config, edge_count=network.edge_count, tasks=tasks
+        config,
+        edge_count=network.edge_count,
+        tasks=tasks,
+        model_build_tasks=model_build_tasks,
     )
     generated.write_text(config.render_shell_config(), encoding="utf-8")
     return generated, network
@@ -686,7 +785,9 @@ def add_ligand_rbfe_parser(
     render.add_argument("config", type=Path)
     render.add_argument("--window", type=int, required=True)
     render.add_argument(
-        "--stage", choices=("mini", "nvt", "npt", "prod"), default="prod"
+        "--stage",
+        choices=("mini", "nvt", "npt", "prod"),
+        default="prod",
     )
     render.add_argument("--leg", choices=("complex", "solvent"), default="complex")
     render.add_argument("--output", type=Path, required=True)

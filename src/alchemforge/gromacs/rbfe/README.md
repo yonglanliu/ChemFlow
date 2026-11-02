@@ -202,14 +202,18 @@ When the network already exists and must not be replanned:
 alchemforge ligand-rbfe stage ligand_rbfe.toml --reuse-network
 ```
 
-For a newly constructed project, run the generated hybrid-system builder once:
+Do not build every hybrid edge locally. Staging now creates one model-build
+task per network edge and a Slurm array:
 
 ```bash
-bash <project>/build_hybrid_systems.sh
+bash <project>/submit_production_array.sh
 ```
 
-Do not run that builder merely to add replicates to systems that have already
-been prepared.
+The submission script first launches `gromacs_model_build_array.sh`. Each array
+element runs one edge's `build_hybrid.sh`, producing both complex and solvent
+systems. Simulation arrays are submitted with an `afterok` dependency on the
+model-build array. Completed edge models are detected and skipped, so adding
+replicates does not rebuild existing models.
 
 ## 5. Generated directory layout
 
@@ -236,6 +240,8 @@ The important output paths are:
 │           │   └── topol.top
 │           └── rep_1/lambda_000/
 ├── equilibration_tasks.txt
+├── model_build_tasks.txt
+├── gromacs_model_build_array.sh
 ├── production_tasks.txt
 ├── gromacs_equilibration_array.sh
 ├── gromacs_production_array.sh
@@ -247,7 +253,7 @@ anonymous names such as `edge_0001`.
 
 ## 6. Independent-window execution
 
-In independent mode, each array task runs one lambda window sequentially:
+Each lambda window has its own complete preparation and sampling sequence:
 
 ```text
 EM → NVT → NPT → Production
@@ -267,14 +273,14 @@ checkpoint is passed with `-cpi` and `-append` when available.
 For every edge × leg × replicate group, AlchemForge submits:
 
 ```text
-one lambda equilibration array
+one per-lambda EM/NVT/NPT equilibration array
             ↓ afterok
 one coordinated HREX production job
 ```
 
 For 21 lambda windows, the equilibration array has 21 tasks. Its dependent
-production job starts as soon as those 21 NPT stages succeed. It does not wait
-for other edges, the opposite thermodynamic leg, or other replicates.
+production job starts when all 21 lambda-specific NPT stages succeed. It does
+not wait for other edges, the opposite thermodynamic leg, or other replicates.
 
 Production uses:
 
@@ -282,8 +288,9 @@ Production uses:
 gmx_mpi mdrun -multidir <lambda directories> -replex <interval>
 ```
 
-Every HREX replica must have `npt.gro` before production begins. Complex and
-solvent legs are separate HREX groups and are never exchanged with each other.
+Every HREX replica must have its own `npt.gro` before production begins.
+Complex and solvent legs are separate HREX groups and are never exchanged
+with each other.
 
 Inspect submitted jobs with the command printed by the submit script, or use:
 
