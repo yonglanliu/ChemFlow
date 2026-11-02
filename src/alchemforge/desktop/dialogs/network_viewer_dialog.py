@@ -6,6 +6,8 @@ import csv
 import html
 import json
 import math
+import os
+import sys
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -552,6 +554,20 @@ class LigandNetworkViewerDialog(QDialog):
         ligand_sdf: str | Path,
         parent=None,
     ):
+        if sys.platform.startswith("linux"):
+            helper = os.environ.get("QTWEBENGINEPROCESS_PATH", "").strip()
+            checked = os.environ.get("ALCHEMFORGE_QTWEBENGINE_CHECKED") == "1"
+            if checked and not helper:
+                raise RuntimeError(
+                    "QtWebEngineProcess was not found in the active Conda "
+                    "environment. Reinstall the conda-forge qt-webengine and "
+                    "pyqtwebengine packages."
+                )
+            if helper and not Path(helper).is_file():
+                raise RuntimeError(
+                    "QtWebEngineProcess does not exist at the configured path: "
+                    f"{helper}"
+                )
         super().__init__(parent)
         self.edges_csv = Path(edges_csv).expanduser().resolve()
         self.ligand_sdf = Path(ligand_sdf).expanduser().resolve()

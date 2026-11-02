@@ -1716,7 +1716,96 @@ class MainWindow(QMainWindow):
             self.center_stack.setCurrentWidget(self.jobs_page)
             self.refresh_jobs_table()
 
+def _configure_qt_platform_plugins() -> str | None:
+    """Locate Conda's Qt platform plugins when Qt reports an empty path.
+
+    Pip's PyQt wheels keep plugins below ``PyQt5/Qt5`` while conda-forge has
+    used several prefix-relative layouts.  Respect an explicit user setting,
+    otherwise select the first directory that actually contains a platform
+    plugin.  This must run before QApplication is constructed.
+    """
+    configured = os.environ.get("QT_QPA_PLATFORM_PLUGIN_PATH", "").strip()
+    if configured:
+        return configured
+
+    candidates = [
+        Path(sys.prefix) / "plugins" / "platforms",
+        Path(sys.prefix) / "lib" / "qt" / "plugins" / "platforms",
+        Path(sys.prefix) / "lib" / "qt5" / "plugins" / "platforms",
+        Path(sys.prefix) / "lib" / "qt6" / "plugins" / "platforms",
+    ]
+    try:
+        import PyQt5
+
+        candidates.append(
+            Path(PyQt5.__file__).resolve().parent
+            / "Qt5"
+            / "plugins"
+            / "platforms"
+        )
+    except (ImportError, TypeError):
+        pass
+
+    plugin_patterns = ("libq*.so", "libq*.dylib", "q*.dll")
+    for directory in candidates:
+        if directory.is_dir() and any(
+            next(directory.glob(pattern), None) is not None
+            for pattern in plugin_patterns
+        ):
+            value = str(directory)
+            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = value
+            return value
+    return None
+
+
+def _configure_qt_webengine() -> str | None:
+    """Configure QtWebEngine for Conda and remote Linux desktop sessions."""
+    configured = os.environ.get("QTWEBENGINEPROCESS_PATH", "").strip()
+    if configured and Path(configured).is_file():
+        process_path = configured
+    else:
+        candidates = [
+            Path(sys.prefix) / "lib" / "qt5" / "libexec" / "QtWebEngineProcess",
+            Path(sys.prefix) / "lib" / "qt" / "libexec" / "QtWebEngineProcess",
+            Path(sys.prefix) / "libexec" / "QtWebEngineProcess",
+            Path(sys.prefix) / "bin" / "QtWebEngineProcess",
+        ]
+        try:
+            import PyQt5
+
+            candidates.append(
+                Path(PyQt5.__file__).resolve().parent
+                / "Qt5"
+                / "libexec"
+                / "QtWebEngineProcess"
+            )
+        except (ImportError, TypeError):
+            pass
+        process = next((path for path in candidates if path.is_file()), None)
+        process_path = str(process) if process is not None else None
+        if process_path:
+            os.environ["QTWEBENGINEPROCESS_PATH"] = process_path
+
+    os.environ["ALCHEMFORGE_QTWEBENGINE_CHECKED"] = "1"
+    if sys.platform.startswith("linux") and os.environ.get("SSH_CONNECTION"):
+        # Forwarded X11 sessions on compute/login nodes commonly expose neither
+        # GLX nor EGL. Chromium's software path is sufficient for the SVG/HTML
+        # network viewer and avoids a fatal OpenGL-context request.
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+        os.environ.setdefault("QT_OPENGL", "software")
+        os.environ.setdefault("QT_QUICK_BACKEND", "software")
+        os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+        flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
+        if "--disable-gpu" not in flags.split():
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+                f"{flags} --disable-gpu".strip()
+            )
+    return process_path
+
+
 def main():
+    _configure_qt_platform_plugins()
+    _configure_qt_webengine()
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
