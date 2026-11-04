@@ -847,6 +847,37 @@ def _write_complex_ion_itp(
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+_SETTLES_RE = re.compile(
+    r"(?ims)^[ \t]*\[\s*settles\s*\][ \t]*\n(.*?)(?=^[ \t]*\[|\Z)"
+)
+
+
+def _convert_settles_to_constraints(text: str) -> str:
+    """Rewrite every [ settles ] block as three ordinary bond constraints.
+
+    GROMACS allows only one [ moleculetype ] with a [ settles ] block in a
+    system. When crystal waters (their own moleculetype, e.g. WAT) are retained
+    alongside the bulk SOL water added by gmx solvate, both carry SETTLE. We
+    demote the base topology's water(s) to funct-1 constraints (which still make
+    the water fully rigid and generate the internal exclusions via nrexcl),
+    leaving the bulk SOL as the single SETTLE moleculetype.
+    """
+    def repl(match: "re.Match[str]") -> str:
+        rows = ["[ constraints ]", "; ai aj funct length"]
+        for raw in match.group(1).splitlines():
+            fields = raw.split(";", 1)[0].split()
+            if len(fields) >= 4 and fields[0].isdigit():
+                o, doh, dhh = int(fields[0]), fields[2], fields[3]
+                rows += [
+                    f"{o} {o + 1} 1 {doh}",
+                    f"{o} {o + 2} 1 {doh}",
+                    f"{o + 1} {o + 2} 1 {dhh}",
+                ]
+        return "\n".join(rows) + "\n"
+
+    return _SETTLES_RE.sub(repl, text)
+
+
 def _inject_complex_topology(
     source: Path,
     output: Path,
@@ -880,6 +911,10 @@ def _inject_complex_topology(
         cofactor_atom_names,
     )
     text = _alchemize_base_ions(text, coion_atom_indices)
+    if solvate:
+        # Bulk SOL (tip3p.itp) carries SETTLE; demote any retained crystal-water
+        # SETTLE in the base so only one SETTLE moleculetype remains.
+        text = _convert_settles_to_constraints(text)
     first_molecule = re.search(r"(?im)^\s*\[\s*moleculetype\s*\]", text)
     system_section = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
     if first_molecule is None or system_section is None:
