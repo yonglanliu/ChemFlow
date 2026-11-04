@@ -175,7 +175,7 @@ For HREX, set:
 
 ```text
 sampling method:       Lambda HREX
-HREX module:           cluster external-MPI GROMACS module
+GROMACS module:        cluster external-MPI GROMACS module
 MPI launcher:          mpirun (or the cluster-supported launcher)
 HREX command:          gmx_mpi
 exchange interval:     500 steps

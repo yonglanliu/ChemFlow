@@ -44,6 +44,12 @@ def render_slurm_model_build_script(
         activation += f"source {shlex.quote(config.slurm_conda_init)}\n"
     if config.slurm_conda_environment.strip():
         activation += f"conda activate {shlex.quote(config.slurm_conda_environment)}\n"
+    if config.hrex_module.strip():
+        module_name = _directive(config.hrex_module.strip(), "GROMACS module")
+        activation += (
+            'type module >/dev/null 2>&1 || { echo "ERROR: module command is unavailable" >&2; exit 127; }\n'
+            f"module load {shlex.quote(module_name)}\n"
+        )
     return (
         "#!/bin/bash\n"
         f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}_build\n"
@@ -97,8 +103,8 @@ def render_slurm_array_script(
             "conda activate "
             f"{shlex.quote(config.slurm_conda_environment)}\n"
         )
-    if equilibration_only and config.hrex_module.strip():
-        module_name = _directive(config.hrex_module.strip(), "HREX module")
+    if config.hrex_module.strip():
+        module_name = _directive(config.hrex_module.strip(), "GROMACS module")
         activation += (
             'type module >/dev/null 2>&1 || { echo "ERROR: module command is unavailable" >&2; exit 127; }\n'
             f"module load {shlex.quote(module_name)}\n"
