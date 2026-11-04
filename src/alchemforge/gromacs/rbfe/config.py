@@ -429,7 +429,12 @@ class LigandRBFEConfig:
             "[mapping].atom_mapper",
             {"kartograf", "lomap", "pmx"},
         )
-        pmx_command = str(mapping.get("pmx_command", "pmx")).strip()
+        pmx_command = str(
+            mapping.get(
+                "pmx_command",
+                "python -m alchemforge.gromacs.rbfe.pmx_entry",
+            )
+        ).strip()
         if atom_mapper == "pmx" and not pmx_command:
             raise ValueError("[mapping].pmx_command cannot be empty")
         return cls(

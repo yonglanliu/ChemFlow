@@ -34,7 +34,7 @@ charge_manifest = "/path/to/prepared_ligands/ligand_manifest.tsv"
 network_method = "lomap"
 atom_mapper = "lomap" # lomap, kartograf, or pmx
 # With atom_mapper = "pmx", OpenFE/LoMap selects edges and PMX maps each pair.
-pmx_command = "pmx"
+pmx_command = "python -m alchemforge.gromacs.rbfe.pmx_entry"
 pmx_mapping_mode = "stage" # stage or run
 pmx_h2h_polar = true
 element_change = false
@@ -104,7 +104,8 @@ nstdhdl = 100
 
 [execution]
 mdrun_options = ["-ntmpi", "1"]
-# Optional HPC GROMACS module loaded for model building and all simulation jobs.
+# Optional external HPC GROMACS module loaded for all simulation jobs. Model
+# building uses the activated AlchemForge Conda environment instead.
 # hrex_module = "gromacs/2026.3-gcc13.2"
 # Use mpirun for OpenMPI modules; use srun only with working direct-MPI support.
 hrex_mpi_launcher = "mpirun"

@@ -195,8 +195,8 @@ class LigandRBFEGromacsDialog(QDialog):
         self.exchange_interval.setVisible(hrex)
         self.exchange_interval_label.setVisible(hrex)
         self.ntmpi.setEnabled(not hrex)
-        # The selected module supplies `gmx` during edge model construction as
-        # well as `gmx_mpi` during HREX, so it is relevant to every protocol.
+        # The external module supplies simulation GROMACS for every protocol.
+        # Model construction deliberately remains in the Conda environment.
         self.hrex_module.setEnabled(True)
         self.hrex_mpi_launcher.setEnabled(hrex)
         self.hrex_gmx_command.setEnabled(hrex)
@@ -550,9 +550,9 @@ class LigandRBFEGromacsDialog(QDialog):
             ]
         )
         self.hrex_module.setToolTip(
-            "Optional HPC GROMACS module loaded by model-build, equilibration, "
-            "independent-production, and HREX Slurm jobs. The field is editable "
-            "for modules not listed here."
+            "Optional external HPC GROMACS module loaded for EM, NVT, NPT, "
+            "independent production, and HREX. Model building remains in the "
+            "AlchemForge Conda environment."
         )
         self.hrex_mpi_launcher = QComboBox()
         self.hrex_mpi_launcher.addItems(["mpirun", "srun"])
@@ -811,7 +811,7 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("Tasks per job:", self.tasks)
         form.addRow("CPUs per task:", self.cpus)
         form.addRow("GROMACS thread-MPI ranks:", self.ntmpi)
-        form.addRow("GROMACS module (Slurm):", self.hrex_module)
+        form.addRow("Simulation GROMACS module:", self.hrex_module)
         form.addRow("HREX MPI launcher:", self.hrex_mpi_launcher)
         form.addRow("HREX GROMACS command:", self.hrex_gmx_command)
         form.addRow("GPUs per job:", self.gpus)
@@ -971,7 +971,7 @@ class LigandRBFEGromacsDialog(QDialog):
             "tasks": "SLURM tasks per independent-window job; HREX derives one MPI task per lambda replica.",
             "cpus": "CPU cores assigned to each SLURM task.",
             "ntmpi": "Thread-MPI ranks used by independent-window GROMACS runs.",
-            "hrex_module": "Optional HPC GROMACS module loaded for edge-model construction and every Slurm simulation stage, for example gromacs/2026.3-gcc13.2.",
+            "hrex_module": "Optional external HPC GROMACS module loaded for EM, NVT, NPT, production, and HREX; model building uses the Conda environment.",
             "hrex_mpi_launcher": "Starts all HREX replicas in one MPI universe; use mpirun for OpenMPI modules and srun only when the cluster supports direct MPI integration.",
             "hrex_gmx_command": "External-MPI GROMACS executable required for -multidir/-replex HREX, usually gmx_mpi.",
             "gpus": "GPUs requested for each SLURM array job.",
@@ -2299,7 +2299,7 @@ class LigandRBFEGromacsDialog(QDialog):
             f"existing_network_dir = {json.dumps(network_bundle)}\n"
             f"network_method = {json.dumps(planner.method.currentText())}\n"
             f"atom_mapper = {json.dumps(planner.mapper.currentText())}\n"
-            'pmx_command = "pmx"\n'
+            'pmx_command = "python -m alchemforge.gromacs.rbfe.pmx_entry"\n'
             f"pmx_mapping_mode = {json.dumps(planner.pmx_mode.currentText())}\n"
             "pmx_h2h_polar = true\n"
             f"element_change = {str(planner.element_change.isChecked()).lower()}\n"

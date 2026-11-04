@@ -44,12 +44,6 @@ def render_slurm_model_build_script(
         activation += f"source {shlex.quote(config.slurm_conda_init)}\n"
     if config.slurm_conda_environment.strip():
         activation += f"conda activate {shlex.quote(config.slurm_conda_environment)}\n"
-    if config.hrex_module.strip():
-        module_name = _directive(config.hrex_module.strip(), "GROMACS module")
-        activation += (
-            'type module >/dev/null 2>&1 || { echo "ERROR: module command is unavailable" >&2; exit 127; }\n'
-            f"module load {shlex.quote(module_name)}\n"
-        )
     return (
         "#!/bin/bash\n"
         f"#SBATCH --job-name={_directive(config.job_name, 'Job name')}_build\n"
@@ -61,12 +55,16 @@ def render_slurm_model_build_script(
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
         + "\n"
-        + "set -euo pipefail\n\n"
+        + "set -euo pipefail\n"
+        + "export PYTHONNOUSERSITE=1\n\n"
         + 'TASK_FILE="${1:?Provide model_build_tasks.txt}"\n'
         + 'LOCAL_TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
         + 'TASK_OFFSET="${ALCHEMFORGE_TASK_OFFSET:-0}"\n'
         + 'TASK_INDEX="$((LOCAL_TASK_INDEX + TASK_OFFSET))"\n'
         + activation
+        + 'command -v python >/dev/null 2>&1 || { echo "ERROR: Python is unavailable after Conda activation" >&2; exit 127; }\n'
+        + 'command -v gmx >/dev/null 2>&1 || { echo "ERROR: gmx is unavailable in the model-build Conda environment" >&2; exit 127; }\n'
+        + 'python -c "import pmx, rdkit, alchemforge" || { echo "ERROR: PMX, RDKit, or AlchemForge is unavailable in the model-build Conda environment" >&2; exit 1; }\n'
         + 'BUILD_SCRIPT="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n'
         + '[[ -s "$BUILD_SCRIPT" ]] || { echo "ERROR: Missing edge builder: $BUILD_SCRIPT" >&2; exit 1; }\n'
         + 'EDGE_DIR="$(dirname "$BUILD_SCRIPT")"\n'
@@ -127,7 +125,8 @@ def render_slurm_array_script(
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
         + "\n"
-        + "set -euo pipefail\n\n"
+        + "set -euo pipefail\n"
+        + "export PYTHONNOUSERSITE=1\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
         + 'LOCAL_TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
         + 'TASK_OFFSET="${ALCHEMFORGE_TASK_OFFSET:-0}"\n'
@@ -292,7 +291,8 @@ def render_slurm_hrex_script(
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
         + "\n"
-        + "set -euo pipefail\n\n"
+        + "set -euo pipefail\n"
+        + "export PYTHONNOUSERSITE=1\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
         + 'LOCAL_TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
         + 'TASK_OFFSET="${ALCHEMFORGE_TASK_OFFSET:-0}"\n'

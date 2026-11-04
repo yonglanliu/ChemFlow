@@ -35,7 +35,7 @@ class LigandNetworkSettings:
     require_cycle_covering: bool = True
     radial_hub: str | None = None
     redundant_networks: int = 2
-    pmx_command: str = "pmx"
+    pmx_command: str = "python -m alchemforge.gromacs.rbfe.pmx_entry"
     pmx_mapping_mode: str = "stage"
     pmx_h2h_polar: bool = True
 
