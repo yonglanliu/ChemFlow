@@ -772,6 +772,81 @@ def _alchemize_base_ions(text: str, atom_indices: list[int]) -> str:
     return text[: system_section.start()] + restraints + text[system_section.start() :]
 
 
+def _ion_moleculetype_blocks(
+    ions_itp: Path, molnames: set[str]
+) -> tuple[list[str], set[str], set[str]]:
+    """Extract the named ion [ moleculetype ] blocks from a stock ions.itp.
+
+    Returns (block texts, atom types they reference, molnames found).
+    """
+    text = ions_itp.read_text(encoding="utf-8", errors="replace")
+    bodies = re.split(r"(?im)^[ \t]*\[\s*moleculetype\s*\][ \t]*$", text)
+    blocks: list[str] = []
+    used_types: set[str] = set()
+    found: set[str] = set()
+    for body in bodies[1:]:  # bodies[0] is the preamble before the first header
+        molname = None
+        for line in body.splitlines():
+            stripped = line.split(";", 1)[0].strip()
+            if stripped:
+                molname = stripped.split()[0]
+                break
+        if molname not in molnames:
+            continue
+        found.add(molname)
+        blocks.append("[ moleculetype ]\n" + body.strip())
+        in_atoms = False
+        for line in body.splitlines():
+            stripped = line.strip()
+            section = re.fullmatch(r"\[\s*([^]]+?)\s*]", stripped)
+            if section:
+                in_atoms = section.group(1).casefold() == "atoms"
+                continue
+            fields = line.split(";", 1)[0].split()
+            if in_atoms and len(fields) >= 2 and fields[0].isdigit():
+                used_types.add(fields[1])
+    return blocks, used_types, found
+
+
+def _write_complex_ion_itp(
+    ff_dir: str,
+    base_topology: Path,
+    molnames: set[str],
+    output: Path,
+) -> None:
+    """Write a minimal ion itp: just the genion ions plus their atom types.
+
+    An Amber/ParmEd complex topology carries inline [ atomtypes ] for only the
+    atoms actually present, so #including the force field's full ions.itp aborts
+    grompp on the first undefined type (e.g. IB). We therefore emit only the
+    moleculetypes genion needs (NA/CL) together with the atom-type definitions
+    they reference, skipping any already defined by the base topology.
+    """
+    ions_itp = Path(ff_dir) / "ions.itp"
+    blocks, used_types, found = _ion_moleculetype_blocks(ions_itp, molnames)
+    missing = molnames - found
+    if missing:
+        raise ValueError(
+            f"{ions_itp} has no moleculetype(s) named "
+            f"{', '.join(sorted(missing))} required by genion"
+        )
+    ff_types = _atomtype_definitions(Path(ff_dir) / "ffnonbonded.itp")
+    base_types = _atomtype_definitions(base_topology)
+    needed = used_types - base_types.keys()
+    unresolved = needed - ff_types.keys()
+    if unresolved:
+        raise ValueError(
+            "Cannot resolve ion atom type(s) "
+            f"{', '.join(sorted(unresolved))} from {ff_dir}/ffnonbonded.itp"
+        )
+    lines = ["; AlchemForge: minimal ion definitions for the ParmEd complex leg"]
+    if needed:
+        lines += ["", "[ atomtypes ]", *(ff_types[name] for name in sorted(needed))]
+    for block in blocks:
+        lines += ["", block]
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _inject_complex_topology(
     source: Path,
     output: Path,
@@ -809,9 +884,24 @@ def _inject_complex_topology(
     system_section = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
     if first_molecule is None or system_section is None:
         raise ValueError(f"Base topology lacks required sections: {source}")
+    ff_dir = ""
+    if solvate:
+        ff_dir = str(Path(_force_field_include(force_field)).parent)
+        # The ParmEd/Amber base defines atom types inline, so inject only the
+        # NA/CL ions genion needs (with their atom types) rather than the force
+        # field's full ions.itp, whose extra ions (IB, CA, ...) are undefined.
+        _write_complex_ion_itp(
+            ff_dir, source, {"NA", "CL"}, output.parent / "complex_ion.itp"
+        )
+    # [ atomtypes ] must precede every [ moleculetype ]; the dummy force field
+    # and the ion atom types therefore go in before the base's first molecule.
+    pre_molecule = f'#include "{hybrid_include_prefix}/ffmerged.itp"\n'
+    if solvate:
+        pre_molecule += '#include "complex_ion.itp"\n'
     text = (
         text[: first_molecule.start()]
-        + f'#include "{hybrid_include_prefix}/ffmerged.itp"\n\n'
+        + pre_molecule
+        + "\n"
         + text[first_molecule.start() :]
     )
     system_section = re.search(r"(?im)^\s*\[\s*system\s*\]", text)
@@ -823,15 +913,14 @@ def _inject_complex_topology(
         "#endif\n"
     )
     if solvate:
-        force_include = _force_field_include(force_field)
-        ff_dir = str(Path(force_include).parent)
-        # Retained-water bases (pdb2gmx topologies) may already include these.
-        for itp in (_water_itp(water), "ions.itp"):
-            already = re.search(
-                rf'(?im)^\s*#include\s+"[^"]*{re.escape(itp)}"', text
-            )
-            if already is None:
-                includes += f'#include "{ff_dir}/{itp}"\n'
+        # Water is a moleculetype-only include (OW/HW already defined by the
+        # retained-water atom types); add it unless the base already has it.
+        water_itp = _water_itp(water)
+        already = re.search(
+            rf'(?im)^\s*#include\s+"[^"]*{re.escape(water_itp)}"', text
+        )
+        if already is None:
+            includes += f'#include "{ff_dir}/{water_itp}"\n'
     text = text[: system_section.start()] + includes + "\n" + text[system_section.start() :]
     text = text.rstrip() + f"\n{molecule:<20} 1\n"
     output.write_text(text, encoding="utf-8")
@@ -929,11 +1018,6 @@ def _write_validation_mdp(path: Path) -> None:
         "fep-lambdas = 0 1\n",
         encoding="utf-8",
     )
-
-
-def _contains_water(path: Path) -> bool:
-    _, atoms, _ = _read_gro(path)
-    return any(line[5:10].strip().upper() in _WATER_RESIDUES for line in atoms)
 
 
 # Bulk water is ~33 molecules/nm^3. Retained crystal/structural waters are
