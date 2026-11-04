@@ -825,10 +825,13 @@ def _inject_complex_topology(
     if solvate:
         force_include = _force_field_include(force_field)
         ff_dir = str(Path(force_include).parent)
-        includes += (
-            f'#include "{ff_dir}/{_water_itp(water)}"\n'
-            f'#include "{ff_dir}/ions.itp"\n'
-        )
+        # Retained-water bases (pdb2gmx topologies) may already include these.
+        for itp in (_water_itp(water), "ions.itp"):
+            already = re.search(
+                rf'(?im)^\s*#include\s+"[^"]*{re.escape(itp)}"', text
+            )
+            if already is None:
+                includes += f'#include "{ff_dir}/{itp}"\n'
     text = text[: system_section.start()] + includes + "\n" + text[system_section.start() :]
     text = text.rstrip() + f"\n{molecule:<20} 1\n"
     output.write_text(text, encoding="utf-8")
@@ -933,6 +936,24 @@ def _contains_water(path: Path) -> bool:
     return any(line[5:10].strip().upper() in _WATER_RESIDUES for line in atoms)
 
 
+# Bulk water is ~33 molecules/nm^3. Retained crystal/structural waters are
+# orders of magnitude sparser, so this cleanly separates the two cases.
+_BULK_WATER_DENSITY = 5.0
+
+
+def _water_summary(path: Path) -> tuple[int, float]:
+    """Return (water molecule count, waters per nm^3 of the GRO box)."""
+    _, atoms, box_line = _read_gro(path)
+    residues = {
+        (line[:5], line[5:10].strip().upper())
+        for line in atoms
+        if line[5:10].strip().upper() in _WATER_RESIDUES
+    }
+    box_values = [float(value) for value in box_line.split()]
+    volume = abs(float(np.linalg.det(_gro_box_matrix(box_values))))
+    return len(residues), (len(residues) / volume if volume > 0 else 0.0)
+
+
 def _solvate_and_ionize(
     *,
     gmx: str,
@@ -943,8 +964,14 @@ def _solvate_and_ionize(
     box_distance: float,
     neutralize: bool,
     ion_concentration: float,
+    protected_atoms: int = 0,
 ) -> tuple[Path, Path]:
-    """Box, solvate, and optionally neutralize/add salt to one RBFE leg."""
+    """Box, solvate, and optionally neutralize/add salt to one RBFE leg.
+
+    ``protected_atoms`` is the atom count of the pre-solvation system. When it
+    is non-zero (retained crystal waters), genion may only replace the waters
+    that ``gmx solvate`` appended after those atoms.
+    """
     boxed = directory / "boxed.gro"
     solvated = directory / "solvated.gro"
     output = directory / "system.gro"
@@ -1021,8 +1048,26 @@ def _solvate_and_ionize(
         command.append("-neutral")
     if ion_concentration > 0:
         command.extend(["-conc", str(ion_concentration)])
-    _run(command, directory, stdin="SOL\n")
+    group = "SOL"
+    if protected_atoms:
+        total = _gro_atom_count(solvated)
+        index = directory / "new_solvent.ndx"
+        members = list(range(protected_atoms + 1, total + 1))
+        rows = [
+            " ".join(str(i) for i in members[start : start + 15])
+            for start in range(0, len(members), 15)
+        ]
+        index.write_text(
+            "[ NewSOL ]\n" + "\n".join(rows) + "\n", encoding="utf-8"
+        )
+        command.extend(["-n", str(index)])
+        group = "NewSOL"
+    _run(command, directory, stdin=f"{group}\n")
     return output, mdp
+
+
+def _gro_atom_count(path: Path) -> int:
+    return int(path.read_text(encoding="utf-8").splitlines()[1].strip())
 
 
 _WATER_RESIDUES = {"SOL", "HOH", "WAT", "TIP3", "TIP4", "SPC", "SPCE"}
@@ -1193,12 +1238,26 @@ def assemble_edge(spec_path: Path) -> None:
     # Membrane systems retain their prepared membrane/water/ion box. Soluble
     # systems must start from an unsolvated receptor and are boxed and solvated
     # after the edge-specific hybrid ligand has been inserted.
-    if not membrane and _contains_water(base_gro):
-        raise ValueError(
-            "Automatic soluble-complex solvation requires an unsolvated prepared "
-            "receptor base. The selected base GRO already contains water. Remove "
-            "the old solvent or use a membrane system to preserve its box."
-        )
+    # A few retained (crystal/structural) waters are fine: `gmx solvate` keeps
+    # waters already present in -cp and only fills the empty space. Only a
+    # bulk-solvated base (old box full of water) is rejected, because the new
+    # editconf box would leave voids/duplicated solvent.
+    retained_waters = 0
+    if not membrane:
+        retained_waters, water_density = _water_summary(base_gro)
+        if water_density > _BULK_WATER_DENSITY:
+            raise ValueError(
+                "Automatic soluble-complex solvation requires an unsolvated "
+                "prepared receptor base (a few retained crystal waters are "
+                f"allowed). The selected base GRO has {retained_waters} waters "
+                f"({water_density:.1f}/nm^3, i.e. bulk solvent). Remove the old "
+                "bulk solvent or use a membrane system to preserve its box."
+            )
+        if retained_waters:
+            print(
+                f"Keeping {retained_waters} water molecule(s) from the prepared "
+                "receptor base; gmx solvate will only add water around them."
+            )
     complex_coions = (
         _select_farthest_ions(base_gro, coion, coion_count)
         if membrane and coion_count
@@ -1240,6 +1299,7 @@ def assemble_edge(spec_path: Path) -> None:
             box_distance=float(spec["box_distance"]),
             neutralize=bool(spec["neutralize"]),
             ion_concentration=float(spec["ion_concentration"]),
+            protected_atoms=_gro_atom_count(complex_initial) if retained_waters else 0,
         )
         if coion_count:
             complex_coions = _convert_solvent_coions(
