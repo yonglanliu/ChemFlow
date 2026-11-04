@@ -493,21 +493,38 @@ def write_slurm_array_files(
     array_script.chmod(array_script.stat().st_mode | 0o100)
 
     submit_script = project / "submit_production_array.sh"
-    build_variables = ""
-    build_submission = 'BUILD_JOB_ID=""\n'
-    if build_task_file is not None and build_script is not None:
-        build_variables = (
+    # Each edge is submitted as an independent pipeline: a single-task build job
+    # (when model building is enabled) followed by that edge's own production
+    # (and, for HREX, equilibration) arrays, scoped by ALCHEMFORGE_TASK_OFFSET.
+    # Every downstream array depends only on ITS edge's build, so edges never
+    # wait at a global barrier. Per-edge arrays are also small, which keeps each
+    # one well under the scheduler's MaxArraySize.
+    have_build = build_task_file is not None and build_script is not None
+    build_vars = ""
+    build_validate = ""
+    if have_build:
+        build_vars = (
             f"BUILD_TASK_FILE={shlex.quote(str(build_task_file))}\n"
             f"BUILD_SCRIPT={shlex.quote(str(build_script))}\n"
             f"EXPECTED_BUILD_TASKS={edge_count}\n"
         )
-        build_submission = (
+        build_validate = (
             'N_BUILD="$(awk \'NF {count++} END {print count+0}\' "$BUILD_TASK_FILE")"\n'
             '[[ "$N_BUILD" -eq "$EXPECTED_BUILD_TASKS" ]] || { echo "ERROR: Found $N_BUILD model builders; expected $EXPECTED_BUILD_TASKS" >&2; exit 1; }\n'
-            'BUILD_SUBMISSION="$(sbatch --parsable --array="0-$((N_BUILD - 1))" "$BUILD_SCRIPT" "$BUILD_TASK_FILE")"\n'
-            'BUILD_JOB_ID="${BUILD_SUBMISSION%%;*}"\n'
-            'echo "Submitted parallel edge-model build array: $BUILD_JOB_ID"\n'
         )
+        edge_build_block = (
+            '    if ! BUILD_SUBMISSION="$(sbatch --parsable '
+            '--export="ALL,ALCHEMFORGE_TASK_OFFSET=${EDGE}" --array="0-0" '
+            '"$BUILD_SCRIPT" "$BUILD_TASK_FILE")"; then\n'
+            '        echo "ERROR: build submission failed for edge $EDGE" >&2; exit 1\n'
+            '    fi\n'
+            '    EDGE_BUILD_ID="${BUILD_SUBMISSION%%;*}"\n'
+            '    JOB_IDS+=("$EDGE_BUILD_ID")\n'
+            '    DEP_BUILD=( --dependency="afterok:${EDGE_BUILD_ID}" )\n'
+        )
+    else:
+        edge_build_block = "    :\n"
+
     if config.sampling_method == "hrex":
         equil_task_file = project / "equilibration_tasks.txt"
         equil_task_file.write_text(
@@ -531,34 +548,41 @@ def write_slurm_array_files(
             f"EQUIL_SCRIPT={shlex.quote(str(equil_script))}\n"
             f"PROD_TASK_FILE={shlex.quote(str(task_file))}\n"
             f"PROD_SCRIPT={shlex.quote(str(array_script))}\n"
-            + build_variables
+            + build_vars
             + f"EXPECTED_EQUIL_TASKS={equilibration_tasks}\n"
             f"EXPECTED_PROD_TASKS={expected_tasks}\n"
+            f"EDGE_COUNT={edge_count}\n"
+            f"GROUPS_PER_EDGE={config.tasks_per_edge}\n"
             f"WINDOWS_PER_GROUP={config.lambda_windows}\n\n"
             'N_EQUIL="$(awk \'NF {count++} END {print count+0}\' "$EQUIL_TASK_FILE")"\n'
             'N_PROD="$(awk \'NF {count++} END {print count+0}\' "$PROD_TASK_FILE")"\n'
             '[[ "$N_EQUIL" -eq "$EXPECTED_EQUIL_TASKS" ]] || { echo "ERROR: Found $N_EQUIL equilibration tasks; expected $EXPECTED_EQUIL_TASKS" >&2; exit 1; }\n'
             '[[ "$N_PROD" -eq "$EXPECTED_PROD_TASKS" ]] || { echo "ERROR: Found $N_PROD HREX groups; expected $EXPECTED_PROD_TASKS" >&2; exit 1; }\n'
-            'cd "$PROJECT_DIR"\n'
-            + build_submission
-            + 'ALL_JOB_IDS=()\n'
-            + '[[ -n "$BUILD_JOB_ID" ]] && ALL_JOB_IDS+=("$BUILD_JOB_ID")\n'
-            'for ((GROUP_INDEX=0; GROUP_INDEX<N_PROD; GROUP_INDEX++)); do\n'
-            '    EQUIL_START=$((GROUP_INDEX * WINDOWS_PER_GROUP))\n'
-            '    EQUIL_END=$((EQUIL_START + WINDOWS_PER_GROUP - 1))\n'
-            '    EQUIL_ARRAY="0-$((WINDOWS_PER_GROUP - 1))"\n'
-            '    PROD_ARRAY="0-0"\n'
-            '    if [[ -n "$BUILD_JOB_ID" ]]; then\n'
-            '        EQUIL_SUBMISSION="$(sbatch --parsable --dependency="afterok:${BUILD_JOB_ID}" --export="ALL,ALCHEMFORGE_TASK_OFFSET=${EQUIL_START}" --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
-            '    else\n'
-            '        EQUIL_SUBMISSION="$(sbatch --parsable --export="ALL,ALCHEMFORGE_TASK_OFFSET=${EQUIL_START}" --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
-            '    fi\n'
-            '    EQUIL_JOB_ID="${EQUIL_SUBMISSION%%;*}"\n'
-            '    PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --export="ALL,ALCHEMFORGE_TASK_OFFSET=${GROUP_INDEX}" --array="$PROD_ARRAY" "$PROD_SCRIPT" "$PROD_TASK_FILE")"\n'
-            '    PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
-            '    ALL_JOB_IDS+=("$EQUIL_JOB_ID" "$PROD_JOB_ID")\n'
-            'done\n'
-            'JOB_ID_LIST="$(IFS=,; echo "${ALL_JOB_IDS[*]}")"\n'
+            + build_validate
+            + 'cd "$PROJECT_DIR"\n\n'
+            "JOB_IDS=()\n"
+            "for ((EDGE=0; EDGE<EDGE_COUNT; EDGE++)); do\n"
+            "    DEP_BUILD=()\n"
+            '    EDGE_BUILD_ID="none"\n'
+            + edge_build_block
+            + "    for ((GROUP=0; GROUP<GROUPS_PER_EDGE; GROUP++)); do\n"
+            "        GROUP_INDEX=$((EDGE * GROUPS_PER_EDGE + GROUP))\n"
+            "        EQUIL_START=$((GROUP_INDEX * WINDOWS_PER_GROUP))\n"
+            '        EQUIL_ARRAY="0-$((WINDOWS_PER_GROUP - 1))"\n'
+            '        if ! EQUIL_SUBMISSION="$(sbatch --parsable "${DEP_BUILD[@]}" --export="ALL,ALCHEMFORGE_TASK_OFFSET=${EQUIL_START}" --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"; then\n'
+            '            echo "ERROR: equilibration submission failed for edge $EDGE group $GROUP" >&2; exit 1\n'
+            "        fi\n"
+            '        EQUIL_JOB_ID="${EQUIL_SUBMISSION%%;*}"\n'
+            '        if ! PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --export="ALL,ALCHEMFORGE_TASK_OFFSET=${GROUP_INDEX}" --array="0-0" "$PROD_SCRIPT" "$PROD_TASK_FILE")"; then\n'
+            '            echo "ERROR: production submission failed for edge $EDGE group $GROUP" >&2; exit 1\n'
+            "        fi\n"
+            '        PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
+            '        JOB_IDS+=("$EQUIL_JOB_ID" "$PROD_JOB_ID")\n'
+            "    done\n"
+            '    echo "Edge $EDGE pipeline: build=$EDGE_BUILD_ID, $GROUPS_PER_EDGE equil->prod group chains"\n'
+            "done\n"
+            'JOB_ID_LIST="$(IFS=,; echo "${JOB_IDS[*]}")"\n'
+            'echo "Submitted $EDGE_COUNT independent edge pipelines."\n'
             'echo "Inspect all: sacct -X -j $JOB_ID_LIST --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
         )
     else:
@@ -567,28 +591,30 @@ def write_slurm_array_files(
             f"PROJECT_DIR={shlex.quote(str(project))}\n"
             f"TASK_FILE={shlex.quote(str(task_file))}\n"
             f"ARRAY_SCRIPT={shlex.quote(str(array_script))}\n"
-            + build_variables
-            + f"EXPECTED_TASKS={expected_tasks}\n\n"
+            + build_vars
+            + f"EXPECTED_TASKS={expected_tasks}\n"
+            f"EDGE_COUNT={edge_count}\n"
+            f"TASKS_PER_EDGE={config.tasks_per_edge}\n\n"
             'N_TASKS="$(awk \'NF {count++} END {print count+0}\' "$TASK_FILE")"\n'
             '[[ "$N_TASKS" -eq "$EXPECTED_TASKS" ]] || { echo "ERROR: Found $N_TASKS FEP tasks; expected $EXPECTED_TASKS" >&2; exit 1; }\n'
-            'cd "$PROJECT_DIR"\n'
-            + build_submission
-            + 'MAX_ARRAY_SIZE="${ALCHEMFORGE_MAX_ARRAY_SIZE:-$(scontrol show config 2>/dev/null | awk \'$1 == "MaxArraySize" {print $3; exit}\')}"\n'
-            'if [[ ! "$MAX_ARRAY_SIZE" =~ ^[1-9][0-9]*$ ]]; then MAX_ARRAY_SIZE=1000; fi\n'
-            'JOB_IDS=()\n'
-            'for ((OFFSET=0; OFFSET<N_TASKS; OFFSET+=MAX_ARRAY_SIZE)); do\n'
-            '    CHUNK_SIZE=$((N_TASKS - OFFSET))\n'
-            '    (( CHUNK_SIZE > MAX_ARRAY_SIZE )) && CHUNK_SIZE=$MAX_ARRAY_SIZE\n'
-            '    ARRAY_SPEC="0-$((CHUNK_SIZE - 1))"\n'
-            '    SBATCH_ARGS=( --parsable --export="ALL,ALCHEMFORGE_TASK_OFFSET=${OFFSET}" --array="$ARRAY_SPEC" )\n'
-            '    [[ -n "$BUILD_JOB_ID" ]] && SBATCH_ARGS+=( --dependency="afterok:${BUILD_JOB_ID}" )\n'
-            '    SUBMISSION="$(sbatch "${SBATCH_ARGS[@]}" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
-            '    JOB_ID="${SUBMISSION%%;*}"\n'
-            '    JOB_IDS+=("$JOB_ID")\n'
-            '    echo "Submitted task chunk $OFFSET-$((OFFSET + CHUNK_SIZE - 1)): job $JOB_ID (local array $ARRAY_SPEC)"\n'
-            '    echo "Combined output: $PROJECT_DIR/slurm-${JOB_ID}_<array-index>.out"\n'
-            'done\n'
+            + build_validate
+            + 'cd "$PROJECT_DIR"\n\n'
+            "JOB_IDS=()\n"
+            "for ((EDGE=0; EDGE<EDGE_COUNT; EDGE++)); do\n"
+            "    DEP_BUILD=()\n"
+            '    EDGE_BUILD_ID="none"\n'
+            + edge_build_block
+            + "    OFFSET=$((EDGE * TASKS_PER_EDGE))\n"
+            '    ARRAY_SPEC="0-$((TASKS_PER_EDGE - 1))"\n'
+            '    if ! PROD_SUBMISSION="$(sbatch --parsable "${DEP_BUILD[@]}" --export="ALL,ALCHEMFORGE_TASK_OFFSET=${OFFSET}" --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"; then\n'
+            '        echo "ERROR: production submission failed for edge $EDGE" >&2; exit 1\n'
+            "    fi\n"
+            '    PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
+            '    JOB_IDS+=("$PROD_JOB_ID")\n'
+            '    echo "Edge $EDGE pipeline: build=$EDGE_BUILD_ID prod=$PROD_JOB_ID (offset $OFFSET, array $ARRAY_SPEC)"\n'
+            "done\n"
             'JOB_ID_LIST="$(IFS=,; echo "${JOB_IDS[*]}")"\n'
+            'echo "Submitted $EDGE_COUNT independent edge pipelines."\n'
             'echo "Inspect: sacct -X -j $JOB_ID_LIST --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
         )
     submit_script.write_text(submit_text, encoding="utf-8")
