@@ -1329,7 +1329,6 @@ def assemble_edge(spec_path: Path) -> None:
     # bulk-solvated base (old box full of water) is rejected, because the new
     # editconf box would leave voids/duplicated solvent.
     retained_waters = 0
-    retained_sol = False
     if not membrane:
         retained_waters, water_density = _water_summary(base_gro)
         if water_density > _BULK_WATER_DENSITY:
@@ -1341,13 +1340,6 @@ def assemble_edge(spec_path: Path) -> None:
                 "bulk solvent or use a membrane system to preserve its box."
             )
         if retained_waters:
-            # Protection from genion is only needed when the retained waters use
-            # the same resname (SOL) as the solvent gmx solvate adds; otherwise
-            # genion's SOL selection already leaves them untouched.
-            _, base_atoms, _ = _read_gro(base_gro)
-            retained_sol = any(
-                line[5:10].strip().upper() == "SOL" for line in base_atoms
-            )
             print(
                 f"Keeping {retained_waters} water molecule(s) from the prepared "
                 "receptor base; gmx solvate will only add water around them."
@@ -1393,7 +1385,13 @@ def assemble_edge(spec_path: Path) -> None:
             box_distance=float(spec["box_distance"]),
             neutralize=bool(spec["neutralize"]),
             ion_concentration=float(spec["ion_concentration"]),
-            protected_atoms=_gro_atom_count(complex_initial) if retained_sol else 0,
+            # Always restrict genion to the freshly added, contiguous tail of
+            # solvent. gmx solvate keeps the merged complex (protein, metals,
+            # ligand, retained waters) as the leading atoms and appends new SOL
+            # at the end. Selecting the whole SOL residue group can be both
+            # non-contiguous (ligand/metals split retained from new waters) and
+            # destructive to retained crystal waters, so we ionize only the tail.
+            protected_atoms=_gro_atom_count(complex_initial),
         )
         if coion_count:
             complex_coions = _convert_solvent_coions(
