@@ -1086,17 +1086,53 @@ for source in {system_sources!r}:
     system.extend(Path(source).read_text().splitlines())
 ligand = ([] if {config.exclude_ligand_from_system!r}
           else Path("ligand.pdb").read_text().splitlines())
+
+combined = []
+for line in system:
+    if line.startswith(("ATOM  ", "HETATM")) and line[17:20].strip().upper() == resname:
+        continue
+    if not line.startswith(("END", "ENDMDL")):
+        combined.append(line)
+if not {config.exclude_ligand_from_system!r}:
+    for line in ligand:
+        if line.startswith(("ATOM  ", "HETATM")):
+            combined.append(line[:17] + f"{{resname:>3}}" + line[20:])
+
+# Amber histidine templates encode protonation in the residue name.  Infer the
+# final name from the hydrogens in the exact PDB that LEaP will read.  This is
+# deliberately residue-wide because assembled membrane PDBs can interleave
+# atoms and defeat a contiguous-record normalization pass.
+histidine_atoms = {{}}
+for line in combined:
+    if not line.startswith(("ATOM  ", "HETATM")) or len(line) < 27:
+        continue
+    if line[17:20].strip().upper() not in {{"HIS", "HID", "HIE", "HIP"}}:
+        continue
+    key = (line[21:22], line[22:26], line[26:27])
+    atom = line[12:16].strip().upper()
+    if atom[:1].isdigit():
+        atom = atom[1:] + atom[:1]
+    histidine_atoms.setdefault(key, set()).add(atom)
+
+normalized = []
+for line in combined:
+    if line.startswith(("ATOM  ", "HETATM")) and len(line) >= 27:
+        residue = line[17:20].strip().upper()
+        if residue in {{"HIS", "HID", "HIE", "HIP"}}:
+            key = (line[21:22], line[22:26], line[26:27])
+            atoms = histidine_atoms.get(key, set())
+            has_hd1, has_he2 = "HD1" in atoms, "HE2" in atoms
+            protonation = (
+                "HIP" if has_hd1 and has_he2
+                else "HID" if has_hd1
+                else "HIE"
+            )
+            line = line[:17] + protonation + line[20:]
+    normalized.append(line)
+
 with Path("amber_complex.pdb").open("w") as output:
-    for line in system:
-        if line.startswith(("ATOM  ", "HETATM")) and line[17:20].strip().upper() == resname:
-            continue
-        if not line.startswith(("END", "ENDMDL")):
-            output.write(line + "\\n")
-    if not {config.exclude_ligand_from_system!r}:
-        for line in ligand:
-            if line.startswith(("ATOM  ", "HETATM")):
-                line = line[:17] + f"{{resname:>3}}" + line[20:]
-                output.write(line + "\\n")
+    for line in normalized:
+        output.write(line + "\\n")
     output.write("END\\n")
 ''',
             encoding="utf-8",

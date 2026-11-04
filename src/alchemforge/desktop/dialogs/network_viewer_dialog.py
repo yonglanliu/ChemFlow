@@ -568,6 +568,17 @@ class LigandNetworkViewerDialog(QDialog):
                     "QtWebEngineProcess does not exist at the configured path: "
                     f"{helper}"
                 )
+            if checked and os.environ.get("SSH_CONNECTION"):
+                resources = Path(
+                    os.environ.get("QTWEBENGINE_RESOURCES_PATH", "")
+                )
+                if not (resources / "qtwebengine_resources.pak").is_file() or not (
+                    resources / "icudtl.dat"
+                ).is_file():
+                    raise RuntimeError(
+                        "QtWebEngine resources or icudtl.dat were not found in "
+                        "the active Conda environment. Reinstall qt-webengine."
+                    )
         super().__init__(parent)
         self.edges_csv = Path(edges_csv).expanduser().resolve()
         self.ligand_sdf = Path(ligand_sdf).expanduser().resolve()

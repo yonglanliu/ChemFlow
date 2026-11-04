@@ -1760,15 +1760,16 @@ def _configure_qt_platform_plugins() -> str | None:
 
 def _configure_qt_webengine() -> str | None:
     """Configure QtWebEngine for Conda and remote Linux desktop sessions."""
+    prefix = Path(sys.prefix)
     configured = os.environ.get("QTWEBENGINEPROCESS_PATH", "").strip()
     if configured and Path(configured).is_file():
         process_path = configured
     else:
         candidates = [
-            Path(sys.prefix) / "lib" / "qt5" / "libexec" / "QtWebEngineProcess",
-            Path(sys.prefix) / "lib" / "qt" / "libexec" / "QtWebEngineProcess",
-            Path(sys.prefix) / "libexec" / "QtWebEngineProcess",
-            Path(sys.prefix) / "bin" / "QtWebEngineProcess",
+            prefix / "lib" / "qt5" / "libexec" / "QtWebEngineProcess",
+            prefix / "lib" / "qt" / "libexec" / "QtWebEngineProcess",
+            prefix / "libexec" / "QtWebEngineProcess",
+            prefix / "bin" / "QtWebEngineProcess",
         ]
         try:
             import PyQt5
@@ -1785,6 +1786,60 @@ def _configure_qt_webengine() -> str | None:
         process_path = str(process) if process is not None else None
         if process_path:
             os.environ["QTWEBENGINEPROCESS_PATH"] = process_path
+
+    resource_path = os.environ.get("QTWEBENGINE_RESOURCES_PATH", "").strip()
+    if not resource_path:
+        resource_candidates = [
+            prefix / "resources",
+            prefix / "lib" / "qt5" / "resources",
+            prefix / "lib" / "qt" / "resources",
+            prefix / "share" / "qt5" / "resources",
+        ]
+        try:
+            import PyQt5
+
+            resource_candidates.append(
+                Path(PyQt5.__file__).resolve().parent / "Qt5" / "resources"
+            )
+        except (ImportError, TypeError):
+            pass
+        resources = next(
+            (
+                directory
+                for directory in resource_candidates
+                if (directory / "qtwebengine_resources.pak").is_file()
+                and (directory / "icudtl.dat").is_file()
+            ),
+            None,
+        )
+        if resources is not None:
+            resource_path = str(resources)
+            os.environ["QTWEBENGINE_RESOURCES_PATH"] = resource_path
+
+    locales_path = os.environ.get("QTWEBENGINE_LOCALES_PATH", "").strip()
+    if not locales_path:
+        locale_candidates = [
+            prefix / "translations" / "qtwebengine_locales",
+            prefix / "lib" / "qt5" / "translations" / "qtwebengine_locales",
+            prefix / "share" / "qt5" / "translations" / "qtwebengine_locales",
+        ]
+        try:
+            import PyQt5
+
+            locale_candidates.append(
+                Path(PyQt5.__file__).resolve().parent
+                / "Qt5"
+                / "translations"
+                / "qtwebengine_locales"
+            )
+        except (ImportError, TypeError):
+            pass
+        locales = next(
+            (directory for directory in locale_candidates if directory.is_dir()),
+            None,
+        )
+        if locales is not None:
+            os.environ["QTWEBENGINE_LOCALES_PATH"] = str(locales)
 
     os.environ["ALCHEMFORGE_QTWEBENGINE_CHECKED"] = "1"
     if sys.platform.startswith("linux") and os.environ.get("SSH_CONNECTION"):
