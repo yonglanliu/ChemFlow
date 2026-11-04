@@ -1052,9 +1052,11 @@ def _solvate_and_ionize(
 ) -> tuple[Path, Path]:
     """Box, solvate, and optionally neutralize/add salt to one RBFE leg.
 
-    ``protected_atoms`` is the atom count of the pre-solvation system. When it
-    is non-zero (retained crystal waters), genion may only replace the waters
-    that ``gmx solvate`` appended after those atoms.
+    ``protected_atoms`` is the atom count of the pre-solvation system. Set it
+    only when the retained waters share the SOL moleculetype of the freshly
+    added solvent; genion is then restricted to replacing the appended waters so
+    the retained ones are preserved. When retained waters use a distinct resname
+    (e.g. WAT), leave it 0 — genion's SOL selection already skips them.
     """
     boxed = directory / "boxed.gro"
     solvated = directory / "solvated.gro"
@@ -1134,6 +1136,9 @@ def _solvate_and_ionize(
         command.extend(["-conc", str(ion_concentration)])
     group = "SOL"
     if protected_atoms:
+        # Retained waters share the SOL moleculetype, so restrict genion to the
+        # freshly added solvent. genion uses the selected index group's NAME as
+        # the moleculetype to edit in [ molecules ], so the group must be "SOL".
         total = _gro_atom_count(solvated)
         index = directory / "new_solvent.ndx"
         members = list(range(protected_atoms + 1, total + 1))
@@ -1141,11 +1146,8 @@ def _solvate_and_ionize(
             " ".join(str(i) for i in members[start : start + 15])
             for start in range(0, len(members), 15)
         ]
-        index.write_text(
-            "[ NewSOL ]\n" + "\n".join(rows) + "\n", encoding="utf-8"
-        )
+        index.write_text("[ SOL ]\n" + "\n".join(rows) + "\n", encoding="utf-8")
         command.extend(["-n", str(index)])
-        group = "NewSOL"
     _run(command, directory, stdin=f"{group}\n")
     return output, mdp
 
@@ -1327,6 +1329,7 @@ def assemble_edge(spec_path: Path) -> None:
     # bulk-solvated base (old box full of water) is rejected, because the new
     # editconf box would leave voids/duplicated solvent.
     retained_waters = 0
+    retained_sol = False
     if not membrane:
         retained_waters, water_density = _water_summary(base_gro)
         if water_density > _BULK_WATER_DENSITY:
@@ -1338,6 +1341,13 @@ def assemble_edge(spec_path: Path) -> None:
                 "bulk solvent or use a membrane system to preserve its box."
             )
         if retained_waters:
+            # Protection from genion is only needed when the retained waters use
+            # the same resname (SOL) as the solvent gmx solvate adds; otherwise
+            # genion's SOL selection already leaves them untouched.
+            _, base_atoms, _ = _read_gro(base_gro)
+            retained_sol = any(
+                line[5:10].strip().upper() == "SOL" for line in base_atoms
+            )
             print(
                 f"Keeping {retained_waters} water molecule(s) from the prepared "
                 "receptor base; gmx solvate will only add water around them."
@@ -1383,7 +1393,7 @@ def assemble_edge(spec_path: Path) -> None:
             box_distance=float(spec["box_distance"]),
             neutralize=bool(spec["neutralize"]),
             ion_concentration=float(spec["ion_concentration"]),
-            protected_atoms=_gro_atom_count(complex_initial) if retained_waters else 0,
+            protected_atoms=_gro_atom_count(complex_initial) if retained_sol else 0,
         )
         if coion_count:
             complex_coions = _convert_solvent_coions(
