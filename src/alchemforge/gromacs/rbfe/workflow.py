@@ -60,10 +60,12 @@ def render_slurm_model_build_script(
         + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
-        + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
+        + "\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide model_build_tasks.txt}"\n'
-        + 'TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
+        + 'LOCAL_TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
+        + 'TASK_OFFSET="${ALCHEMFORGE_TASK_OFFSET:-0}"\n'
+        + 'TASK_INDEX="$((LOCAL_TASK_INDEX + TASK_OFFSET))"\n'
         + activation
         + 'BUILD_SCRIPT="$(sed -n "$((TASK_INDEX + 1))p" "$TASK_FILE")"\n'
         + '[[ -s "$BUILD_SCRIPT" ]] || { echo "ERROR: Missing edge builder: $BUILD_SCRIPT" >&2; exit 1; }\n'
@@ -124,10 +126,12 @@ def render_slurm_array_script(
         + f"#SBATCH --cpus-per-task={config.slurm_cpus_per_task}\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
-        + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
+        + "\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
-        + 'TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n\n'
+        + 'LOCAL_TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
+        + 'TASK_OFFSET="${ALCHEMFORGE_TASK_OFFSET:-0}"\n'
+        + 'TASK_INDEX="$((LOCAL_TASK_INDEX + TASK_OFFSET))"\n\n'
         + activation
         + f'export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-{config.slurm_cpus_per_task}}}"\n\n'
         + "# sed uses one-based line numbers; SLURM array indices are zero-based.\n"
@@ -147,7 +151,7 @@ def render_slurm_array_script(
         + "done\n\n"
         + 'cd "$TASK_DIR"\n\n'
         + 'echo "Job:             $SLURM_JOB_ID"\n'
-        + 'echo "Array task:      $SLURM_ARRAY_TASK_ID"\n'
+        + 'echo "Array task:      $SLURM_ARRAY_TASK_ID (global task $TASK_INDEX)"\n'
         + 'echo "Node:            $(hostname)"\n'
         + 'echo "Task directory:  $TASK_DIR"\n'
         + 'echo "Visible GPU(s):  ${CUDA_VISIBLE_DEVICES:-not set}"\n'
@@ -287,10 +291,12 @@ def render_slurm_hrex_script(
         + "#SBATCH --ntasks-per-core=1\n"
         + f"#SBATCH --mem={_directive(config.slurm_memory, 'Memory')}\n"
         + f"#SBATCH --time={_directive(config.slurm_walltime, 'Walltime')}\n"
-        + f"#SBATCH --array=0-{expected_tasks - 1}\n\n"
+        + "\n"
         + "set -euo pipefail\n\n"
         + 'TASK_FILE="${1:?Provide production_tasks.txt}"\n'
-        + 'TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
+        + 'LOCAL_TASK_INDEX="${SLURM_ARRAY_TASK_ID:?Not running as a SLURM array}"\n'
+        + 'TASK_OFFSET="${ALCHEMFORGE_TASK_OFFSET:-0}"\n'
+        + 'TASK_INDEX="$((LOCAL_TASK_INDEX + TASK_OFFSET))"\n'
         + f"EXPECTED_REPLICAS={config.lambda_windows}\n"
         + f"EXCHANGE_INTERVAL={config.exchange_interval_steps}\n\n"
         + activation
@@ -540,15 +546,15 @@ def write_slurm_array_files(
             'for ((GROUP_INDEX=0; GROUP_INDEX<N_PROD; GROUP_INDEX++)); do\n'
             '    EQUIL_START=$((GROUP_INDEX * WINDOWS_PER_GROUP))\n'
             '    EQUIL_END=$((EQUIL_START + WINDOWS_PER_GROUP - 1))\n'
-            '    EQUIL_ARRAY="${EQUIL_START}-${EQUIL_END}"\n'
-            '    PROD_ARRAY="${GROUP_INDEX}-${GROUP_INDEX}"\n'
+            '    EQUIL_ARRAY="0-$((WINDOWS_PER_GROUP - 1))"\n'
+            '    PROD_ARRAY="0-0"\n'
             '    if [[ -n "$BUILD_JOB_ID" ]]; then\n'
-            '        EQUIL_SUBMISSION="$(sbatch --parsable --dependency="afterok:${BUILD_JOB_ID}" --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
+            '        EQUIL_SUBMISSION="$(sbatch --parsable --dependency="afterok:${BUILD_JOB_ID}" --export="ALL,ALCHEMFORGE_TASK_OFFSET=${EQUIL_START}" --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
             '    else\n'
-            '        EQUIL_SUBMISSION="$(sbatch --parsable --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
+            '        EQUIL_SUBMISSION="$(sbatch --parsable --export="ALL,ALCHEMFORGE_TASK_OFFSET=${EQUIL_START}" --array="$EQUIL_ARRAY" "$EQUIL_SCRIPT" "$EQUIL_TASK_FILE")"\n'
             '    fi\n'
             '    EQUIL_JOB_ID="${EQUIL_SUBMISSION%%;*}"\n'
-            '    PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --array="$PROD_ARRAY" "$PROD_SCRIPT" "$PROD_TASK_FILE")"\n'
+            '    PROD_SUBMISSION="$(sbatch --parsable --dependency="afterok:${EQUIL_JOB_ID}" --export="ALL,ALCHEMFORGE_TASK_OFFSET=${GROUP_INDEX}" --array="$PROD_ARRAY" "$PROD_SCRIPT" "$PROD_TASK_FILE")"\n'
             '    PROD_JOB_ID="${PROD_SUBMISSION%%;*}"\n'
             '    ALL_JOB_IDS+=("$EQUIL_JOB_ID" "$PROD_JOB_ID")\n'
             'done\n'
@@ -567,16 +573,23 @@ def write_slurm_array_files(
             '[[ "$N_TASKS" -eq "$EXPECTED_TASKS" ]] || { echo "ERROR: Found $N_TASKS FEP tasks; expected $EXPECTED_TASKS" >&2; exit 1; }\n'
             'cd "$PROJECT_DIR"\n'
             + build_submission
-            + 'ARRAY_SPEC="0-$((N_TASKS - 1))"\n'
-            'if [[ -n "$BUILD_JOB_ID" ]]; then\n'
-            '    SUBMISSION="$(sbatch --parsable --dependency="afterok:${BUILD_JOB_ID}" --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
-            'else\n'
-            '    SUBMISSION="$(sbatch --parsable --array="$ARRAY_SPEC" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
-            'fi\n'
-            'JOB_ID="${SUBMISSION%%;*}"\n'
-            'echo "Submitted job array: $JOB_ID ($ARRAY_SPEC)"\n'
-            'echo "Combined output: $PROJECT_DIR/slurm-${JOB_ID}_<array-index>.out"\n'
-            'echo "Inspect: sacct -X -j $JOB_ID --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
+            + 'MAX_ARRAY_SIZE="${ALCHEMFORGE_MAX_ARRAY_SIZE:-$(scontrol show config 2>/dev/null | awk \'$1 == "MaxArraySize" {print $3; exit}\')}"\n'
+            'if [[ ! "$MAX_ARRAY_SIZE" =~ ^[1-9][0-9]*$ ]]; then MAX_ARRAY_SIZE=1000; fi\n'
+            'JOB_IDS=()\n'
+            'for ((OFFSET=0; OFFSET<N_TASKS; OFFSET+=MAX_ARRAY_SIZE)); do\n'
+            '    CHUNK_SIZE=$((N_TASKS - OFFSET))\n'
+            '    (( CHUNK_SIZE > MAX_ARRAY_SIZE )) && CHUNK_SIZE=$MAX_ARRAY_SIZE\n'
+            '    ARRAY_SPEC="0-$((CHUNK_SIZE - 1))"\n'
+            '    SBATCH_ARGS=( --parsable --export="ALL,ALCHEMFORGE_TASK_OFFSET=${OFFSET}" --array="$ARRAY_SPEC" )\n'
+            '    [[ -n "$BUILD_JOB_ID" ]] && SBATCH_ARGS+=( --dependency="afterok:${BUILD_JOB_ID}" )\n'
+            '    SUBMISSION="$(sbatch "${SBATCH_ARGS[@]}" "$ARRAY_SCRIPT" "$TASK_FILE")"\n'
+            '    JOB_ID="${SUBMISSION%%;*}"\n'
+            '    JOB_IDS+=("$JOB_ID")\n'
+            '    echo "Submitted task chunk $OFFSET-$((OFFSET + CHUNK_SIZE - 1)): job $JOB_ID (local array $ARRAY_SPEC)"\n'
+            '    echo "Combined output: $PROJECT_DIR/slurm-${JOB_ID}_<array-index>.out"\n'
+            'done\n'
+            'JOB_ID_LIST="$(IFS=,; echo "${JOB_IDS[*]}")"\n'
+            'echo "Inspect: sacct -X -j $JOB_ID_LIST --format=JobID,State,ExitCode,Reason,Elapsed,NodeList"\n'
         )
     submit_script.write_text(submit_text, encoding="utf-8")
     submit_script.chmod(submit_script.stat().st_mode | 0o100)
