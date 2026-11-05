@@ -32,25 +32,34 @@ from alchemforge.desktop.modeless import show_modeless
 class ResAlchemFEPDialog(QDialog):
     job_requested = pyqtSignal(str, str, str)
 
-    def __init__(self, working_directory=None, parent=None):
+    def __init__(self, working_directory=None, parent=None, molecule_type="protein"):
         super().__init__(parent)
 
         self.working_directory = working_directory
+        self.molecule_type = molecule_type
 
         self.setWindowTitle("ResAlchemFEP Setup")
         self.resize(900, 680)
 
         self.build_ui()
 
+    _TITLES = {
+        "protein": "GROMACS · ResFEP-RBFE Workflow",
+        "dna": "GROMACS · dnaRBFE Workflow",
+        "rna": "GROMACS · rnaRBFE Workflow",
+    }
+
     def build_ui(self):
         root = QVBoxLayout(self)
 
-        self.setWindowTitle("GROMACS · ResFEP-RBFE Workflow")
-        title = QLabel("GROMACS · ResFEP-RBFE Workflow")
+        heading = self._TITLES.get(self.molecule_type, self._TITLES["protein"])
+        self.setWindowTitle(heading)
+        title = QLabel(heading)
         title.setStyleSheet("font-size: 18pt; font-weight: 700; color: #123f76;")
 
+        unit = "base" if self.molecule_type in ("dna", "rna") else "residue"
         subtitle = QLabel(
-            "Configure the residue mutation, system, simulation, "
+            f"Configure the {unit} mutation, system, simulation, "
             "and JOB SETTING parameters."
         )
         subtitle.setStyleSheet("color: #71839a;")
@@ -301,13 +310,21 @@ class ResAlchemFEPDialog(QDialog):
             "TYR",
             "VAL",
         ]
+        targets = {
+            "protein": amino_acids,
+            "dna": ["DA", "DT", "DG", "DC"],
+            "rna": ["RA", "RU", "RG", "RC"],
+        }.get(self.molecule_type, amino_acids)
+        target_label = (
+            "To base:" if self.molecule_type in ("dna", "rna") else "To residue:"
+        )
 
         self.to_residue_combo = QComboBox()
-        self.to_residue_combo.addItems(amino_acids)
+        self.to_residue_combo.addItems(targets)
 
         layout.addRow("Chain:", self.chain_edit)
         layout.addRow("Residue number:", self.residue_spin)
-        layout.addRow("To residue:", self.to_residue_combo)
+        layout.addRow(target_label, self.to_residue_combo)
 
         return widget
 
@@ -562,6 +579,7 @@ class ResAlchemFEPDialog(QDialog):
                 "ion_strength_m": self.ion_strength_spin.value(),
             },
             "mutation": {
+                "molecule_type": self.molecule_type,
                 "chain": self.chain_edit.text().strip(),
                 "residue_number": self.residue_spin.value(),
                 "to_residue": self.to_residue_combo.currentText(),

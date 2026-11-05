@@ -229,7 +229,7 @@ def stage(config: SepTopGromacsConfig, *, reuse_network: bool = False) -> StageR
     slurm_script.write_text(
         "#!/usr/bin/env bash\n"
         f"#SBATCH --job-name={config.job_name}_septop\n"
-        f"#SBATCH --array=0-{len(rows) - 1}%{config.max_parallel_jobs}\n"
+        f"#SBATCH --array=0-{len(rows) - 1}\n"
         f"#SBATCH --time={config.slurm_time}\n"
         f"#SBATCH --nodes={config.slurm_nodes}\n"
         f"#SBATCH --ntasks={config.slurm_tasks}\n"

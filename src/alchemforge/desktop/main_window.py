@@ -80,6 +80,7 @@ from alchemforge.desktop.dialogs.ResAlchemFEP_GROMACS_Dialog import (
     ResAlchemFEPDialog,
 )
 from alchemforge.desktop.dialogs.septop_gromacs_dialog import SepTopGromacsDialog
+from alchemforge.desktop.dialogs.alanine_scan_dialog import AlanineScanDialog
 from alchemforge.desktop.dialogs.structure_viewer_dialog import StructureViewerDialog
 from alchemforge.desktop.modeless import show_modeless
 from alchemforge.desktop.styles.style import STYLE
@@ -988,6 +989,15 @@ class MainWindow(QMainWindow):
         gromacs_resfep = QTreeWidgetItem(gromacs_workflows, ["ResFEP-RBFE"])
         gromacs_resfep.setData(0, Qt.UserRole, "res_alchem_fep")
 
+        gromacs_dnarbfe = QTreeWidgetItem(gromacs_workflows, ["dnaRBFE"])
+        gromacs_dnarbfe.setData(0, Qt.UserRole, "dna_rbfe_gromacs")
+
+        gromacs_rnarbfe = QTreeWidgetItem(gromacs_workflows, ["rnaRBFE"])
+        gromacs_rnarbfe.setData(0, Qt.UserRole, "rna_rbfe_gromacs")
+
+        gromacs_alascan = QTreeWidgetItem(gromacs_workflows, ["Alanine Scanning"])
+        gromacs_alascan.setData(0, Qt.UserRole, "alanine_scan_gromacs")
+
         openfe_workflows = QTreeWidgetItem(binding, ["OpenFE"])
         openfe_workflows.setData(0, Qt.UserRole, "openfe_workflows")
 
@@ -1578,6 +1588,23 @@ class MainWindow(QMainWindow):
 
         elif page == "res_alchem_fep":
             dialog = ResAlchemFEPDialog(
+                working_directory=self.working_directory, parent=self
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page in ("dna_rbfe_gromacs", "rna_rbfe_gromacs"):
+            molecule_type = "dna" if page == "dna_rbfe_gromacs" else "rna"
+            dialog = ResAlchemFEPDialog(
+                working_directory=self.working_directory,
+                parent=self,
+                molecule_type=molecule_type,
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page == "alanine_scan_gromacs":
+            dialog = AlanineScanDialog(
                 working_directory=self.working_directory, parent=self
             )
             dialog.job_requested.connect(self.start_backend_job)

@@ -83,13 +83,20 @@ def run_backend(
 
 
 def _load(args: argparse.Namespace) -> ResFEPConfig:
-    return ResFEPConfig.load(args.config)
+    return ResFEPConfig.load(
+        args.config, molecule_type=getattr(args, "molecule_type", None)
+    )
 
 
 def _validate(args: argparse.Namespace) -> int:
     config = _load(args)
     config.validate_inputs(require_worker=args.for_submission)
     print(f"Valid residue-FEP configuration: {config.source}")
+    print(f"Molecule type: {config.molecule_type}")
+    print(
+        "Mutation(s): "
+        + "; ".join(f"{c} {r} {t}" for c, r, t in config.mutations)
+    )
     print(f"Project directory: {config.project_dir}")
     print(
         f"Replicates: {config.start_replicate}-{config.start_replicate + config.replicates - 1}"
@@ -133,15 +140,48 @@ def _submit(args: argparse.Namespace) -> int:
 def add_resfep_parser(
     subparsers: argparse._SubParsersAction,
 ) -> argparse.ArgumentParser:
-    parser = subparsers.add_parser(
-        "resfep", help="Residue-based alchemical FEP with GROMACS"
+    protein = _add_resfep_family_parser(
+        subparsers,
+        "resfep",
+        "protein",
+        "Residue-based alchemical FEP with GROMACS (protein)",
     )
-    commands = parser.add_subparsers(dest="resfep_command", required=True)
+    _add_resfep_family_parser(
+        subparsers,
+        "dna-rbfe",
+        "dna",
+        "DNA base-mutation RBFE with GROMACS (shares the resFEP pipeline)",
+    )
+    _add_resfep_family_parser(
+        subparsers,
+        "rna-rbfe",
+        "rna",
+        "RNA base-mutation RBFE with GROMACS (shares the resFEP pipeline)",
+    )
+    return protein
 
-    validate = commands.add_parser(
-        "validate", help="Validate TOML configuration and input paths"
+
+def _add_resfep_family_parser(
+    subparsers: argparse._SubParsersAction,
+    name: str,
+    molecule_type: str,
+    help_text: str,
+) -> argparse.ArgumentParser:
+    parser = subparsers.add_parser(name, help=help_text)
+    commands = parser.add_subparsers(
+        dest=f"{name.replace('-', '_')}_command", required=True
     )
-    validate.add_argument("config", type=Path)
+
+    def _with_config(sub: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        sub.add_argument("config", type=Path)
+        sub.set_defaults(molecule_type=molecule_type)
+        return sub
+
+    validate = _with_config(
+        commands.add_parser(
+            "validate", help="Validate TOML configuration and input paths"
+        )
+    )
     validate.add_argument(
         "--for-submission",
         action="store_true",
@@ -149,23 +189,25 @@ def add_resfep_parser(
     )
     validate.set_defaults(func=_validate)
 
-    stage_parser = commands.add_parser(
-        "stage", help="Create the project manifest and packaged MDP files"
-    )
-    stage_parser.add_argument("config", type=Path)
-    stage_parser.set_defaults(func=_stage)
+    _with_config(
+        commands.add_parser(
+            "stage", help="Create the project manifest and packaged MDP files"
+        )
+    ).set_defaults(func=_stage)
 
-    ligand = commands.add_parser(
-        "prepare-ligand", help="Parameterize and validate the ligand"
-    )
-    ligand.add_argument("config", type=Path)
-    ligand.set_defaults(func=_prepare_ligand)
+    _with_config(
+        commands.add_parser(
+            "prepare-ligand", help="Parameterize and validate the ligand"
+        )
+    ).set_defaults(func=_prepare_ligand)
 
-    system = commands.add_parser("prepare-system", help="Prepare apo and bound systems")
-    system.add_argument("config", type=Path)
-    system.set_defaults(func=_prepare_system)
+    _with_config(
+        commands.add_parser(
+            "prepare-system", help="Prepare apo and bound systems"
+        )
+    ).set_defaults(func=_prepare_system)
 
-    submit = commands.add_parser("submit", help="Submit the Slurm FEP array")
-    submit.add_argument("config", type=Path)
-    submit.set_defaults(func=_submit)
+    _with_config(
+        commands.add_parser("submit", help="Submit the Slurm FEP array")
+    ).set_defaults(func=_submit)
     return parser

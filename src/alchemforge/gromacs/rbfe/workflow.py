@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import shlex
 import shutil
 import subprocess
@@ -25,8 +26,21 @@ def _directive(value: str, label: str) -> str:
     return value
 
 
+def _slurm_gpu_directives(config: LigandRBFEConfig) -> str:
+    """Build the #SBATCH GPU lines, pinning a GPU type/constraint when set."""
+    if config.slurm_gpus <= 0:
+        return ""
+    gpu_type = f"{config.slurm_gpu_type}:" if config.slurm_gpu_type else ""
+    lines = f"#SBATCH --gres=gpu:{gpu_type}{config.slurm_gpus}\n"
+    if config.slurm_constraint:
+        lines += f"#SBATCH --constraint={config.slurm_constraint}\n"
+    return lines
+
+
 def render_slurm_model_build_script(
-    config: LigandRBFEConfig, *, expected_tasks: int
+    config: LigandRBFEConfig,
+    *,
+    expected_tasks: int,
 ) -> str:
     """Render one scheduler array that constructs each edge model independently."""
     partition = (
@@ -34,11 +48,7 @@ def render_slurm_model_build_script(
         if config.slurm_partition.strip()
         else ""
     )
-    gres = (
-        f"#SBATCH --gres=gpu:{config.slurm_gpus}\n"
-        if config.slurm_gpus > 0
-        else ""
-    )
+    gres = _slurm_gpu_directives(config)
     activation = ""
     if config.slurm_conda_init.strip():
         activation += f"source {shlex.quote(config.slurm_conda_init)}\n"
@@ -90,11 +100,7 @@ def render_slurm_array_script(
         if config.slurm_partition.strip()
         else ""
     )
-    gres = (
-        f"#SBATCH --gres=gpu:{config.slurm_gpus}\n"
-        if config.slurm_gpus > 0
-        else ""
-    )
+    gres = _slurm_gpu_directives(config)
     activation = ""
     if config.slurm_conda_init.strip():
         activation += f"source {shlex.quote(config.slurm_conda_init)}\n"
@@ -162,7 +168,8 @@ def render_slurm_array_script(
         + "    exit 127\n"
         + "fi\n"
         + f"MDRUN_COMMON=( -ntomp \"$OMP_NUM_THREADS\" {mdrun_options} )\n\n"
-        + "MDRUN_EM=( -ntmpi 1 -ntomp 1 -nb cpu -pme cpu )\n\n"
+        + "# EM uses the same resources (incl. the allocated GPU) as NVT/NPT.\n"
+        + 'MDRUN_EM=( "${MDRUN_COMMON[@]}" )\n\n'
         + "validate_minimization() {\n"
         + '    local log_file="$1"\n'
         + '    if [[ ! -s "$log_file" ]] || grep -Eqi '
@@ -180,7 +187,7 @@ def render_slurm_array_script(
         + '        restraint_reference="em.gro"\n'
         + "    fi\n"
         + '    if [[ -s "${stage}.gro" ]]; then\n'
-        + '        [[ "$stage" == "em" ]] && validate_minimization "${stage}.log"\n'
+        + '        if [[ "$stage" == "em" ]]; then validate_minimization "${stage}.log"; fi\n'
         + '        echo "Skipping completed ${stage}: ${stage}.gro exists"\n'
         + "        return\n"
         + "    fi\n"
@@ -204,14 +211,10 @@ def render_slurm_array_script(
         + '    if [[ -s "${stage}.cpt" ]]; then\n'
         + '        mdrun_args+=( -cpi "${stage}.cpt" -append )\n'
         + "    fi\n"
-        + '    if [[ "$stage" == "em" ]]; then\n'
-        + '        OMP_NUM_THREADS=1 "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
-        + "    else\n"
-        + '        "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
-        + "    fi\n"
+        + '    "${GMX_COMMAND[@]}" "${mdrun_args[@]}"\n'
         + '    [[ -s "${stage}.gro" ]] || { '
         + 'echo "ERROR: ${stage} did not produce ${stage}.gro" >&2; exit 1; }\n'
-        + '    [[ "$stage" == "em" ]] && validate_minimization "${stage}.log"\n'
+        + '    if [[ "$stage" == "em" ]]; then validate_minimization "${stage}.log"; fi\n'
         + "}\n\n"
         + 'run_stage em "$BASE_GRO"\n'
         + 'run_stage nvt em.gro\n'
@@ -244,11 +247,7 @@ def render_slurm_hrex_script(
         if config.slurm_partition.strip()
         else ""
     )
-    gres = (
-        f"#SBATCH --gres=gpu:{config.slurm_gpus}\n"
-        if config.slurm_gpus > 0
-        else ""
-    )
+    gres = _slurm_gpu_directives(config)
     activation = ""
     if config.slurm_conda_init.strip():
         activation += f"source {shlex.quote(config.slurm_conda_init)}\n"
@@ -794,6 +793,201 @@ def _render_mdp(args: argparse.Namespace) -> int:
     return 0
 
 
+_STAGE_NAMES = ("em", "nvt", "npt", "prod")
+_OUTPUT_EXTS = (
+    ".gro", ".cpt", ".tpr", ".log", ".edr", ".trr", ".xtc", ".xvg", ".pdb"
+)
+
+
+def _edge_leg_tasks(
+    manifest: Path,
+    edge_id: str,
+    leg: str,
+    replicates: tuple[int, ...],
+    windows: tuple[int, ...],
+) -> list[tuple[int, Path]]:
+    """Return (global task index, task dir) for one edge's leg, honoring filters.
+
+    The global index is the zero-based line in the manifest, which the array
+    scripts map to a task via ALCHEMFORGE_TASK_OFFSET + SLURM_ARRAY_TASK_ID.
+    """
+    lines = [line.strip() for line in manifest.read_text(encoding="utf-8").splitlines()]
+    selected: list[tuple[int, Path]] = []
+    for index, line in enumerate(lines):
+        if not line:
+            continue
+        parts = Path(line).parts
+        try:
+            edge_pos = parts.index(edge_id)
+        except ValueError:
+            continue
+        if edge_pos == 0 or parts[edge_pos - 1] != "edges":
+            continue
+        if edge_pos + 1 >= len(parts) or parts[edge_pos + 1] != leg:
+            continue
+        rep = win = None
+        for part in parts[edge_pos + 2 :]:
+            rep_match = re.fullmatch(r"rep_(\d+)", part)
+            win_match = re.fullmatch(r"lambda_(\d+)", part)
+            if rep_match:
+                rep = int(rep_match.group(1))
+            elif win_match:
+                win = int(win_match.group(1))
+        if replicates and (rep is None or rep not in replicates):
+            continue
+        if windows and (win is None or win not in windows):
+            continue
+        selected.append((index, Path(line)))
+    return selected
+
+
+def _wipe_stage_outputs(task_dir: Path) -> None:
+    """Remove GROMACS stage outputs under a task dir, keeping the .mdp inputs."""
+    for lambda_dir in ([task_dir] if any(
+        (task_dir / f"{s}.mdp").exists() for s in _STAGE_NAMES
+    ) else sorted(task_dir.glob("lambda_*"))):
+        for stage in _STAGE_NAMES:
+            for ext in _OUTPUT_EXTS:
+                for path in lambda_dir.glob(f"{stage}*{ext}"):
+                    path.unlink()
+            for backup in lambda_dir.glob(f"#{stage}*#"):
+                backup.unlink()
+
+
+def _sbatch(args_list: list[str], *, dry_run: bool) -> str:
+    """Run (or print) an sbatch command; return the parsed job id (or '')."""
+    printable = "sbatch " + " ".join(shlex.quote(a) for a in args_list)
+    if dry_run:
+        print(printable)
+        return ""
+    result = subprocess.run(
+        ["sbatch", *args_list], capture_output=True, text=True, check=False
+    )
+    if result.returncode:
+        raise ValueError(f"Submission failed: {printable}\n{result.stderr.strip()}")
+    return result.stdout.strip().split(";", 1)[0]
+
+
+def restart_edge_leg(
+    config: LigandRBFEConfig,
+    edge_id: str,
+    leg: str,
+    *,
+    replicates: tuple[int, ...] = (),
+    windows: tuple[int, ...] = (),
+    force: bool = False,
+    dry_run: bool = False,
+) -> list[str]:
+    """Resubmit the production (and, for HREX, equilibration) array for one leg.
+
+    By default the task scripts skip finished stages and resume unfinished ones
+    from their checkpoints; ``force`` deletes the leg's stage outputs first for a
+    clean rerun. Returns the submitted job id(s).
+    """
+    project = config.project_dir
+    setup = project / "edges" / edge_id / leg / "setup" / "system.gro"
+    if not setup.is_file():
+        raise ValueError(
+            f"No prepared {leg} setup for edge {edge_id} ({setup}); build it first"
+        )
+    hrex = config.sampling_method == "hrex"
+    if hrex and windows:
+        raise ValueError(
+            "--window cannot be used with HREX: all lambda windows of a "
+            "replicate are coupled in one replica-exchange run, so restart "
+            "operates at the replicate level. Use --replicate instead."
+        )
+    prod_manifest = project / "production_tasks.txt"
+    prod_script = project / "gromacs_production_array.sh"
+    if not prod_manifest.is_file() or not prod_script.is_file():
+        raise ValueError(
+            f"Project is not staged for submission: missing {prod_manifest.name} "
+            f"or {prod_script.name}. Run `stage` first."
+        )
+
+    job_ids: list[str] = []
+    equil_job = ""
+    if hrex:
+        equil_manifest = project / "equilibration_tasks.txt"
+        equil_script = project / "gromacs_equilibration_array.sh"
+        # No window filter: HREX re-equilibrates every window of the replicate.
+        equil_tasks = _edge_leg_tasks(
+            equil_manifest, edge_id, leg, replicates, ()
+        )
+        if not equil_tasks:
+            raise ValueError(f"No {leg} equilibration tasks matched for {edge_id}")
+        if force:
+            for _, task in equil_tasks:
+                _wipe_stage_outputs(task)
+        equil_job = _sbatch(
+            _restart_sbatch_args(equil_tasks, equil_script, equil_manifest),
+            dry_run=dry_run,
+        )
+        if equil_job:
+            job_ids.append(equil_job)
+
+    # HREX production targets whole groups (leg x replicate); windows are coupled.
+    prod_tasks = _edge_leg_tasks(
+        prod_manifest, edge_id, leg, replicates, () if hrex else windows
+    )
+    if not prod_tasks:
+        raise ValueError(f"No {leg} production tasks matched for edge {edge_id}")
+    if force and not hrex:
+        for _, task in prod_tasks:
+            _wipe_stage_outputs(task)
+    extra = (
+        ["--dependency", f"afterok:{equil_job}"] if hrex and equil_job else []
+    )
+    prod_job = _sbatch(
+        _restart_sbatch_args(prod_tasks, prod_script, prod_manifest, extra=extra),
+        dry_run=dry_run,
+    )
+    if prod_job:
+        job_ids.append(prod_job)
+    return job_ids
+
+
+def _restart_sbatch_args(
+    tasks: list[tuple[int, Path]],
+    script: Path,
+    manifest: Path,
+    *,
+    extra: list[str] | None = None,
+) -> list[str]:
+    offset = min(index for index, _ in tasks)
+    relative = sorted(index - offset for index, _ in tasks)
+    array_spec = ",".join(str(value) for value in relative)
+    return [
+        "--parsable",
+        f"--export=ALL,ALCHEMFORGE_TASK_OFFSET={offset}",
+        f"--array={array_spec}",
+        *(extra or []),
+        str(script),
+        str(manifest),
+    ]
+
+
+def _restart(args: argparse.Namespace) -> int:
+    config = LigandRBFEConfig.load(args.config)
+    job_ids = restart_edge_leg(
+        config,
+        args.edge,
+        args.leg,
+        replicates=tuple(args.replicate or ()),
+        windows=tuple(args.window or ()),
+        force=args.force,
+        dry_run=args.dry_run,
+    )
+    if args.dry_run:
+        print("Dry run: no jobs submitted.")
+    else:
+        print(
+            f"Restarted {args.leg} leg of {args.edge}: "
+            f"job(s) {', '.join(job_ids) or '(none)'}"
+        )
+    return 0
+
+
 def add_ligand_rbfe_parser(
     subparsers: argparse._SubParsersAction,
 ) -> argparse.ArgumentParser:
@@ -837,4 +1031,42 @@ def add_ligand_rbfe_parser(
     render.add_argument("--leg", choices=("complex", "solvent"), default="complex")
     render.add_argument("--output", type=Path, required=True)
     render.set_defaults(func=_render_mdp)
+
+    restart = commands.add_parser(
+        "restart",
+        help="Resubmit one edge's complex or solvent leg (continues from checkpoints)",
+    )
+    restart.add_argument("config", type=Path)
+    restart.add_argument("--edge", required=True, help="Edge id (e.g. edge_A_to_B)")
+    restart.add_argument(
+        "--leg", choices=("complex", "solvent"), required=True
+    )
+    restart.add_argument(
+        "--replicate",
+        type=int,
+        action="append",
+        metavar="N",
+        help="Restart only this replicate (repeatable; default: all)",
+    )
+    restart.add_argument(
+        "--window",
+        type=int,
+        action="append",
+        metavar="W",
+        help=(
+            "Restart only this lambda window (repeatable). Independent sampling "
+            "only; rejected for HREX, where windows are coupled per replicate"
+        ),
+    )
+    restart.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete the leg's stage outputs first for a clean rerun",
+    )
+    restart.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the sbatch command(s) without submitting",
+    )
+    restart.set_defaults(func=_restart)
     return parser

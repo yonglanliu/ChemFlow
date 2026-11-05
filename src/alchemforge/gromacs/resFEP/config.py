@@ -103,6 +103,56 @@ def _command_options(value: Any, label: str) -> tuple[str, ...]:
     raise ValueError(f"{label} must be a string or an array of strings")
 
 
+_MOLECULE_TYPES = {"protein", "dna", "rna"}
+# pmx mutation target codes accepted per molecule type. Protein is left
+# permissive (pmx supports many residue/protonation variants); nucleic acids are
+# restricted to their canonical bases so a protein code can't slip into a
+# dna-rbfe / rna-rbfe run.
+_DNA_TARGETS = {"DA", "DT", "DG", "DC", "DU", "A", "T", "G", "C"}
+_RNA_TARGETS = {"RA", "RU", "RG", "RC", "A", "U", "G", "C"}
+
+
+def _validate_target(target: str, molecule_type: str) -> None:
+    if molecule_type == "dna" and target not in _DNA_TARGETS:
+        raise ValueError(
+            f"DNA mutation target must be one of {sorted(_DNA_TARGETS)} (got {target!r})"
+        )
+    if molecule_type == "rna" and target not in _RNA_TARGETS:
+        raise ValueError(
+            f"RNA mutation target must be one of {sorted(_RNA_TARGETS)} (got {target!r})"
+        )
+    if molecule_type == "protein" and not re.fullmatch(r"[A-Z]{2,4}", target):
+        raise ValueError(
+            f"Protein mutation target must be a residue code (got {target!r})"
+        )
+
+
+def _parse_mutations(
+    raw: Any, molecule_type: str
+) -> tuple[tuple[str, int, str], ...]:
+    """Accept a single [mutation] table or an array of mutation tables."""
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, dict):
+        items = raw["mutations"] if isinstance(raw.get("mutations"), list) else [raw]
+    else:
+        raise ValueError("[mutation] must be a table or an array of tables")
+    mutations: list[tuple[str, int, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Each mutation must be a table of chain/residue/target")
+        chain = str(_required(item, "mutation", "chain"))
+        residue = _positive_int(
+            _required(item, "mutation", "residue"), "[mutation].residue"
+        )
+        target = str(_required(item, "mutation", "target")).upper()
+        _validate_target(target, molecule_type)
+        mutations.append((chain, residue, target))
+    if not mutations:
+        raise ValueError("At least one mutation is required under [mutation]")
+    return tuple(mutations)
+
+
 @dataclass(frozen=True)
 class ResFEPConfig:
     source: Path
@@ -120,6 +170,8 @@ class ResFEPConfig:
     chain: str
     residue: int
     mutation: str
+    molecule_type: str
+    mutations: tuple[tuple[str, int, str], ...]
     box_distance: float
     ion_concentration: float
     ligand_mol2: Path
@@ -162,7 +214,9 @@ class ResFEPConfig:
     slurm_walltime: str
 
     @classmethod
-    def load(cls, path: str | Path) -> ResFEPConfig:
+    def load(
+        cls, path: str | Path, *, molecule_type: str | None = None
+    ) -> ResFEPConfig:
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise ValueError(f"Configuration file does not exist: {source}")
@@ -171,7 +225,6 @@ class ResFEPConfig:
 
         project = _section(data, "project")
         system = _section(data, "system")
-        mutation = _section(data, "mutation")
         ligand = _section(data, "ligand")
         simulation = _section(data, "simulation")
         execution = _section(data, "execution")
@@ -199,6 +252,18 @@ class ResFEPConfig:
         charge_method = str(ligand.get("charge_method", "bcc")).lower()
         if charge_method not in {"bcc", "user"}:
             raise ValueError("[ligand].charge_method must be 'bcc' or 'user'")
+
+        resolved_molecule_type = str(
+            molecule_type or system.get("molecule_type", "protein")
+        ).lower()
+        if resolved_molecule_type not in _MOLECULE_TYPES:
+            raise ValueError(
+                f"molecule_type must be one of {sorted(_MOLECULE_TYPES)} "
+                f"(got {resolved_molecule_type!r})"
+            )
+        parsed_mutations = _parse_mutations(
+            data.get("mutation"), resolved_molecule_type
+        )
 
         job_name = str(_required(project, "project", "name"))
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", job_name):
@@ -254,11 +319,11 @@ class ResFEPConfig:
             prepared_complex_topology=(
                 path_value(membrane_topology) if membrane_topology else None
             ),
-            chain=str(_required(mutation, "mutation", "chain")),
-            residue=_positive_int(
-                _required(mutation, "mutation", "residue"), "[mutation].residue"
-            ),
-            mutation=str(_required(mutation, "mutation", "target")),
+            chain=parsed_mutations[0][0],
+            residue=parsed_mutations[0][1],
+            mutation=parsed_mutations[0][2],
+            molecule_type=resolved_molecule_type,
+            mutations=parsed_mutations,
             box_distance=_positive_float(
                 system.get("box_distance", 1.0), "[system].box_distance"
             ),
@@ -416,6 +481,11 @@ class ResFEPConfig:
             "CHAIN": self.chain,
             "RESID": self.residue,
             "MUT": self.mutation,
+            "MOLECULE_TYPE": self.molecule_type,
+            "MUTATIONS": "\n".join(
+                f"{chain} {residue} {target}"
+                for chain, residue, target in self.mutations
+            ),
             "BOX_DISTANCE": self.box_distance,
             "ION_CONC": self.ion_concentration,
             "LIGAND_MOL2": str(self.ligand_mol2),

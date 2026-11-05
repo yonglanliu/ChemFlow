@@ -170,7 +170,7 @@ gpus = 1
 """
 
 _RESFEP_TOML = """\
-# AlchemForge resFEP (residue-mutation FEP) configuration
+# AlchemForge resFEP (protein residue-mutation FEP) configuration
 # Edit, then:  alchemforge resfep validate __PROJECT__.toml
 
 [project]
@@ -182,10 +182,16 @@ complex = "complex.pdb"
 force_field = "amber99sb"
 water_model = "tip3p"
 
-[mutation]
+# One [[mutation]] block per residue; pmx applies them all together.
+[[mutation]]
 chain = "A"
 residue = 42
-target = "VAL"                     # three-letter target residue
+target = "VAL"                     # three-letter residue code
+
+# [[mutation]]
+# chain = "A"
+# residue = 55
+# target = "ALA"
 
 [ligand]
 mol2 = "ligand.mol2"
@@ -195,7 +201,91 @@ charge = 0
 [simulation]
 replicates = 2
 lambda_windows = 17
-mode = "unified"                   # unified | split
+mode = "RESUME"                    # OVERWRITE | RESUME | SKIP
+
+[execution]
+max_parallel_jobs = 8
+mdrun_options = ["-ntmpi", "1"]
+"""
+
+
+_DNA_RBFE_TOML = """\
+# AlchemForge dnaRBFE (DNA base-mutation RBFE) configuration
+# Edit, then:  alchemforge dna-rbfe validate __PROJECT__.toml
+
+[project]
+name = "__PROJECT__"
+work_dir = "work"
+
+[system]
+molecule_type = "dna"              # overridden by the dna-rbfe command anyway
+complex = "complex.pdb"
+force_field = "amber99sb"          # use a pmx force field that supports DNA mutations
+water_model = "tip3p"
+
+# One [[mutation]] block per base; pmx applies them all together.
+# DNA targets: DA | DT | DG | DC (DU)
+[[mutation]]
+chain = "B"
+residue = 7
+target = "DG"
+
+# [[mutation]]
+# chain = "B"
+# residue = 12
+# target = "DA"
+
+[ligand]
+mol2 = "ligand.mol2"
+resname = "LIG"
+charge = 0
+
+[simulation]
+replicates = 2
+lambda_windows = 17
+mode = "RESUME"                    # OVERWRITE | RESUME | SKIP
+
+[execution]
+max_parallel_jobs = 8
+mdrun_options = ["-ntmpi", "1"]
+"""
+
+
+_RNA_RBFE_TOML = """\
+# AlchemForge rnaRBFE (RNA base-mutation RBFE) configuration
+# Edit, then:  alchemforge rna-rbfe validate __PROJECT__.toml
+
+[project]
+name = "__PROJECT__"
+work_dir = "work"
+
+[system]
+molecule_type = "rna"              # overridden by the rna-rbfe command anyway
+complex = "complex.pdb"
+force_field = "amber99sb"          # use a pmx force field that supports RNA mutations
+water_model = "tip3p"
+
+# One [[mutation]] block per base; pmx applies them all together.
+# RNA targets: RA | RU | RG | RC
+[[mutation]]
+chain = "B"
+residue = 7
+target = "RG"
+
+# [[mutation]]
+# chain = "B"
+# residue = 12
+# target = "RA"
+
+[ligand]
+mol2 = "ligand.mol2"
+resname = "LIG"
+charge = 0
+
+[simulation]
+replicates = 2
+lambda_windows = 17
+mode = "RESUME"                    # OVERWRITE | RESUME | SKIP
 
 [execution]
 max_parallel_jobs = 8
@@ -204,16 +294,303 @@ mdrun_options = ["-ntmpi", "1"]
 
 
 # --------------------------------------------------------------------------- #
+# OpenFE native YAML templates (consumed directly by create_json)
+# --------------------------------------------------------------------------- #
+_SEPTOP_OPENFE_YAML = """\
+# OpenFE SepTop configuration (consumed by create_json). Fill in the paths.
+
+# --- Input files ---
+ligand_sdf: ligands.sdf
+protein_pdb: protein.pdb
+cofactor_sdf: null
+restart_json: null
+
+# --- Output ---
+workdir: work/__PROJECT__
+result_dir: work/__PROJECT__/results
+json_dir: work/__PROJECT__/json
+
+# --- Platform ---
+platform: CUDA              # CPU | CUDA | OpenCL
+
+# --- Membrane or not ---
+membrane_system: false
+
+# --- General ---
+protocol_repeats: 1
+pressure: 1.0              # bar
+temperature: 298.15        # kelvin
+
+# --- Force field / nonbonded ---
+nonbonded_cutoff: 1.0      # nanometer
+nonbonded_method: PME
+rigid_water: true
+small_molecule_forcefield: openff-2.1.0
+hydrogen_mass: 3.0
+
+# --- Partial charges ---
+off_toolkit_backend: ambertools   # openeye | rdkit | ambertools
+partial_charge_method: am1bcc     # am1bcc | nagl
+
+# --- Alchemical settings ---
+disable_alchemical_dispersion_correction: false
+annihilate_sterics: false
+softcore_a: 1.0
+softcore_b: 1.0
+softcore_c: 6.0
+softcore_alpha: 0.5
+
+# --- Restraints ---
+anchor_finding_strategy: bonded   # bonded | multi-residue
+host_max_distance: 2.0     # nanometer
+host_min_distance: 0.3     # nanometer
+host_selection: backbone   # backbone | all
+rmsf_cutoff: 0.1           # nanometer
+solvent_restraint_spring_constant: 1000.0   # kJ/mol/nm^2
+
+# --- Equilibration settings ---
+complex_equil_mini_steps: 5000
+complex_equil_equil_length: 0.1
+complex_equil_equil_length_nvt: 0.1
+complex_equil_production_length: 2.0
+solvent_equil_mini_steps: 5000
+solvent_equil_equil_length: 0.1
+solvent_equil_equil_length_nvt: 0.1
+solvent_equil_production_length: 2.0
+
+# --- Solvation ---
+complex_solvation_padding: 1.5    # nm (non-membrane)
+solvent_solvation_padding: 1.5    # nm
+complex_box_size: null            # [x,y,z] nm when membrane_system: true
+solvent_model: tip3p
+
+# --- Simulation settings ---
+early_termination_target_error: 0.0   # kcal/mol
+complex_sim_mini_step: 5000
+complex_sim_equil_length: 1.0
+complex_sim_prod_length: 20.0
+solvent_sim_mini_step: 5000
+solvent_sim_equil_length: 5.0
+solvent_sim_prod_length: 30.0
+
+# --- Lambda schedules (all lists in a leg must share one length = n_replicas) ---
+complex_lambda_elec_A: [0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0]
+complex_lambda_elec_B: [1.0, 1.0, 1.0, 1.0, 0.75, 0.5, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0]
+complex_lambda_vdw_A: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0]
+complex_lambda_vdw_B: [1.0, 0.75, 0.5, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+complex_lambda_restraints_A: [0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+complex_lambda_restraints_B: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.75, 0.5, 0.25, 0.0]
+solvent_lambda_elec_A: [0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0]
+solvent_lambda_elec_B: [1.0, 1.0, 1.0, 0.75, 0.5, 0.25, 0.0, 0.0, 0.0, 0.0]
+solvent_lambda_vdw_A: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.65, 1.0]
+solvent_lambda_vdw_B: [1.0, 0.7, 0.35, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+solvent_lambda_restraints_A: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+solvent_lambda_restraints_B: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# --- Integrator ---
+complex_timestep: 4.0   # fs
+solvent_timestep: 4.0   # fs
+barostat_frequency: 25.0
+surface_tension: 0.0
+
+# --- Mapper / planner ---
+mapper: KartografAtomMapper   # LomapAtomMapper | KartografAtomMapper
+planner: minimal_spanning     # minimal_spanning | minimal_redundant | radial
+"""
+
+
+_RBFE_OPENFE_YAML = """\
+# OpenFE RBFE configuration (consumed by create_json). Fill in the paths.
+
+# --- Input files ---
+ligand_sdf: ligands.sdf
+protein_pdb: protein.pdb
+cofactor_sdf: null
+
+# --- Output ---
+workdir: work/__PROJECT__
+result_dir: work/__PROJECT__/results
+json_dir: work/__PROJECT__/json
+
+# Which transformation JSONs to execute (used by `run`):
+#   null      -> every JSON in json_dir
+#   a .txt    -> the JSON list in that file
+#   a list    -> only those JSON files
+input_json_files: null
+restart: false
+
+# --- Alchemical network ---
+alchemical_network: all    # "all" or a list of ligand names, e.g. [ligA, ligB]
+transformation: both       # both | complex | solvent
+
+# --- Platform ---
+platform: CUDA             # CPU | CUDA | OpenCL
+
+# --- Membrane or not ---
+membrane_system: false
+complex_box_size: null     # [x, y, z] nm when membrane_system: true
+
+# --- General ---
+solvent_protocol_repeats: 1
+complex_protocol_repeats: 1
+pressure: 1.0              # bar
+temperature: 310.0         # kelvin
+
+# --- Force field / nonbonded ---
+ff_constraints: hbonds
+nonbonded_cutoff: 1.0      # nanometer
+nonbonded_method: PME
+rigid_water: true
+small_molecule_forcefield: openff-2.1.0
+hydrogen_mass: 3.0
+
+# --- Partial charges ---
+off_toolkit_backend: ambertools   # openeye | rdkit | ambertools
+partial_charge_method: am1bcc     # am1bcc | nagl
+
+# --- Alchemical settings ---
+endstate_dispersion_correction: false
+explicit_charge_correction: true
+explicit_charge_correction_cutoff: 0.8   # nanometer
+softcore_LJ: gapsys        # gapsys | beutler
+softcore_alpha: 0.85
+turn_off_core_unique_exceptions: false
+use_dispersion_correction: true
+n_lambda_windows_solvent_leg: 30
+n_lambda_windows_complex_leg: 30
+
+# --- Solvation ---
+complex_solvation_padding: 1.5    # nanometer (non-membrane)
+solvent_solvation_padding: 1.5    # nanometer
+solvent_model: tip3p
+
+# --- Simulation settings ---
+early_termination_target_error: 0.0   # kcal/mol
+complex_sim_mini_step: 5000
+complex_sim_equil_length: 5.0         # nanosecond
+complex_sim_prod_length: 30.0         # nanosecond
+solvent_sim_mini_step: 5000
+solvent_sim_equil_length: 2.0         # nanosecond
+solvent_sim_prod_length: 30.0         # nanosecond
+
+# --- Integrator ---
+complex_timestep: 4.0      # femtosecond
+solvent_timestep: 4.0      # femtosecond
+barostat_frequency: 25.0
+surface_tension: 300.0     # bar*nm (membrane only)
+
+# --- Mapper / planner ---
+mapper: KartografAtomMapper   # LomapAtomMapper | KartografAtomMapper
+planner: minimal_redundant    # minimal_spanning | minimal_redundant | radial
+"""
+
+
+_ABFE_OPENFE_YAML = """\
+# OpenFE ABFE configuration (consumed by create_json). Fill in the paths.
+# ABFE decouples ONE ligand, so ligand_sdf must contain exactly one molecule.
+
+# --- Input files ---
+ligand_sdf: ligand.sdf
+protein_pdb: protein.pdb
+cofactor_sdf: null
+restart_json: null
+name: abfe_my_ligand        # transformation name (output JSON basename)
+
+# --- Output ---
+workdir: work/__PROJECT__
+result_dir: work/__PROJECT__/results
+json_dir: work/__PROJECT__/json
+
+# --- Platform ---
+platform: CUDA             # CPU | CUDA | OpenCL
+
+# --- Membrane or not ---
+membrane_system: false
+complex_box_size: null     # [x, y, z] nm when membrane_system: true
+
+# --- General ---
+protocol_repeats: 1
+pressure: 1.0              # bar
+temperature: 310.0         # kelvin
+
+# --- Force field / nonbonded ---
+nonbonded_cutoff: 1.0      # nanometer
+nonbonded_method: PME
+rigid_water: true
+small_molecule_forcefield: openff-2.1.0
+hydrogen_mass: 3.0
+
+# --- Partial charges ---
+off_toolkit_backend: ambertools   # openeye | rdkit | ambertools
+partial_charge_method: am1bcc     # am1bcc | nagl
+
+# --- Alchemical settings ---
+disable_alchemical_dispersion_correction: false
+annihilate_sterics: false
+softcore_a: 1.0
+softcore_b: 1.0
+softcore_c: 6.0
+softcore_alpha: 0.5
+
+# --- Restraints ---
+anchor_finding_strategy: bonded   # bonded | multi-residue
+host_max_distance: 2.0     # nanometer
+host_min_distance: 0.3     # nanometer
+host_selection: backbone   # backbone | all
+rmsf_cutoff: 0.1           # nanometer
+solvent_restraint_spring_constant: 1000.0   # kJ/mol/nm^2
+
+# --- Equilibration settings ---
+complex_equil_mini_steps: 5000
+complex_equil_equil_length: 0.1        # nanosecond
+complex_equil_equil_length_nvt: 0.1    # nanosecond
+complex_equil_production_length: 2.0   # nanosecond
+solvent_equil_mini_steps: 5000
+solvent_equil_equil_length: 0.1        # nanosecond
+solvent_equil_equil_length_nvt: 0.1    # nanosecond
+solvent_equil_production_length: 2.0   # nanosecond
+
+# --- Solvation ---
+complex_solvation_padding: 1.5    # nanometer (non-membrane)
+solvent_solvation_padding: 1.5    # nanometer
+solvent_model: tip3p
+
+# --- Simulation settings ---
+early_termination_target_error: 0.0   # kcal/mol
+complex_sim_mini_step: 5000
+complex_sim_equil_length: 1.0         # nanosecond
+complex_sim_prod_length: 20.0         # nanosecond
+solvent_sim_mini_step: 5000
+solvent_sim_equil_length: 5.0         # nanosecond
+solvent_sim_prod_length: 30.0         # nanosecond
+
+# --- Lambda schedules (each leg's elec/vdw/restraints lists must share one length) ---
+complex_lambda_elec: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+complex_lambda_restraints: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+complex_lambda_vdw: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
+solvent_lambda_elec: [0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+solvent_lambda_restraints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+solvent_lambda_vdw: [0.0, 0.0, 0.0, 0.0, 0.0, 0.12, 0.24, 0.36, 0.48, 0.6, 0.7, 0.77, 0.85, 1.0]
+
+# --- Integrator ---
+complex_timestep: 4.0      # femtosecond
+solvent_timestep: 4.0      # femtosecond
+barostat_frequency: 25.0
+surface_tension: 300.0     # bar*nm (membrane only)
+"""
+
+
+# --------------------------------------------------------------------------- #
 # Driver (.sh) template
 # --------------------------------------------------------------------------- #
-def _driver(engine: str, command: str, submit_hint: str) -> str:
+def _gromacs_driver(engine: str, command: str, submit_hint: str, ext: str) -> str:
     return f"""\
 #!/usr/bin/env bash
 # AlchemForge driver for __PROJECT__  (engine: {engine}, command: {command}).
 # Generated by `alchemforge generate`. Edit the environment setup for your host.
 set -euo pipefail
 
-CONFIG="${{1:-__PROJECT__.toml}}"
+CONFIG="${{1:-__PROJECT__.{ext}}}"
 
 # --- environment (uncomment/edit as needed) ---
 # source /path/to/conda/etc/profile.d/conda.sh
@@ -232,35 +609,165 @@ echo "  {submit_hint}"
 """
 
 
-# engine -> workflow key -> (toml text, cli command, submit hint)
-_GROMACS: dict[str, tuple[str, str, str]] = {
+def _openfe_driver(engine: str, command: str, submit_hint: str, ext: str) -> str:
+    return f"""\
+#!/usr/bin/env bash
+# AlchemForge driver for __PROJECT__  (engine: {engine}, workflow: {command}).
+# Generated by `alchemforge generate`. Edit the environment setup for your host.
+set -euo pipefail
+
+CONFIG="${{1:-__PROJECT__.{ext}}}"
+
+# --- environment (uncomment/edit as needed) ---
+# source /path/to/conda/etc/profile.d/conda.sh
+# conda activate alchemforge
+
+echo "== validate =="
+alchemforge openfe {command} validate "$CONFIG"
+
+echo "== generate + execute =="
+alchemforge openfe {command} run "$CONFIG"
+"""
+
+
+def _alanine_driver(engine: str, command: str, submit_hint: str, ext: str) -> str:
+    return f"""\
+#!/usr/bin/env bash
+# AlchemForge driver for __PROJECT__  (engine: {engine}, {command}).
+# Generated by `alchemforge generate`. Edit the environment setup for your host.
+set -euo pipefail
+
+CONFIG="${{1:-__PROJECT__.{ext}}}"
+
+# --- environment (uncomment/edit as needed) ---
+# source /path/to/conda/etc/profile.d/conda.sh
+# conda activate alchemforge
+
+echo "== stage (expand selection -> one resFEP run per residue) =="
+alchemforge {command} stage "$CONFIG"
+
+echo
+echo "Staging complete. To launch every per-residue run:"
+echo "  {submit_hint}"
+"""
+
+
+_ALASCAN_TOML = """\
+# AlchemForge alanine scanning (per-residue -> ALA resFEP) configuration
+# Edit, then:  alchemforge alanine-scan stage __PROJECT__.toml
+
+[project]
+name = "__PROJECT__"
+work_dir = "work"
+
+[system]
+complex = "complex.pdb"
+force_field = "amber99sb"
+water_model = "tip3p"
+
+[ligand]
+mol2 = "ligand.mol2"
+resname = "LIG"
+charge = 0
+
+[simulation]
+replicates = 2
+lambda_windows = 17
+mode = "RESUME"                    # OVERWRITE | RESUME | SKIP
+
+[execution]
+max_parallel_jobs = 8
+mdrun_options = ["-ntmpi", "1"]
+
+# Residues to mutate to ALA. Combine any of these; ALA/GLY/PRO are skipped.
+[scan]
+chain = "A"
+residues = [40, 41, 42]           # explicit residue numbers (optional)
+residue_range = "45-55"           # inclusive range (optional)
+interface_cutoff_nm = 0.5         # also add residues within this cutoff of the ligand (optional)
+"""
+
+
+# engine -> workflow key -> (template text, extension, command, driver fn, submit hint)
+_GROMACS: dict[str, tuple[str, str, str, object, str]] = {
     "rbfe": (
         _RBFE_TOML,
+        "toml",
         "ligand-rbfe",
+        _gromacs_driver,
         "bash work/__PROJECT__/submit_production_array.sh",
     ),
     "abfe": (
         _ABFE_TOML,
+        "toml",
         "abfe-gromacs",
+        _gromacs_driver,
         "alchemforge abfe-gromacs run __PROJECT__.toml",
     ),
     "septop": (
         _SEPTOP_TOML,
+        "toml",
         "septop-gromacs",
+        _gromacs_driver,
         "alchemforge septop-gromacs submit __PROJECT__.toml",
     ),
     "res_rbfe": (
         _RESFEP_TOML,
+        "toml",
         "resfep",
+        _gromacs_driver,
         "alchemforge resfep submit __PROJECT__.toml",
+    ),
+    "dna_rbfe": (
+        _DNA_RBFE_TOML,
+        "toml",
+        "dna-rbfe",
+        _gromacs_driver,
+        "alchemforge dna-rbfe submit __PROJECT__.toml",
+    ),
+    "rna_rbfe": (
+        _RNA_RBFE_TOML,
+        "toml",
+        "rna-rbfe",
+        _gromacs_driver,
+        "alchemforge rna-rbfe submit __PROJECT__.toml",
+    ),
+    "alanine_scan": (
+        _ALASCAN_TOML,
+        "toml",
+        "alanine-scan",
+        _alanine_driver,
+        "alchemforge alanine-scan submit __PROJECT__.toml",
     ),
 }
 
-# OpenFE templates are not implemented yet; the key reserves the engine so the
-# CLI surface and error messages are ready for them.
-_OPENFE: dict[str, tuple[str, str, str]] = {}
+# OpenFE uses its native YAML (consumed by create_json). Add rbfe/abfe here as
+# their templates become available.
+_OPENFE: dict[str, tuple[str, str, str, object, str]] = {
+    "rbfe": (
+        _RBFE_OPENFE_YAML,
+        "yaml",
+        "rbfe",
+        _openfe_driver,
+        "alchemforge openfe rbfe run __PROJECT__.yaml",
+    ),
+    "abfe": (
+        _ABFE_OPENFE_YAML,
+        "yaml",
+        "abfe",
+        _openfe_driver,
+        "alchemforge openfe abfe run __PROJECT__.yaml",
+    ),
+    "septop": (
+        _SEPTOP_OPENFE_YAML,
+        "yaml",
+        "septop",
+        _openfe_driver,
+        "alchemforge openfe septop run __PROJECT__.yaml",
+    ),
+}
 
-_ENGINES: dict[str, dict[str, tuple[str, str, str]]] = {
+_ENGINES: dict[str, dict[str, tuple[str, str, str, object, str]]] = {
     "gromacs": _GROMACS,
     "openfe": _OPENFE,
 }
@@ -278,28 +785,30 @@ def _generate(args: argparse.Namespace) -> int:
             f"The '{engine}' engine has no '{workflow}' template yet. "
             f"Available for '{engine}': {available}."
         )
-    toml_text, command, submit_hint = table[workflow]
+    text, ext, command, driver_fn, submit_hint = table[workflow]
     project = args.name
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
-    toml_path = output_dir / f"{project}.toml"
+    config_path = output_dir / f"{project}.{ext}"
     sh_path = output_dir / f"{project}.sh"
 
-    for path in (toml_path, sh_path):
+    for path in (config_path, sh_path):
         if path.exists() and not args.force:
             raise ValueError(f"{path} already exists (use --force to overwrite)")
 
     header = f"# engine = {engine}\n"
-    toml_path.write_text(
-        header + toml_text.replace("__PROJECT__", project), encoding="utf-8"
+    config_path.write_text(
+        header + text.replace("__PROJECT__", project), encoding="utf-8"
     )
-    sh_text = _driver(engine, command, submit_hint).replace("__PROJECT__", project)
+    sh_text = driver_fn(engine, command, submit_hint, ext).replace(
+        "__PROJECT__", project
+    )
     sh_path.write_text(sh_text, encoding="utf-8")
     sh_path.chmod(sh_path.stat().st_mode | 0o100)
 
-    print(f"Wrote {toml_path}  (engine: {engine})")
+    print(f"Wrote {config_path}  (engine: {engine})")
     print(f"Wrote {sh_path}")
-    print(f"Next: edit {toml_path.name}, then run  bash {sh_path.name}")
+    print(f"Next: edit {config_path.name}, then run  bash {sh_path.name}")
     return 0
 
 
@@ -321,9 +830,20 @@ def add_generate_parser(
         "rbfe": "Relative binding free energy",
         "abfe": "Absolute binding free energy",
         "septop": "Separated-topologies RBFE",
-        "res_rbfe": "Residue-mutation FEP",
+        "res_rbfe": "Protein residue-mutation FEP",
+        "dna_rbfe": "DNA base-mutation RBFE",
+        "rna_rbfe": "RNA base-mutation RBFE",
+        "alanine_scan": "Alanine scanning (per-residue -> ALA)",
     }
-    for key in ("rbfe", "abfe", "septop", "res_rbfe"):
+    for key in (
+        "rbfe",
+        "abfe",
+        "septop",
+        "res_rbfe",
+        "dna_rbfe",
+        "rna_rbfe",
+        "alanine_scan",
+    ):
         step = workflows.add_parser(key, help=helps[key])
         step.add_argument(
             "name",

@@ -242,6 +242,8 @@ class LigandRBFEConfig:
     slurm_tasks: int
     slurm_cpus_per_task: int
     slurm_gpus: int
+    slurm_gpu_type: str
+    slurm_constraint: str
     slurm_memory: str
     slurm_walltime: str
     slurm_conda_init: str
@@ -655,6 +657,8 @@ class LigandRBFEConfig:
                 slurm.get("cpus_per_task", 8), "[slurm].cpus_per_task"
             ),
             slurm_gpus=_positive_int(slurm.get("gpus", 1), "[slurm].gpus", 0),
+            slurm_gpu_type=str(slurm.get("gpu_type", "")).strip(),
+            slurm_constraint=str(slurm.get("constraint", "")).strip(),
             slurm_memory=str(slurm.get("memory", "16G")),
             slurm_walltime=str(slurm.get("walltime", "24:00:00")),
             slurm_conda_init=str(

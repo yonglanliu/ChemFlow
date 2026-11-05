@@ -15,6 +15,103 @@ Production can use independent lambda windows or Hamiltonian replica exchange
 (HREX). In HREX mode, every edge, thermodynamic leg, and replicate is an
 independent exchange group.
 
+## Quick start: end to end from the command line
+
+This walkthrough runs a complete soluble-receptor RBFE project headlessly, with
+no desktop application. Every step is driven by one TOML configuration.
+
+```bash
+conda activate alchemforge
+```
+
+**1. Scaffold a config and driver.** `generate` writes a commented
+`<name>.toml` plus a matching `<name>.sh` driver. The engine defaults to
+GROMACS (`--engine openfe` is reserved for later):
+
+```bash
+alchemforge generate rbfe my_rbfe            # writes my_rbfe.toml and my_rbfe.sh
+```
+
+Open `my_rbfe.toml` and fill in the real paths and parameters — at minimum the
+protein under `[system]`, the ligand SDF under `[ligands]`, and the Slurm block.
+Every path is resolved relative to the config file.
+
+**2. Prepare the inputs (optional headless prep).** If your receptor PDB and
+ligand parameters are not ready yet, the `rbfe` subcommand group runs the four
+preparation steps from the same config:
+
+```bash
+alchemforge rbfe fix-pdb        my_rbfe.toml   # repair/assemble the receptor
+alchemforge rbfe assign-charge  my_rbfe.toml   # charge + parameterize ligands (AM1-BCC/GAFF2)
+alchemforge rbfe plan           my_rbfe.toml   # build the perturbation network
+alchemforge rbfe workflow       my_rbfe.toml   # stage edges + submit scripts
+```
+
+or run all four in order:
+
+```bash
+alchemforge rbfe all my_rbfe.toml
+```
+
+`fix-pdb` and `assign-charge` read two optional config sections,
+`[protein_prep]` (cofactor/membrane/solvent/pbc_source, e.g. retained metals)
+and `[ligand_prep]` (atom_type, net_charge/net_charges, resnames). `plan`
+writes `network/edges.csv`; `workflow` reuses that network if present (pass
+`--replan` to force replanning).
+
+**3. Or stage directly.** If the receptor and ligands are already prepared, the
+generated driver just validates and stages in one shot:
+
+```bash
+bash my_rbfe.sh            # = alchemforge ligand-rbfe validate + stage
+# equivalently:
+alchemforge ligand-rbfe validate my_rbfe.toml
+alchemforge ligand-rbfe stage    my_rbfe.toml
+```
+
+**4. Submit.** Staging produces one self-contained pipeline per edge. Launch
+them all:
+
+```bash
+bash work/my_rbfe/submit_production_array.sh
+```
+
+Each edge submits its own model-build job, then its own simulation array that
+depends (`afterok`) only on *that edge's* build — so edges never wait on one
+another, and no edge sits behind a global barrier. Per-edge arrays are small, so
+they stay well under the scheduler's `MaxArraySize` and carry no concurrency cap.
+
+**5. Monitor.** The submit script prints an inspection command; otherwise:
+
+```bash
+sacct -X -j <job-ids> --format=JobID,State,ExitCode,Reason,Elapsed,NodeList
+```
+
+**6. Restart a leg that failed or needs more wall time.** Resubmit just one
+edge's complex or solvent leg. The task runner skips finished stages and resumes
+unfinished ones from their `.cpt` checkpoint, so a plain restart continues where
+it stopped:
+
+```bash
+# continue the complex leg of one edge
+alchemforge ligand-rbfe restart my_rbfe.toml --edge edge_LIGA_to_LIGB --leg complex
+
+# only specific replicates / lambda windows (independent sampling)
+alchemforge ligand-rbfe restart my_rbfe.toml --edge edge_LIGA_to_LIGB --leg solvent \
+    --replicate 2 --window 0 --window 1
+
+# wipe that leg's outputs first for a clean rerun; preview without submitting
+alchemforge ligand-rbfe restart my_rbfe.toml --edge edge_LIGA_to_LIGB --leg complex \
+    --force --dry-run
+```
+
+`--window` is independent-sampling only; under HREX all windows of a replicate
+are coupled in one exchange run, so restart operates at the replicate level
+(`--replicate`) and rejects `--window`.
+
+The sections below document each stage, the inputs, HREX, and troubleshooting in
+depth.
+
 ## 1. Requirements
 
 Use the AlchemForge environment described in the repository installation
@@ -52,9 +149,10 @@ Start from a multi-molecule SDF containing one named, three-dimensional
 structure per ligand. Names must be unique and stable because they are used in
 the network, edge names, and prepared-ligand manifest.
 
-Run **GROMACS → Ligand Preparation** in the desktop first. The prepared ligand
-folder must contain `ligand_manifest.tsv`; each record points to the matching
-charged MOL2, force-field parameters, GRO, and ITP files.
+Run **GROMACS → Ligand Preparation** in the desktop first, or do it headlessly
+with `alchemforge rbfe assign-charge <config>` (see the quick start). Either way
+the prepared ligand folder must contain `ligand_manifest.tsv`; each record points
+to the matching charged MOL2, force-field parameters, GRO, and ITP files.
 
 Check that:
 
@@ -202,18 +300,21 @@ When the network already exists and must not be replanned:
 alchemforge ligand-rbfe stage ligand_rbfe.toml --reuse-network
 ```
 
-Do not build every hybrid edge locally. Staging now creates one model-build
-task per network edge and a Slurm array:
+Do not build every hybrid edge locally. Staging creates one model-build task
+per network edge plus the per-edge simulation arrays, all launched by:
 
 ```bash
 bash <project>/submit_production_array.sh
 ```
 
-The submission script first launches `gromacs_model_build_array.sh`. Each array
-element runs one edge's `build_hybrid.sh`, producing both complex and solvent
-systems. Simulation arrays are submitted with an `afterok` dependency on the
-model-build array. Completed edge models are detected and skipped, so adding
-replicates does not rebuild existing models.
+The submission script iterates over edges and, for each one, submits a
+single-task model build followed by that edge's simulation array with an
+`afterok` dependency on **its own** build. Edges are therefore fully
+independent — one edge begins simulating as soon as its model is ready, without
+waiting for other edges. Completed edge models are detected and skipped, so
+adding replicates does not rebuild existing models. Because each array covers
+only one edge, the indices stay small (no `MaxArraySize` failures) and no
+`%N` concurrency cap is applied.
 
 ## 5. Generated directory layout
 
@@ -330,6 +431,31 @@ replicates = 3
 This creates `rep_3`, `rep_4`, and `rep_5`.
 
 ## 9. Restarts and regeneration
+
+### Restarting one edge's leg
+
+To relaunch a single edge's complex or solvent leg — after a node failure, a
+wall-time limit, or a `--force` wipe — use the `restart` command instead of
+resubmitting the whole project:
+
+```bash
+alchemforge ligand-rbfe restart my_rbfe.toml --edge edge_LIGA_to_LIGB --leg complex
+```
+
+It resubmits only that leg's tasks (offset into the staged manifest), so other
+edges and the opposite leg are untouched. Options:
+
+- `--replicate N` / `--window W` — restart only specific tasks (repeatable).
+  `--window` is independent-sampling only; HREX couples all windows of a
+  replicate, so it is rejected there — use `--replicate`.
+- `--force` — delete that leg's stage outputs (`em/nvt/npt/prod` `.gro/.cpt/...`)
+  first, keeping the `.mdp` inputs, for a clean rerun.
+- `--dry-run` — print the `sbatch` command(s) without submitting.
+
+Under HREX, `restart` resubmits the replicate's equilibration array and then its
+coordinated production job (`afterok` on the equilibration).
+
+### Regeneration
 
 Generated shell scripts are snapshots. Updating AlchemForge does not alter
 scripts already present in an existing project. Regenerate or restage the

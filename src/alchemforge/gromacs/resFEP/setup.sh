@@ -142,7 +142,7 @@ echo "============================================================"
 echo "Date:              $(date)"
 echo "Working directory:    ${WORK_DIR}"
 echo "Complex:           ${COMPLEX}"
-echo "Mutation:          ${CHAIN} ${RESID} ${MUT}"
+echo "Mutation(s):       ${MUTATIONS:-${CHAIN} ${RESID} ${MUT}} (${MOLECULE_TYPE:-protein})"
 echo "Force field:       ${FF}"
 echo "Water model:       ${WATER}"
 echo "Ligand residue:    ${LIGAND_RESNAME}"
@@ -438,9 +438,13 @@ echo "============================================================"
 echo "4. Defining mutation"
 echo "============================================================"
 
-cat > mutation.txt << EOF
-${CHAIN} ${RESID} ${MUT}
-EOF
+# One "chain resid target" line per mutation (pmx applies them all). MUTATIONS
+# is set by the config; fall back to the single CHAIN/RESID/MUT for old configs.
+if [[ -n "${MUTATIONS:-}" ]]; then
+    printf '%s\n' "${MUTATIONS}" > mutation.txt
+else
+    printf '%s\n' "${CHAIN} ${RESID} ${MUT}" > mutation.txt
+fi
 
 cat mutation.txt
 
