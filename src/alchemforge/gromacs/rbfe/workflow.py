@@ -168,8 +168,21 @@ def render_slurm_array_script(
         + "    exit 127\n"
         + "fi\n"
         + f"MDRUN_COMMON=( -ntomp \"$OMP_NUM_THREADS\" {mdrun_options} )\n\n"
-        + "# EM uses the same resources (incl. the allocated GPU) as NVT/NPT.\n"
-        + 'MDRUN_EM=( "${MDRUN_COMMON[@]}" )\n\n'
+        + "# Energy minimization uses the non-dynamical steepest-descent\n"
+        + "# integrator, which GROMACS cannot run with PME (or bonded/update)\n"
+        + "# offloaded to the GPU. Reuse MDRUN_COMMON but force PME onto the CPU\n"
+        + "# and drop any -bonded/-update GPU offload; short-range -nb stays on\n"
+        + "# the GPU. (Dynamical NVT/NPT/prod keep whatever MDRUN_COMMON sets.)\n"
+        + "MDRUN_EM=()\n"
+        + '_em_arr=( "${MDRUN_COMMON[@]}" )\n'
+        + '_em_i=0\n'
+        + 'while [[ $_em_i -lt ${#_em_arr[@]} ]]; do\n'
+        + '    case "${_em_arr[$_em_i]}" in\n'
+        + '        -pme) MDRUN_EM+=( -pme cpu ); _em_i=$((_em_i + 2)); continue ;;\n'
+        + '        -bonded|-update) _em_i=$((_em_i + 2)); continue ;;\n'
+        + '        *) MDRUN_EM+=( "${_em_arr[$_em_i]}" ); _em_i=$((_em_i + 1)) ;;\n'
+        + '    esac\n'
+        + 'done\n\n'
         + "validate_minimization() {\n"
         + '    local log_file="$1"\n'
         + '    if [[ ! -s "$log_file" ]] || grep -Eqi '

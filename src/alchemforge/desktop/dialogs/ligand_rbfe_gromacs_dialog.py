@@ -566,10 +566,28 @@ class LigandRBFEGromacsDialog(QDialog):
         self.memory = QLineEdit("16G")
         self.walltime = QLineEdit("24:00:00")
         self.pme_target = QComboBox()
-        self.pme_target.addItems(["cpu", "gpu", "auto"])
+        self.pme_target.addItems(["auto", "gpu", "cpu"])
         self.pme_target.setToolTip(
-            "Use CPU for the Conda OpenCL GROMACS build; use GPU for a "
-            "CUDA-enabled GROMACS build after testing it."
+            "auto (recommended): GROMACS runs PME on the GPU where supported "
+            "and falls back to CPU for charge-perturbing edges, so jobs never "
+            "fail. gpu forces GPU-PME (fastest, but may be rejected with 'PME "
+            "on GPU not supported with perturbed charges'). cpu is the "
+            "always-safe FEP default (slowest — PME on CPU bottlenecks even an "
+            "A100)."
+        )
+        self.gpu_type = QComboBox()
+        self.gpu_type.setEditable(True)
+        self.gpu_type.addItems(["", "a100", "v100", "p100", "k80"])
+        self.gpu_type.setToolTip(
+            "Pin a GPU model via --gres=gpu:<type>:N (e.g. a100) to avoid slow, "
+            "heterogeneous hardware. Leave blank to accept any GPU. Use your "
+            "cluster's exact gres type name."
+        )
+        self.slurm_constraint = QLineEdit()
+        self.slurm_constraint.setPlaceholderText("Optional, e.g. a100 or gpua100")
+        self.slurm_constraint.setToolTip(
+            "Optional SLURM --constraint feature expression to pin node "
+            "features (alternative/complement to GPU type)."
         )
         self.conda_init = QLineEdit()
         self.conda_environment = QLineEdit()
@@ -816,6 +834,8 @@ class LigandRBFEGromacsDialog(QDialog):
         form.addRow("HREX GROMACS command:", self.hrex_gmx_command)
         form.addRow("GPUs per job:", self.gpus)
         form.addRow("PME target:", self.pme_target)
+        form.addRow("GPU type (gres):", self.gpu_type)
+        form.addRow("SLURM constraint:", self.slurm_constraint)
         form.addRow("Memory per job:", self.memory)
         form.addRow("Walltime:", self.walltime)
         form.addRow("Conda initialization:", self.conda_init)
@@ -832,7 +852,7 @@ class LigandRBFEGromacsDialog(QDialog):
             (
                 ("System", 6),
                 ("FEP Simulation", 1),
-                ("Job Setting", 16),
+                ("Job Setting", 18),
             ),
         )
         self.ligand_preparation = GromacsLigandPrepareDialog(
@@ -2371,6 +2391,8 @@ class LigandRBFEGromacsDialog(QDialog):
                         "gpu",
                         "-pme",
                         self.pme_target.currentText(),
+                        "-bonded",
+                        "gpu",
                     ]
                 )
                 + "\n"
@@ -2386,6 +2408,8 @@ class LigandRBFEGromacsDialog(QDialog):
             f"tasks = {self.tasks.value()}\n"
             f"cpus_per_task = {self.cpus.value()}\n"
             f"gpus = {self.gpus.value()}\n"
+            f"gpu_type = {json.dumps(self.gpu_type.currentText().strip())}\n"
+            f"constraint = {json.dumps(self.slurm_constraint.text().strip())}\n"
             f"memory = {json.dumps(self.memory.text().strip())}\n"
             f"walltime = {json.dumps(self.walltime.text().strip())}\n"
             f"conda_init = {json.dumps(self.conda_init.text().strip())}\n"
