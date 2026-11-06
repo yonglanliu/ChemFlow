@@ -566,7 +566,7 @@ class LigandRBFEGromacsDialog(QDialog):
         self.memory = QLineEdit("16G")
         self.walltime = QLineEdit("24:00:00")
         self.pme_target = QComboBox()
-        self.pme_target.addItems(["auto", "gpu", "cpu"])
+        self.pme_target.addItems(["gpu", "auto", "cpu"])
         self.pme_target.setToolTip(
             "auto (recommended): GROMACS runs PME on the GPU where supported "
             "and falls back to CPU for charge-perturbing edges, so jobs never "
