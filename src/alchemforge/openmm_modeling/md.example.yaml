@@ -1,0 +1,39 @@
+# ===================================================================
+# OpenMM MD runner - unrestrained production MD.
+# min -> NVT equil -> NPT equil -> production. system_type selects the
+# barostat: soluble = isotropic MonteCarloBarostat; membrane = NPgT
+# MonteCarloMembraneBarostat (XY-isotropic, Z-free). Input must carry a
+# periodic box (CRYST1). Units: ps, K, bar, bar*nm.
+# ===================================================================
+
+input_pdb: "relaxed_complex.pdb"      # solvated/relaxed complex with a box
+ligand_sdf: "ligand.sdf"
+small_molecule_forcefield: "gaff-2.11"   # or an openff-x.y.z SMIRNOFF line
+system_type: "membrane"      # soluble | membrane
+platform: "CUDA"           # CUDA | OpenCL | CPU
+friction: 1.0                   # Langevin collision rate (1/ps)
+seed: 1
+temperature: 300.0              # K
+pressure: 1.0                   # bar
+surface_tension: 0.0            # bar*nm (membrane only)
+output_prefix: "md"
+report_interval: 5000           # steps between frames
+checkpoint_interval: 50000
+forcefields:
+  - "amber/ff14SB.xml"
+  - "amber/tip3p_standard.xml"
+  - "amber/tip3p_HFE_multivalent.xml"
+  - "amber/phosaa10.xml"
+  - "amber/lipid17_merged.xml"
+
+minimization:
+  steps: 10000
+nvt:                            # NVT equilibration
+  timestep: 0.002
+  simulation_time: 250.0        # ps
+npt:                            # NPT equilibration
+  timestep: 0.002
+  simulation_time: 500.0        # ps
+production:                     # unrestrained production
+  timestep: 0.004               # 4 fs with HMR
+  simulation_time: 10000.0      # ps (10 ns; raise as needed)

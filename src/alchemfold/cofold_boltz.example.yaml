@@ -1,0 +1,30 @@
+# ===================================================================
+# Boltz-2 co-folding: jointly predict a protein+ligand complex (and,
+# optionally, its binding affinity). Output is a complex PDB/mmCIF that
+# feeds OpenMM modeling (build-soluble / build-membrane) -> FEP.
+# Requires the `boltz` package (Boltz-2) installed with GPU.
+# ===================================================================
+
+boltz_command: "boltz"          # Boltz-2 CLI entry point
+out_dir: "cofold_output"
+output_format: "pdb"            # pdb | mmcif
+use_msa_server: true            # compute MSAs via the Boltz server (needs internet)
+                                # set false and give each protein an 'msa' path for offline runs
+diffusion_samples: 1            # number of predicted poses
+recycling_steps: 3
+sampling_steps: 200
+seed: 1
+accelerator: "gpu"              # gpu | cpu | tpu
+devices: 1
+override: false                 # overwrite an existing Boltz output dir
+predict_affinity: true          # Boltz-2 binding-affinity prediction
+affinity_binder: "L"           # ligand id to score
+
+proteins:
+  - id: "A"
+    sequence: "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ"
+    # msa: "empty"                # or a precomputed .a3m path when use_msa_server is false
+
+ligands:
+  - id: "L"
+    smiles: "CC(=O)Oc1ccccc1C(=O)O"          # or use `ccd: "ATP"` for a PDB chemical-component code

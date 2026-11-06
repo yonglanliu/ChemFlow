@@ -1,0 +1,30 @@
+# ===================================================================
+# OpenMM soluble-system builder (Modeller.addSolvent).
+# Solvate a soluble protein(+ligand) complex in a water box and add
+# ions. Output feeds the MD runner / OpenFE FEP.
+# Distances in nm, ionic_strength in molar.
+# ===================================================================
+
+input_pdb: "complex.pdb"      # protein (optionally with a bound ligand)
+ligand_sdf: "ligand.sdf"
+small_molecule_forcefield: "gaff-2.11"   # or an openff-x.y.z SMIRNOFF line
+output_pdb: "soluble_complex.pdb"
+
+solvent_model: "tip3p"
+positive_ion: "Na+"
+negative_ion: "Cl-"
+ionic_strength: 0.15            # molar
+neutralize: true
+forcefields:
+  - "amber/ff14SB.xml"
+  - "amber/tip3p_standard.xml"
+  - "amber/tip3p_HFE_multivalent.xml"
+  - "amber/phosaa10.xml"
+  - "amber/lipid17_merged.xml"
+
+box:
+  mode: "padding"               # padding | boxsize | vectors
+  padding: 1.0                  # nm (buffer beyond the solute)
+  box_shape: "cube"             # cube | dodecahedron | octahedron
+  # boxsize: [8.0, 8.0, 8.0]    # nm, when mode == boxsize
+  # box_vectors: [[8,0,0],[0,8,0],[0,0,8]]  # nm, when mode == vectors

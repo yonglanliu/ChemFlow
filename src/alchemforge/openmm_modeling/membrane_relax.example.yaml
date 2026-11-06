@@ -1,0 +1,110 @@
+# ===================================================================
+# OpenMM membrane relaxation - optimal multi-stage protocol
+# Modeled on the Desmond membrane relaxation + CHARMM-GUI six-step
+# bilayer equilibration: cold start, gradual heating, progressive
+# restraint release, NVT -> membrane-barostat (NPgT) hand-off.
+# Operates on a PRE-TRIMMED complex and keeps the input PDB periodic
+# box (no padding), so the system stays small.
+# Units: ps, K, kJ/mol/nm^2, bar, bar*nm. k given as kcal/mol/A^2 x 418.4.
+#
+#  stage  ensemble   T(K)      dt(fs)  time(ps)  bb    sc    lipidZ  lig
+#  min    -          -         -       10000 it  unrestrained
+#  1      NVT        100       1       50        4184  2092  1046    4184
+#  2      NPgT       150       1       50        2092  1046  1046    2092
+#  3      NPgT       200       2       100       1046  418   418     1046
+#  4      NPgT       250->300  2       50/50/100 418   209   209     418
+#  5      NVT        300       2       100       209   -     -       209
+#  6      NVT        300       4       100       unrestrained
+#  prod   NPgT       300       4       5000      unrestrained
+# ===================================================================
+
+input_pdb: "complex_membrane.pdb"      # prepared complex with a CRYST1 box line
+ligand_sdf: "ligand.sdf"
+small_molecule_forcefield: "gaff-2.11"   # or an openff-x.y.z SMIRNOFF line
+platform: "CUDA"           # CUDA | OpenCL | CPU
+friction: 1.0                   # Langevin collision rate (1/ps)
+seed: 1
+forcefields:
+  - "amber/ff14SB.xml"
+  - "amber/tip3p_standard.xml"
+  - "amber/tip3p_HFE_multivalent.xml"
+  - "amber/phosaa10.xml"
+  - "amber/lipid17_merged.xml"
+
+# -------------------------------------------------------------------
+# Every key below is shown with its default value - edit to tune. The
+# loader merges this over the built-in protocol, so you may also delete
+# any stage/key you do not want to change.
+# -------------------------------------------------------------------
+minimization:
+  steps: 10000                  # unrestrained steepest-descent iterations
+
+stage1:                         # cold restrained NVT, strongest restraints
+  temperature: 100.0
+  timestep: 0.001
+  simulation_time: 50.0
+  restraints:
+    backbone:  {force_constants: 4184.0}   # 10.0 kcal/mol/A^2
+    sidechain: {force_constants: 2092.0}   #  5.0
+    membrane:  {force_constants: [0.0, 0.0, 1046.0]}   # lipid head Z, 2.5
+    ligand:    {force_constants: 4184.0}
+
+stage2:                         # restrained NPgT, barostat on
+  temperature: 150.0
+  timestep: 0.001
+  simulation_time: 50.0
+  pressure: 1.0
+  surface_tension: 0.0          # bar*nm; 0 => tensionless bilayer
+  restraints:
+    backbone:  {force_constants: 2092.0}
+    sidechain: {force_constants: 1046.0}
+    membrane:  {force_constants: [0.0, 0.0, 1046.0]}
+    ligand:    {force_constants: 2092.0}
+
+stage3:                         # restrained NPgT, short restrained min first
+  temperature: 200.0
+  timestep: 0.002
+  simulation_time: 100.0
+  pressure: 1.0
+  surface_tension: 0.0
+  restraints:
+    backbone:  {force_constants: 1046.0}
+    sidechain: {force_constants: 418.4}
+    membrane:  {force_constants: [0.0, 0.0, 418.4]}
+    ligand:    {force_constants: 1046.0}
+
+stage4:                         # restrained NPgT heating ramp to 300 K
+  timestep: 0.002
+  pressure: 1.0
+  surface_tension: 0.0
+  temperature_schedule:
+    - {temperature: 250.0, duration: 50.0}
+    - {temperature: 275.0, duration: 50.0}
+    - {temperature: 300.0, duration: 100.0}
+  restraints:
+    backbone:  {force_constants: 418.4}
+    sidechain: {force_constants: 209.2}
+    membrane:  {force_constants: [0.0, 0.0, 209.2]}
+    ligand:    {force_constants: 418.4}
+
+stage5:                         # lightly restrained NVT (backbone + ligand)
+  temperature: 300.0
+  timestep: 0.002
+  simulation_time: 100.0
+  restraints:
+    backbone: {force_constants: 209.2}
+    ligand:   {force_constants: 209.2}
+
+stage6:                         # unrestrained NVT settle (4 fs, HMR)
+  temperature: 300.0
+  timestep: 0.004
+  simulation_time: 100.0
+  restraints: false
+
+simulation:                     # unrestrained NPgT production
+  temperature: 300.0
+  timestep: 0.004
+  simulation_time: 5000.0
+  pressure: 1.0
+  surface_tension: 0.0
+  restraints: false

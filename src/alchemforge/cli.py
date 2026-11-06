@@ -7,6 +7,7 @@ import argparse
 from alchemforge.gpu_test import add_gpu_test_parser
 from alchemforge.generate_cli import add_generate_parser
 from alchemforge.openfe_cli import add_openfe_parser
+from alchemforge.openmm_cli import add_openmm_parser
 from alchemforge.gromacs.alanine_scan.workflow import add_alanine_scan_parser
 from alchemforge.gromacs.abfe.workflow import add_abfe_gromacs_parser
 from alchemforge.gromacs.rbfe.prep_cli import add_rbfe_prep_parser
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_abfe_gromacs_parser(workflows)
     add_septop_gromacs_parser(workflows)
     add_openfe_parser(workflows)
+    add_openmm_parser(workflows)
     add_pdbfix_parser(workflows)
     add_generate_parser(workflows)
     add_gpu_test_parser(workflows)

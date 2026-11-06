@@ -67,6 +67,16 @@ from alchemforge.desktop.dialogs.openfe_charge_dialog import (
     OpenFEChargeMoleculesDialog,
 )
 from alchemforge.desktop.dialogs.openfe_execute_dialog import OpenFEExecuteDialog
+from alchemforge.desktop.dialogs.openfe_md_dialog import OpenFEMDDialog
+from alchemforge.desktop.dialogs.openfe_membrane_build_dialog import (
+    OpenFEMembraneBuildDialog,
+)
+from alchemforge.desktop.dialogs.openfe_membrane_relax_dialog import (
+    OpenFEMembraneRelaxDialog,
+)
+from alchemforge.desktop.dialogs.openfe_soluble_build_dialog import (
+    OpenFESolubleBuildDialog,
+)
 from alchemforge.desktop.dialogs.openfe_workflow_dialog import (
     OpenFEABFEDialog,
     OpenFERBFEDialog,
@@ -1013,6 +1023,44 @@ class MainWindow(QMainWindow):
         openfe_abfe.setData(0, Qt.UserRole, "abfe_openfe")
 
         # ============================================================
+        # AlchemFold — co-folding (structure prediction)
+        # ============================================================
+
+        cofold = QTreeWidgetItem(self.nav, ["🧬   AlchemFold"])
+        cofold.setData(0, Qt.UserRole, "alchemfold_tools")
+
+        cofold_dock = QTreeWidgetItem(cofold, ["Docking"])
+        cofold_dock.setData(0, Qt.UserRole, "alchemfold_dock")
+
+        cofold_screen = QTreeWidgetItem(cofold, ["Virtual Screening"])
+        cofold_screen.setData(0, Qt.UserRole, "alchemfold_screen")
+
+        # ============================================================
+        # OpenMM System Modeling & MD
+        # ============================================================
+
+        openmm_modeling = QTreeWidgetItem(self.nav, ["⚛   OpenMM Modeling & MD"])
+        openmm_modeling.setData(0, Qt.UserRole, "openmm_modeling_tools")
+
+        openmm_soluble_build = QTreeWidgetItem(
+            openmm_modeling, ["Soluble System Builder"]
+        )
+        openmm_soluble_build.setData(0, Qt.UserRole, "soluble_build_openmm")
+
+        openmm_membrane_build = QTreeWidgetItem(
+            openmm_modeling, ["Membrane Builder"]
+        )
+        openmm_membrane_build.setData(0, Qt.UserRole, "membrane_build_openmm")
+
+        openmm_membrane_relax = QTreeWidgetItem(
+            openmm_modeling, ["Membrane Relaxation"]
+        )
+        openmm_membrane_relax.setData(0, Qt.UserRole, "membrane_relax_openmm")
+
+        openmm_md = QTreeWidgetItem(openmm_modeling, ["MD Simulation"])
+        openmm_md.setData(0, Qt.UserRole, "md_openmm")
+
+        # ============================================================
         # Reusable Preparation Tools
         # ============================================================
 
@@ -1555,7 +1603,7 @@ class MainWindow(QMainWindow):
 
             return
 
-        if page in {"gromacs_workflows", "openfe_workflows"}:
+        if page in {"gromacs_workflows", "openfe_workflows", "openmm_modeling_tools", "alchemfold_tools"}:
             item.setExpanded(not item.isExpanded())
             return
 
@@ -1628,6 +1676,81 @@ class MainWindow(QMainWindow):
 
         elif page == "execute_openfe_transformations":
             dialog = OpenFEExecuteDialog(
+                working_directory=self.working_directory,
+                parent=self,
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page == "membrane_build_openmm":
+            dialog = OpenFEMembraneBuildDialog(
+                working_directory=self.working_directory,
+                parent=self,
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page == "soluble_build_openmm":
+            dialog = OpenFESolubleBuildDialog(
+                working_directory=self.working_directory,
+                parent=self,
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page == "md_openmm":
+            dialog = OpenFEMDDialog(
+                working_directory=self.working_directory,
+                parent=self,
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page == "alchemfold_dock":
+            try:
+                from alchemforge.desktop.dialogs.alchemfold_docking_dialog import (
+                    AlchemFoldDockingDialog,
+                )
+            except ModuleNotFoundError as error:
+                QMessageBox.warning(
+                    self,
+                    "AlchemFold not installed",
+                    "The AlchemFold package is required for docking but is not "
+                    f"importable ({error}).\n\nInstall it into this environment:\n"
+                    "    pip install -e src --no-deps --no-build-isolation\n"
+                    "(or create the dedicated env from environment-alchemfold.yaml).",
+                )
+                return
+            dialog = AlchemFoldDockingDialog(
+                working_directory=self.working_directory,
+                parent=self,
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page == "alchemfold_screen":
+            try:
+                from alchemforge.desktop.dialogs.alchemfold_screen_dialog import (
+                    AlchemFoldScreenDialog,
+                )
+            except ModuleNotFoundError as error:
+                QMessageBox.warning(
+                    self,
+                    "AlchemFold not installed",
+                    "The AlchemFold package is required for virtual screening but is "
+                    f"not importable ({error}).\n\nInstall it:\n"
+                    "    pip install -e src --no-deps --no-build-isolation",
+                )
+                return
+            dialog = AlchemFoldScreenDialog(
+                working_directory=self.working_directory,
+                parent=self,
+            )
+            dialog.job_requested.connect(self.start_backend_job)
+            show_modeless(self, dialog)
+
+        elif page == "membrane_relax_openmm":
+            dialog = OpenFEMembraneRelaxDialog(
                 working_directory=self.working_directory,
                 parent=self,
             )

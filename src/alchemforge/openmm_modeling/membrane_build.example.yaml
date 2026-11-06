@@ -1,0 +1,45 @@
+# ===================================================================
+# OpenMM membrane builder (MembraneModeller).
+# mode: build    -> tile a lipid patch around the protein and TRIM it to
+#                   protein-XY + padding (a minimal membrane), then
+#                   solvate + add ions. Output feeds relax-membrane.
+# mode: existing -> input already has a membrane; only solvate + ionize.
+# REQUIRED: align the protein to the OPM frame first (membrane normal = Z,
+#   bilayer center = z = 0). Download a pre-oriented structure from
+#   https://opm.phar.umich.edu/ or orient it with PPM.
+# Distances in nm, ionic_strength in molar.
+# ===================================================================
+
+input_pdb: "protein.pdb"      # OPM-oriented protein (optionally with a ligand)
+ligand_sdf: "ligand.sdf"
+small_molecule_forcefield: "gaff-2.11"   # or an openff-x.y.z SMIRNOFF line
+mode: "build"                   # build | existing
+platform: "CUDA"           # CUDA | OpenCL | CPU
+output_pdb: "membrane_complex.pdb"
+write_intermediates: false      # dump addMembrane_*.pdb checkpoints
+
+solvent_model: "tip3p"
+positive_ion: "Na+"
+negative_ion: "Cl-"
+ionic_strength: 0.15            # molar
+neutralize: true
+forcefields:
+  - "amber/ff14SB.xml"
+  - "amber/tip3p_standard.xml"
+  - "amber/tip3p_HFE_multivalent.xml"
+  - "amber/phosaa10.xml"
+  - "amber/lipid17_merged.xml"
+
+build:                          # used when mode == build
+  lipid_type: "POPC"        # POPC POPE DLPC DLPE DMPC DOPC DPPC
+  scale_factor: 0.6             # XY shrink of solute while packing lipids
+  membrane_center_z: 0.0        # nm; 0 = OPM bilayer midplane (keep at 0 for OPM input)
+  x_padding: 1.0                # nm beyond protein in X (each side)
+  y_padding: 1.0                # nm, Y
+  z_padding: 1.0                # nm, water above/below the bilayer
+
+existing:                       # used when mode == existing
+  padding: 1.0                  # nm, Z box padding if not set otherwise
+  # boxsize: [8.0, 8.0, 10.0]   # nm, or leave unset
+  # pbc_x: 8.0                   # nm, XY from membrane extent
+  # pbc_y: 8.0

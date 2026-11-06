@@ -1,0 +1,38 @@
+# ===================================================================
+# AlchemFold docking (co-folding). Jointly predict a receptor+ligand
+# complex with the chosen model; optionally steer the ligand into a
+# known pocket. Output feeds OpenMM modeling -> FEP.
+#   engine: boltz -> Boltz-2 (needs `boltz`); supports affinity
+#   engine: chai  -> Chai-1  (needs `chai-lab`)
+# ===================================================================
+
+engine: "boltz"              # boltz | chai
+out_dir: "docking_output"
+output_format: "pdb"            # pdb | mmcif (Chai writes mmCIF)
+use_msa_server: true            # compute MSAs via the model's server (needs internet)
+seed: 1
+accelerator: "gpu"              # gpu | cpu | tpu
+devices: 1
+diffusion_samples: 1            # predicted poses
+recycling_steps: 3
+sampling_steps: 200             # Boltz only
+override: false
+predict_affinity: false         # Boltz-2 only; binding-affinity prediction
+# affinity_binder: "L"          # ligand id to score when predict_affinity: true
+boltz_command: "boltz"          # used when engine: boltz
+chai_command: "chai-lab"        # used when engine: chai
+
+proteins:
+  - id: "A"
+    sequence: "MKTAYIAKQRQISFVKSHFSRQLEERLGLIE"
+
+ligands:
+  - id: "L"
+    smiles: "CC(=O)Oc1ccccc1C(=O)O"          # or use `ccd: "ATP"`
+
+pocket:                         # optional binding-site constraint
+  binder: "L"                  # which ligand binds the pocket
+  max_distance: 6.0             # Angstrom (Boltz pocket constraint)
+  contacts:                     # residues lining the pocket
+    - {chain: A, residue: 123}
+    - {chain: A, residue: 145}
