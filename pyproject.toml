@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 
 name = "chemflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "End-to-end cheminformatics and AI drug discovery platform"
 requires-python = ">=3.11"
 
