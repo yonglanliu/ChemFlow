@@ -1,0 +1,27 @@
+name: reinvent
+
+# Separate environment for REINVENT4 (recommended - do NOT install REINVENT4
+# into the `chemflow` env: it pins torch==2.13.0 and pulls numpy 2 / pandas 3 /
+# a much newer RDKit, which breaks other packages there).
+#
+#   conda env create -f environment-reinvent.yaml
+#   conda activate reinvent
+#   git clone --depth 1 https://github.com/MolecularAI/REINVENT4.git
+#   cd REINVENT4
+#   # Upstream's recommended path is `uv sync` (CUDA 12.6 index pre-configured
+#   # in its pyproject.toml). Check its README for the current instructions;
+#   # they have changed since older releases (install.py).
+#
+# Then set `reinvent_command` in the ChemFlow YAML to this env's executable,
+# e.g. <conda-prefix>/envs/reinvent/bin/reinvent, and set `python:` on each
+# chemflow_scorers entry to an interpreter that can `import chemflow`.
+#
+# A GPU is strongly recommended for reinforcement learning; sampling from a
+# prior is fine on CPU (device: cpu).
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip

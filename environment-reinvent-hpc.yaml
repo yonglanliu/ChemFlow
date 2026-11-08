@@ -1,0 +1,54 @@
+name: reinvent
+
+# Linux HPC environment for REINVENT4 on NVIDIA GPU compute nodes.
+# Separate from the `chemflow` environment on purpose: REINVENT4 pins
+# torch==2.13.0, while environment-hpc.yaml pins torch 2.12.1.
+#
+# The NVIDIA kernel driver is supplied by the cluster. The PyTorch CUDA 12.6
+# wheels bundle their own CUDA runtime, so no conda CUDA toolkit is needed here;
+# the node only needs a driver new enough for CUDA 12.6 (the same line used by
+# environment-alchemforge-hpc.yaml, which is the last one recommended for
+# Tesla P100/Pascal).
+#
+# Create it, then install REINVENT4 into it (REINVENT4 is a local folder, so it
+# cannot be listed in this file):
+#
+#   source <conda-prefix>/etc/profile.d/conda.sh     # your site's conda init
+#   export REINVENT_SRC=/path/to/REINVENT4           # any shared-filesystem directory
+#   conda env create -f environment-reinvent-hpc.yaml
+#   conda activate reinvent
+#   git clone --depth 1 https://github.com/MolecularAI/REINVENT4.git "$REINVENT_SRC"
+#   cd "$REINVENT_SRC"
+#   pip install -e .          # torch is already satisfied from this env
+#   which reinvent            # use this path as `reinvent_command`
+#   reinvent --version
+#
+# Then, on a GPU node (not the login node), confirm the GPU is visible:
+#   srun --partition=gpu --gres=gpu:1 --pty \
+#     python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+#
+# Pretrained priors are not in the REINVENT4 repo. Download them on a
+# login/data-transfer node from https://doi.org/10.5281/zenodo.15641296 into
+# $REINVENT_SRC/priors/ (compute nodes are often offline).
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+  # Keep compiled Python extensions on the Conda C/C++ runtime instead of an
+  # older system libstdc++ on enterprise Linux clusters.
+  - libgcc-ng>=12
+  - libstdcxx-ng>=12
+
+  # REINVENT4 imports scipy but does not declare it as a dependency.
+  - scipy
+
+  - pip:
+      # CUDA 12.6 build of PyTorch, matching the other HPC environments.
+      # Change cu126 if your cluster's driver supports a newer line.
+      - --index-url https://download.pytorch.org/whl/cu126
+      - --extra-index-url https://pypi.org/simple
+      - torch==2.13.0
+      - torchvision

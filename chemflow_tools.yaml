@@ -1,0 +1,27 @@
+# chemflow_tools.yaml — optional template for linking external tools to ChemFlow.
+#
+# ChemFlow auto-detects conda envs named `alchemforge`, `pyrosetta` and `reinvent`,
+# so you normally need NOTHING here. Fill in a value only when a tool lives
+# somewhere unusual. Leave unused keys as `null`.
+#
+# ChemFlow reads this file from the current directory, from $CHEMFLOW_TOOLS_CONFIG,
+# or from ~/.config/chemflow/tools.yaml. `<conda-prefix>` is your conda base
+# (`conda info --base`).
+
+fe:                       # OpenFE / OpenMM interpreter
+  python: null            # e.g. <conda-prefix>/envs/alchemforge/bin/python
+
+gromacs:
+  python: null            # GROMACS steps use the same env, e.g. <conda-prefix>/envs/alchemforge/bin/python
+  command: null           # gmx executable; null = `gmx` from PATH / the env
+
+obabel:
+  command: null           # e.g. <conda-prefix>/envs/alchemforge/bin/obabel; null = PATH
+
+acpype:
+  command: null           # e.g. <conda-prefix>/envs/alchemforge/bin/acpype; null = PATH
+
+hpc:                      # defaults for generated SLURM scripts
+  modules: []             # e.g. [gromacs, cuda]
+  conda_init: null        # e.g. <conda-prefix>/etc/profile.d/conda.sh
+  conda_environment: alchemforge

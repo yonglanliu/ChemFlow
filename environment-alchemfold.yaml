@@ -1,0 +1,73 @@
+name: alchemfold
+
+# Co-folding environment for AlchemFold (Boltz-2 + Chai-1).
+#
+# One file for BOTH a local GPU workstation and an NVIDIA GPU HPC compute node:
+#   * Boltz-2 (`boltz`) and Chai-1 (`chai_lab`) are PyPI packages that pull a
+#     CUDA-enabled PyTorch wheel. The default Linux PyPI torch wheel bundles its
+#     own CUDA runtime, so no conda CUDA toolkit is needed here — the machine
+#     only needs an NVIDIA kernel driver new enough for that CUDA runtime
+#     (supplied by the cluster on HPC, or by your local driver install).
+#   * A GPU is expected. CPU-only imports fine and runs small tests, but
+#     co-folding is impractically slow without a GPU.
+#   * Boltz-2 requires Python >=3.10,<3.13.
+#
+# Create it:
+#     conda env create -f environment-alchemfold.yaml        # or mamba
+#     conda activate alchemfold
+#     pip install -e src --no-deps --no-build-isolation      # install alchemfold
+#
+# HPC notes:
+#   * Build/activate the env in a project directory, and run `alchemfold dock run`
+#     on a GPU node (e.g. via the staged run_docking.sh under SLURM).
+#   * MSA server: `use_msa_server: true` needs outbound internet. HPC compute
+#     nodes are often offline — either precompute MSAs and set
+#     `use_msa_server: false` with a per-chain `msa:` path, or fetch MSAs on a
+#     login/data-transfer node first.
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+
+  # Keep compiled Python extensions on the conda C/C++ runtime rather than an
+  # older system libstdc++ on enterprise-Linux clusters (harmless locally).
+  - libgcc-ng>=12
+  - libstdcxx-ng>=12
+
+  # Light runtime for the AlchemFold config layer + ligand handling.
+  - pyyaml
+  - "rdkit>=2024.03"
+
+  # Build support (editable install of the alchemfold package).
+  - setuptools>=80
+  - wheel
+
+  # The co-folding engines and their CUDA PyTorch come from PyPI. Both models are
+  # installed so the single environment can run either one chosen from the
+  # Docking dropdown / `engine:` field.
+  #
+  # If pip ever reports a PyTorch/dependency conflict between the two engines,
+  # create two separate environments instead — one with `boltz`, one with
+  # `chai_lab` — and point `boltz_command` / `chai_command` at each.
+  #
+  # To force a specific CUDA build of PyTorch (e.g. to match an older cluster
+  # driver), uncomment the extra index + torch pin below, choosing the right
+  # cuXXX tag (cu121, cu124, ...).
+  - pip:
+      # - --extra-index-url https://download.pytorch.org/whl/cu121
+      # - torch
+      - boltz            # Boltz-2  (engine: boltz)  — supports affinity + pocket
+      - chai_lab         # Chai-1   (engine: chai)
+
+# DiffDock (engine: diffdock) is NOT on PyPI — it is a GitHub repository with its
+# own conda environment. Install it separately and point `diffdock_command` at its
+# inference entry point, e.g.:
+#     git clone https://github.com/gcorso/DiffDock.git
+#     # create/activate DiffDock's own env per its README, then in docking.yaml:
+#     #   engine: diffdock
+#     #   diffdock_command: "python /path/to/DiffDock/inference.py"
+#     #   receptor_pdb: receptor.pdb
+# AlchemFold only builds DiffDock's input CSV + command; it does not vendor the model.

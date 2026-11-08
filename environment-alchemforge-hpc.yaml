@@ -1,8 +1,22 @@
 name: alchemforge
 
-# Linux HPC environment for AlchemForge on NVIDIA GPU compute nodes.
-# The NVIDIA kernel driver is supplied by the cluster and is not installed
-# by Conda. CUDA 12.6 is the last recommended line here for Tesla P100/Pascal.
+# Linux HPC environment (NVIDIA GPU compute nodes): same free-energy stack as
+# environment-alchemforge.yaml, headless (no Qt/GUI libraries) and with the CUDA
+# user-space toolkit. The cluster supplies the NVIDIA driver; conda does not.
+# CUDA 12.6 is the last line that still supports Pascal GPUs (e.g. Tesla P100);
+# newer GPUs (Blackwell) need a newer CUDA pin.
+#
+# Create it (any directory) and link ChemFlow:
+#   conda env create -n alchemforge -f environment-alchemforge-hpc.yaml
+#   conda activate alchemforge
+#   python -m pip install -e /path/to/ChemFlow --no-deps --no-build-isolation
+#   python -m pip install /path/to/ChemFlow/pmx --no-deps --no-build-isolation
+# Equivalent one-liner (also pins CUDA and installs PMX):
+#   chemflow fe-env install --cuda 12.6
+#
+# Test CUDA from an allocated GPU node (not the login node):  alchemforge gpu-test
+# Replica-exchange (HREX) needs an external MPI GROMACS (gmx_mpi, e.g. a cluster
+# module); the GROMACS from conda is thread-MPI. Set it on the Job tab / [execution].
 channels:
   - conda-forge
 
@@ -12,54 +26,43 @@ dependencies:
 
   # Alchemical and molecular-simulation stack
   - openfe=1.12
-  - openff-toolkit
-  - acpype
-  - ambertools
   - openmm=8.4.0
+  - openff-toolkit
   - gromacs
+  - ambertools
+  - acpype
+  - openbabel
   - pdbfixer
+  - parmed
+  - mdtraj
+  - alchemlyb
+  - mpi4py
 
-  # NVIDIA user-space toolkit used by OpenMM/OpenFE and a CUDA-enabled GROMACS
-  # build. The cluster must separately provide a compatible NVIDIA driver.
-  # NVRTC, included in this toolkit, is required because OpenMM compiles CUDA
-  # kernels at runtime.
+  # NVIDIA user-space toolkit for OpenMM and CUDA GROMACS. NVRTC (in the toolkit)
+  # is required because OpenMM compiles CUDA kernels at runtime.
   - cuda-version=12.6
   - cuda-toolkit=12.6
 
-  # PMX is installed separately from the Python 3 develop branch after this
-  # environment is created. See src/alchemforge/README.md.
-
-  # Scientific and analysis stack. Keep the versions compatible with OpenFE
-  # 1.12 and AmberTools.
+  # Scientific stack (same pins as the workstation environment).
   - "numpy>=1.26,<2"
-  - scipy
   - "pandas>=2.1,<3"
-  - matplotlib
   - "rdkit>=2024.03,<2026.03"
-  - openbabel
-  # Keep RDKit's drawing stack within one conda-forge ABI family. On clusters,
-  # ensure LD_LIBRARY_PATH does not select an older system libfreetype first.
-  - cairo
-  - "freetype>=2.13"
-  - fontconfig
-  - harfbuzz
-  - pango
+  - scipy
+  - matplotlib
   - pyyaml
-  - mpi4py
-  - alchemlyb
-  - mdtraj
-  - parmed
   - pillow
 
-  # Build support
-  - setuptools>=80,<82
+  # Build support (PMX and some wheels compile on install)
+  - "setuptools>=80,<82"
   - wheel
   - cmake
   - make
   - compilers
 
-  # GUI/development packages are shared with the local AlchemForge
-  # environment. GUI use requires X forwarding or another display service;
-  # command-line and SLURM workflows remain usable on headless nodes.
+  # Headless utilities only. Qt/VTK/3D-viewer packages are deliberately omitted;
+  # use the workstation environment for the GUI.
   - pip:
-      - -r requirements-alchemforge.txt
+      - pytest
+      - requests
+      - rich
+      - platformdirs
