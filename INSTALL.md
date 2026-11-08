@@ -5,6 +5,23 @@ another Conda-compatible distribution) and Mamba. Install ChemFlow and
 AlchemForge in separate environments because their simulation and machine-
 learning dependency stacks have different constraints.
 
+This guide covers the ChemFlow (machine-learning) environment. The free-energy
+environment, `alchemforge` (OpenFE, OpenMM, GROMACS/PMX, Open Babel, ACPYPE), is
+created separately:
+
+```bash
+mamba env create -f environment-alchemforge.yaml            # workstation
+# or, on an NVIDIA GPU cluster:
+conda env create -n alchemforge -f environment-alchemforge-hpc.yaml
+mamba activate alchemforge
+python -m pip install -e . --no-deps --no-build-isolation   # link ChemFlow (editable)
+python -m pip install ./pmx --no-deps --no-build-isolation  # PMX
+```
+
+`scripts/dev_install.sh` does the linking steps for an existing `alchemforge` env,
+and the desktop **Environments** page (`chemflow fe-env install`) builds the same
+env. See `src/alchemforge/README.md` and `HPC_GUIDE.md` for details.
+
 ## Prerequisites
 
 Install these before creating the environment:

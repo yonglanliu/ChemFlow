@@ -268,6 +268,20 @@ Two environment specifications are provided:
 - `environment-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs. It uses
   `requirements-hpc-torch.txt` to install the CUDA 12.6 PyTorch build.
 
+The free-energy tools (OpenFE, OpenMM, GROMACS/PMX, Open Babel, ACPYPE) live in a
+separate conda env named `alchemforge`, so their NumPy 1.x / RDKit pins never
+touch the ML stack. It has its own specifications:
+
+- `environment-alchemforge.yaml` for workstations (macOS or Linux).
+- `environment-alchemforge-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs (CUDA 12.6).
+
+Install it from the desktop **Environments** page (or `chemflow fe-env install
+[--cuda 12.6]`), or from the yaml followed by
+`python -m pip install -e . --no-deps --no-build-isolation`. For development,
+`scripts/dev_install.sh` links ChemFlow, AlchemForge and PMX into it in editable
+mode. See [`src/alchemforge/README.md`](src/alchemforge/README.md) and
+[`HPC_GUIDE.md`](HPC_GUIDE.md).
+
 Conda installs the compiled scientific packages first; pip then installs the
 remaining Python packages and ChemFlow itself in editable mode.
 
@@ -644,3 +658,31 @@ chemflow uncertainty bootstrap \
 - [ ] molecular docking integration
 - [ ] free energy calculation
 - [ ] multimodal foundation models
+
+## Generative design with REINVENT4
+
+Full installation guide and step-by-step tutorials: [src/chemflow/generative/reinvent/README.md](src/chemflow/generative/reinvent/README.md).
+
+ChemFlow wraps [REINVENT4](https://github.com/MolecularAI/REINVENT4) (de novo, scaffold decoration, linker design, mol2mol optimisation, peptides) behind one YAML. It only calls the `reinvent` executable, so install REINVENT4 in its **own** conda environment. Do not install it into the `chemflow` environment: REINVENT4 pins `torch==2.13.0` and pulls in numpy 2.x, pandas 3.x and a much newer RDKit, which breaks other packages in the ChemFlow environment.
+
+```bash
+conda create -n reinvent python=3.11 -y
+conda activate reinvent
+git clone --depth 1 https://github.com/MolecularAI/REINVENT4.git   # or download the ZIP
+cd REINVENT4 && pip install -e .     # registers the `reinvent` command
+which reinvent                       # put this path in `reinvent_command`
+```
+
+Upstream's README currently recommends `uv sync`; follow it if plain pip does not work. The pretrained priors are NOT in the repo: download them from [Zenodo](https://doi.org/10.5281/zenodo.15641296) and put them in a `priors/` folder inside the REINVENT4 folder (for de novo design, `reinvent_pubchem.prior`; `libinvent.prior`, `linkinvent.prior`, `pepinvent.prior`, and `pubchem_ecfp4_with_count_with_rank_reinvent4_dict_voc.prior` for the other models). Set `prior_file` in your ChemFlow YAML to the full path.
+
+To score with ChemFlow models during reinforcement learning, set `python:` on each `chemflow_scorers` entry to the `chemflow` environment's interpreter (`conda activate chemflow; which python`). REINVENT then runs in its environment while the scorer imports ChemFlow from its own.
+
+```bash
+chemflow generate reinvent generate --model reinvent --run-type staged_learning -o reinvent.yaml
+chemflow generate reinvent validate reinvent.yaml
+chemflow generate reinvent run reinvent.yaml --dry-run     # writes the TOML, prints the command
+chemflow generate reinvent run reinvent.yaml
+chemflow generate reinvent export reinvent_output/staged_learning_1.csv --top 100 --sdf
+```
+
+ChemFlow-trained models can drive the RL reward via `chemflow_scorers` in the YAML. The exported SDF feeds `alchemfold dock` or `alchemforge rbfe`. `chemflow generate gpt ...` is unchanged apart from now being an explicit subcommand.
