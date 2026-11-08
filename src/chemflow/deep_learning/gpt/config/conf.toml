@@ -36,7 +36,7 @@ quant_noise_block_size = 8
 
 [GPTTrainingConfig]
 
-workdir = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training"
+workdir = "./gpt_training"
 
 batch_size = 32
 learning_rate = 1e-4

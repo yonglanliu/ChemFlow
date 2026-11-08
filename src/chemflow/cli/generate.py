@@ -38,11 +38,19 @@ def generate_gpt_smiles(args):
 
 
 def add_generate_parser(subparsers):
-    generate_parser = subparsers.add_parser(
+    from chemflow.cli.reinvent import add_reinvent_parser
+
+    top_parser = subparsers.add_parser(
         "generate",
+        help="Generate molecules (GPT model or REINVENT4)",
+    )
+    engines = top_parser.add_subparsers(dest="generate_engine", required=True)
+    add_reinvent_parser(engines)
+
+    generate_parser = engines.add_parser(
+        "gpt",
         help="Generate SMILES using a trained GPT model",
     )
-    generate_parser.add_argument("gpt", help="Use 'gpt' to specify the GPT model for generation")
     generate_parser.add_argument("--checkpoint", type=str, help="Path to the model checkpoint")
     generate_parser.add_argument("--tokenizer", type=str, help="Path to the tokenizer")
     generate_parser.add_argument(

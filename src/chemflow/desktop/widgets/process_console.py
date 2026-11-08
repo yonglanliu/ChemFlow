@@ -32,7 +32,7 @@ class ProcessConsole(QWidget):
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setPlaceholderText("Training and prediction output will appear here…")
-        self.output.setMaximumBlockCount(5000)
+        self.output.setMaximumBlockCount(100000)
         clear = QPushButton("Clear")
         clear.clicked.connect(self.output.clear)
         self.cancel = QPushButton("Stop")
@@ -50,15 +50,77 @@ class ProcessConsole(QWidget):
         layout.addLayout(bar)
         layout.addWidget(self.output)
 
+    def set_working_directory(self, path: str) -> None:
+        """Run subsequent tasks in ``path`` so their outputs land there."""
+        self.process.setWorkingDirectory(path)
+
+    def append_line(self, text: str) -> None:
+        """Append output produced by an in-process task (e.g. the linker designer)."""
+        self.output.moveCursor(QTextCursor.MoveOperation.End)
+        self.output.appendPlainText(text)
+        self.output.ensureCursorVisible()
+
+    def set_status(self, text: str) -> None:
+        self.status.setText(text)
+
     def run(self, arguments: list[str]) -> None:
+        self.run_module("chemflow.cli.main", arguments)
+
+    def run_alchemforge(self, arguments: list[str]) -> None:
+        """Run ``alchemforge.cli`` through the free-energy env's interpreter.
+
+        OpenFE/AlchemForge usually live in their own conda env; this resolves that
+        interpreter (env var CHEMFLOW_FE_PYTHON / a dedicated conda env, else the
+        current one) so same-env and linked-env installs both work.
+        """
+        from chemflow.desktop.fe_env import find_fe_python
+
+        self.run_module("alchemforge.cli", arguments, python=find_fe_python())
+
+    def run_chemflow_fe(self, arguments: list[str]) -> None:
+        """Run ``chemflow.cli.main`` through the free-energy (OpenFE) env.
+
+        The OpenFE alchemical workflows (``chemflow openfe`` / ``chemflow network``)
+        were migrated into chemflow.fe.openfe but still need the OpenFE/RDKit/OpenMM
+        stack, which lives in the dedicated conda env — so run them through that
+        interpreter, not the desktop's.
+        """
+        from chemflow.desktop.fe_env import find_fe_python
+
+        self.run_module("chemflow.cli.main", arguments, python=find_fe_python())
+
+    def run_chemflow_gmx(self, arguments: list[str]) -> None:
+        """Run ``chemflow.cli.main`` through the GROMACS/PMX env.
+
+        The GROMACS workflows (``chemflow ligand-rbfe`` / ``rbfe`` …) need the
+        GROMACS toolchain (Open Babel, ACPYPE, AmberTools, GROMACS, PMX), kept in
+        its own conda env (gmxfe) separate from the OpenFE env — so run them there.
+        """
+        from chemflow.desktop.gmx_env import find_gmx_python
+
+        self.run_module("chemflow.cli.main", arguments, python=find_gmx_python())
+
+    def run_rosetta(self, arguments: list[str]) -> None:
+        """Run a chemflow command through the PyRosetta env's interpreter.
+
+        Used for the PROTAC commands that import pyrosetta (pyrosetta-dock, KIC
+        fix-structure); resolves the dedicated env or falls back to the current one.
+        """
+        from chemflow.desktop.rosetta_env import find_rosetta_python
+
+        self.run_module("chemflow.cli.main", arguments, python=find_rosetta_python())
+
+    def run_module(self, module: str, arguments: list[str], *, python: str | None = None) -> None:
+        """Run ``python -m <module> <arguments>`` (defaults to this interpreter)."""
         if self.process.state() != QProcess.ProcessState.NotRunning:
             raise RuntimeError("A ChemFlow task is already running.")
-        command = ["-m", "chemflow.cli.main", *arguments]
-        self.output.appendPlainText("\n$ " + shlex.join([sys.executable, *command]))
+        interpreter = python or sys.executable
+        command = ["-m", module, *arguments]
+        self.output.appendPlainText("\n$ " + shlex.join([interpreter, *command]))
         self.status.setText("Running")
         self.cancel.setEnabled(True)
         self.state_changed.emit(True)
-        self.process.start(sys.executable, command)
+        self.process.start(interpreter, command)
 
     def _read_output(self) -> None:
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")

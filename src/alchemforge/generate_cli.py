@@ -623,10 +623,10 @@ CONFIG="${{1:-__PROJECT__.{ext}}}"
 # conda activate alchemforge
 
 echo "== validate =="
-alchemforge openfe {command} validate "$CONFIG"
+chemflow openfe {command} validate "$CONFIG"
 
 echo "== generate + execute =="
-alchemforge openfe {command} run "$CONFIG"
+chemflow openfe {command} run "$CONFIG"
 """
 
 
@@ -749,21 +749,21 @@ _OPENFE: dict[str, tuple[str, str, str, object, str]] = {
         "yaml",
         "rbfe",
         _openfe_driver,
-        "alchemforge openfe rbfe run __PROJECT__.yaml",
+        "chemflow openfe rbfe run __PROJECT__.yaml",
     ),
     "abfe": (
         _ABFE_OPENFE_YAML,
         "yaml",
         "abfe",
         _openfe_driver,
-        "alchemforge openfe abfe run __PROJECT__.yaml",
+        "chemflow openfe abfe run __PROJECT__.yaml",
     ),
     "septop": (
         _SEPTOP_OPENFE_YAML,
         "yaml",
         "septop",
         _openfe_driver,
-        "alchemforge openfe septop run __PROJECT__.yaml",
+        "chemflow openfe septop run __PROJECT__.yaml",
     ),
 }
 

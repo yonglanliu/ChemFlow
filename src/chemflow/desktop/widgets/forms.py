@@ -6,15 +6,64 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
+
+
+# --- Wheel-safe value widgets ---------------------------------------------
+# Scrolling a long form while the cursor passes over a spin box or combo
+# normally changes that control by accident. These subclasses ignore the wheel
+# unless the widget has keyboard focus, so the event propagates to the parent
+# scroll area (the page still scrolls) and the value only changes after you
+# click into the field. This is a per-widget fix — do NOT use an application-wide
+# event filter for this: a global Python event filter in the hot path crashes
+# QtWebEngine (SIGSEGV when opening pages that embed a QWebEngineView).
+
+class NoScrollComboBox(QComboBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt signature)
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class NoScrollSpinBox(QSpinBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt signature)
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class NoScrollDoubleSpinBox(QDoubleSpinBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt signature)
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
 
 
 class PathField(QWidget):

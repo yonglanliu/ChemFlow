@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import faulthandler
 import sys
+
+# Print a C + Python traceback to stderr if the process receives a fatal signal
+# (e.g. SIGSEGV), so native Qt crashes are diagnosable instead of a bare
+# "Segmentation fault: 11".
+faulthandler.enable()
 
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication

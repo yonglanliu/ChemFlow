@@ -10,7 +10,6 @@ requires-python = ">=3.11,<3.13"
 
 [project.scripts]
 alchemforge = "alchemforge.cli:main"
-alchemforge-desktop = "alchemforge.desktop.main_window:main"
 alchemfold = "alchemfold.cli:main"
 
 [tool.setuptools.packages.find]
@@ -19,7 +18,6 @@ include = ["alchemforge*", "alchemfold*"]
 
 [tool.setuptools.package-data]
 "alchemforge" = ["README.md"]
-"alchemforge.desktop" = ["*.svg", "assets/*"]
 "alchemforge.gromacs.resFEP" = ["*.sh", "*.toml", "mdp/*.mdp"]
 "alchemforge.gromacs.rbfe" = ["*.toml"]
 "alchemforge.gromacs.abfe" = ["*.sh", "*.toml"]

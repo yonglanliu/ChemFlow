@@ -1,0 +1,156 @@
+[project]
+name = "ligand_rbfe_network"
+work_dir = "/path/to/work"
+
+[system]
+type = "soluble" # soluble or membrane
+protein = "/path/to/protein.pdb"
+gromacs_command = "gmx"
+force_field = "amber99sb-star-ildn-mut"
+water_model = "tip3p"
+box_shape = "dodecahedron"
+box_distance = 1.2
+neutralize = true
+ion_concentration = 0.15
+temperature_k = 300.0
+pressure_bar = 1.0
+# Membrane mode requires a fully prepared complex; the custom worker must
+# preserve this topology and use the membrane variables exported by AlchemForge.
+# prepared_complex_gro = "/path/to/equilibrated_membrane_complex.gro"
+# prepared_complex_topology = "/path/to/equilibrated_membrane_complex.top"
+# membrane_normal = "z"
+# lipid_resnames = ["POPC", "POPE", "CHOL"]
+# minimum_lipids = 20
+# reference_pressure_bar = [1.0, 1.0]
+# compressibility_bar = [4.5e-5, 4.5e-5]
+# refcoord_scaling = "com"
+
+[ligands]
+library_sdf = "/path/to/ligands.sdf"
+# Produced by GROMACS Ligand Preparation; ligand_name values must match the SDF.
+charge_manifest = "/path/to/prepared_ligands/ligand_manifest.tsv"
+
+[mapping]
+network_method = "lomap"
+atom_mapper = "lomap" # lomap, kartograf, or pmx
+# Reuse a network bundle planned earlier (edges.csv + ligand_network.graphml +
+# network_manifest.json). Leave unset to plan a fresh network.
+# existing_network_dir = "/path/to/work/project/network"
+# With atom_mapper = "pmx", OpenFE/LoMap selects edges and PMX maps each pair.
+pmx_command = "python -m chemflow.fe.gromacs.rbfe.pmx_entry"
+pmx_mapping_mode = "stage" # stage or run
+pmx_h2h_polar = true
+element_change = false
+max3d_angstrom = 1.0
+require_cycle_covering = true
+redundant_networks = 2
+# Required only when network_method = "radial".
+# radial_hub = "LIG001"
+
+[topology]
+backend = "pmx"
+charge_method = "bcc"
+# reject, coion, or correction. Co-ion preserves the periodic-cell charge in
+# both complex and solvent legs. Correction requires the CSV below.
+charge_change_method = "coion"
+# charge_correction_file = "/path/to/charge_corrections.csv"
+
+[simulation]
+start_replicate = 1
+replicates = 1
+# "independent" submits one task per lambda window. "hrex" runs all lambda
+# windows for an edge/leg/replicate together with GROMACS -multidir/-replex.
+sampling_method = "independent"
+exchange_interval_steps = 500
+lambda_windows = 21
+# "generated" uses lambda_function; "manual" uses the four arrays below.
+lambda_schedule_mode = "generated"
+lambda_function = "cosine" # cosine, linear, or power
+lambda_power = 2.0 # used only by the power function
+# Manual example (uncomment all four and set lambda_schedule_mode = "manual"):
+# coul_lambdas = [0.0, 0.0, 0.0, 0.5, 1.0]
+# vdw_lambdas = [0.0, 0.5, 1.0, 1.0, 1.0]
+# bonded_lambdas = [0.0, 0.5, 1.0, 1.0, 1.0]
+# restraint_lambdas = [0.0, 0.0, 0.0, 0.0, 0.0]
+timestep_ps = 0.002
+em_steps = 5000
+em_tolerance = 200.0
+nvt_ns = 0.5
+npt_ns = 0.5
+production_ns = 5.0
+
+[restraints]
+# Values are [protein, ligand, cofactor] in kJ mol^-1 nm^-2.
+em_forces = [0.0, 0.0, 0.0]
+nvt_forces = [1000.0, 1000.0, 1000.0]
+npt_forces = [500.0, 500.0, 500.0]
+production_forces = [0.0, 0.0, 0.0]
+# Empty selectors mean all heavy atoms for that component. Residue numbers are
+# the residue indices in the generated GROMACS topology.
+protein_residue_ids = []
+protein_atom_names = []
+# Leave empty for the PMX hybrid ligand. Use ["UNL"] only when the topology
+# actually calls the ligand UNL.
+ligand_resnames = []
+ligand_atom_names = []
+cofactor_resnames = []
+cofactor_atom_names = []
+
+# Optional: assemble the solvated (or membrane) protein-ligand-cofactor complex
+# from the protein PDB using explicit component force fields. Run by the
+# `chemflow rbfe prepare-system` step (also part of `rbfe all`). Required for
+# membrane systems and whenever a cofactor must be parameterized. When enabled,
+# prepared_complex_gro/topology default to <work>/<name>/prepared_system/system.*
+# [preparation]
+# enabled = true
+# protein_force_field = "ff14SB"   # ff14SB | ff19SB | ff99SBildn
+# ligand_force_field = "GAFF2"
+# lipid_force_field = "Lipid21"    # membrane only (Lipid21 | Lipid17)
+# dna_force_field = "OL21"         # OL21 | bsc1 | None
+# rna_force_field = "OL3"          # OL3 | None
+# ion_parameters = "Joung-Cheatham TIP3P"
+# cofactor_force_field = "GAFF2"   # None | GAFF2
+# cofactor_structure = "/path/to/cofactor.sdf"
+# cofactor_resname = "COF"
+# cofactor_charge = 0
+# reference_ligand = "L01"         # a ligand _Name used to seed the Amber assembly
+# prepared_ligand_directory = "/path/to/prepared_ligands"
+# box_angles_deg = [90.0, 90.0, 90.0]
+# Prepared ITP force fields for components the base force field cannot
+# parameterize (e.g. metal ions). The System-tab "Scan loaded PDB" inventory
+# flags these gaps; each ITP is staged and #included in the assembled topology.
+# component_itp_files = ["/path/to/zn_ion.itp", "/path/to/heme.itp"]
+
+[mdp]
+integrator = "sd" # sd or md
+constraints = "h-bonds" # h-bonds, all-bonds, or none
+coulomb_cutoff_nm = 1.0
+vdw_cutoff_nm = 1.0
+softcore_alpha = 0.5
+calc_lambda_neighbors = -1 # -1 for all states/MBAR; 1 for adjacent/BAR
+nstdhdl = 100
+
+[execution]
+mdrun_options = ["-ntmpi", "1"]
+# Optional external HPC GROMACS module loaded for all simulation jobs. Model
+# building uses the activated AlchemForge Conda environment instead.
+# hrex_module = "gromacs/2026.3-gcc13.2"
+# Use mpirun for OpenMPI modules; use srun only with working direct-MPI support.
+hrex_mpi_launcher = "mpirun"
+# Used only for HREX. It must be a GROMACS executable built with external MPI.
+hrex_gromacs_command = "gmx_mpi"
+# Required for execution after PMX hybrid topologies have been prepared.
+# worker_script = "/path/to/LigandRBFE_GROMACS.sh"
+
+[slurm]
+partition = "gpu"
+nodes = 1
+tasks = 1
+cpus_per_task = 8
+gpus = 1
+memory = "16G"
+walltime = "24:00:00"
+# Leave these empty to use the executables already available in the submitted
+# job environment, or set them locally in the desktop Job Setting tab.
+conda_init = ""
+conda_environment = ""

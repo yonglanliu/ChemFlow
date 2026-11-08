@@ -12,6 +12,7 @@ Run headlessly with::
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -71,7 +72,8 @@ def write_inputs(conf) -> tuple[Path, Path]:
 
 def build_command(conf, input_yaml: Path, out_dir: Path) -> list[str]:
     """Assemble the ``boltz predict`` command for this config."""
-    command = shlex.split(str(getattr(conf, "boltz_command", "boltz")))
+    command = shlex.split(str(getattr(conf, "boltz_command", None)
+                              or os.environ.get("CHEMFLOW_BOLTZ_COMMAND", "boltz")))
     command += [
         "predict", str(input_yaml),
         "--out_dir", str(out_dir),

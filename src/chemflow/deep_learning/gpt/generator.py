@@ -262,9 +262,9 @@ def generate_smiles(
 
 
 if __name__ == "__main__":
-    checkpoint_path = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training/checkpoints/best_model.pt"
-    tokenizer_path = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training/tokenizer"
-    adapter_checkpoint_path = "/Users/yonglanliu/Desktop/ChemFlow/gpt_training/checkpoints/best_adapter.pt"
+    checkpoint_path = "gpt_training/checkpoints/best_model.pt"
+    tokenizer_path = "gpt_training/tokenizer"
+    adapter_checkpoint_path = "gpt_training/checkpoints/best_adapter.pt"
 
     model, tokenizer, config, checkpoint, device = load_model_from_checkpoint(
         checkpoint_path=checkpoint_path,

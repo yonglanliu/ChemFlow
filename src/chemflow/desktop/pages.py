@@ -29,6 +29,27 @@ from chemflow.desktop.widgets.molecule_view import MoleculeView
 Runner = Callable[[list[str]], None]
 
 
+def launcher_view(functions, query, expanded, max_visible):
+    """Decide which workflow cards to show and the 'more' button mode.
+
+    Returns ``(visible, mode, hidden)`` where ``mode`` is one of ``"none"``,
+    ``"explore"`` (collapsed with extras hidden) or ``"fewer"`` (expanded).
+    Search (a non-empty query) shows every match and hides the button.
+    """
+    q = (query or "").strip().lower()
+    if q:
+        matches = [f for f in functions
+                   if q in f["title"].lower() or q in f.get("detail", "").lower()]
+        return matches, "none", 0
+    matches = list(functions)
+    if len(matches) <= max_visible:
+        return matches, "none", 0
+    if expanded:
+        return matches, "fewer", 0
+    return matches[:max_visible], "explore", len(matches) - max_visible
+
+
+
 class WorkflowPage(QWidget):
     def __init__(self, header: PageHeader, card: Card, parent=None):
         super().__init__(parent)
@@ -224,42 +245,89 @@ class GeneratePage(WorkflowPage):
 class DashboardPage(QWidget):
     navigate = Signal(int)
 
-    def __init__(self, parent=None):
+    MAX_VISIBLE = 10          # show at most this many before "Explore more"
+
+    def __init__(self, functions=None, parent=None):
         super().__init__(parent)
+        # functions: list of {"index": int, "title": str, "detail": str}
+        self._functions = list(functions or [])
+        self._expanded = False
+        self._query = ""
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(34, 28, 34, 34)
         layout.setSpacing(18)
-        layout.addWidget(PageHeader("ChemFlow desktop", "Molecular intelligence, one workspace", "Predict physicochemical and ADME properties, search chemical space, and generate molecules."))
-        hero = Card()
-        hero.setObjectName("AccentCard")
-        hero_layout = QHBoxLayout()
-        copy = QVBoxLayout()
-        tag = QLabel("END-TO-END DISCOVERY")
-        tag.setObjectName("Eyebrow")
-        title = QLabel("Move from molecules to decisions")
-        title.setStyleSheet("font-size: 24px; font-weight: 700;")
-        text = QLabel("Configure experiments visually while ChemFlow runs the same reproducible CLI workflows underneath.")
-        text.setObjectName("Muted"); text.setWordWrap(True)
-        start = action_button("Predict properties")
-        start.clicked.connect(lambda: self.navigate.emit(1))
-        copy.addWidget(tag); copy.addWidget(title); copy.addWidget(text); copy.addSpacing(8); copy.addWidget(start, alignment=Qt.AlignmentFlag.AlignLeft); copy.addStretch()
-        hero_layout.addLayout(copy, 3)
-        hero_layout.addWidget(MoleculeView(), 4)
-        hero.body.addLayout(hero_layout)
-        layout.addWidget(hero, 1)
-        shortcuts = QHBoxLayout(); shortcuts.setSpacing(14)
-        for index, title_text, detail in [
-            (1, "Property prediction", "Physicochemical and ADME endpoints"),
-            (2, "Predict", "Run a saved model"),
-            (3, "Search", "Explore chemical similarity"),
-            (4, "Generate", "Sample novel SMILES"),
-        ]:
-            item = Card(title_text, detail)
+        layout.addWidget(PageHeader(
+            "ChemFlow desktop", "Molecular intelligence, one workspace",
+            "Pick a workflow to begin. Search to jump straight to one."))
+
+        search_row = QHBoxLayout()
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search workflows…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search)
+        search_row.addWidget(self._search)
+        layout.addLayout(search_row)
+
+        self._grid_host = QWidget()
+        self._grid = QGridLayout(self._grid_host)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(14)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(self._grid_host)
+        layout.addWidget(scroll, 1)
+
+        self._more_button = QPushButton()
+        self._more_button.clicked.connect(self._toggle_expand)
+        layout.addWidget(self._more_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._empty = QLabel("No workflows match your search.")
+        self._empty.setObjectName("Muted")
+        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._empty)
+
+        self._rebuild()
+
+    def _on_search(self, text: str) -> None:
+        self._query = text.strip().lower()
+        self._rebuild()
+
+    def _toggle_expand(self) -> None:
+        self._expanded = not self._expanded
+        self._rebuild()
+
+    def _clear_grid(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _rebuild(self) -> None:
+        self._clear_grid()
+        visible, mode, hidden = launcher_view(
+            self._functions, self._query, self._expanded, self.MAX_VISIBLE)
+
+        self._empty.setVisible(not visible)
+        columns = 2
+        for position, function in enumerate(visible):
+            card = Card(function["title"], function.get("detail", ""))
             button = QPushButton("Open workflow  →")
-            button.clicked.connect(lambda _checked=False, page=index: self.navigate.emit(page))
-            item.body.addWidget(button)
-            shortcuts.addWidget(item)
-        layout.addLayout(shortcuts)
+            button.clicked.connect(lambda _checked=False, page=function["index"]: self.navigate.emit(page))
+            card.body.addWidget(button)
+            self._grid.addWidget(card, position // columns, position % columns)
+
+        if mode == "explore":
+            self._more_button.setText(f"Explore more ({hidden} more)")
+            self._more_button.setVisible(True)
+        elif mode == "fewer":
+            self._more_button.setText("Show fewer")
+            self._more_button.setVisible(True)
+        else:
+            self._more_button.setVisible(False)
+
 
 
 def raise_or_warn(parent: QWidget, message: str) -> None:

@@ -6,57 +6,52 @@ the execution backend.
 
 ## Installation
 
-AlchemForge uses a separate environment from ChemFlow so OpenFE, OpenMM,
-AmberTools, and their NumPy/RDKit constraints cannot change ChemFlow's ML
-stack:
+AlchemForge uses a separate conda environment, named `alchemforge`, from ChemFlow's
+ML stack so OpenFE, OpenMM, AmberTools and their NumPy/RDKit pins cannot change
+it. This one env holds the whole free-energy toolchain (OpenFE, OpenMM, GROMACS,
+PMX, Open Babel, ACPYPE); there is no separate `openfe` or `gmxfe` env. The GUI
+is ChemFlow Studio (`chemflow-desktop`), which runs these tools through this env.
+
+Workstation (macOS or Linux), from the repository root:
 
 ```bash
 mamba env create -f environment-alchemforge.yaml
 mamba activate alchemforge
 
-python -m pip install -e src --no-deps --no-build-isolation
+python -m pip install -e . --no-deps --no-build-isolation   # chemflow + alchemforge, editable
+python -m pip install ./pmx --no-deps --no-build-isolation  # PMX (GROMACS hybrid topologies)
 ```
 
-For a Linux HPC installation on NVIDIA GPU nodes, use the dedicated CUDA 12.6
-environment instead. Create it from the repository root so the relative pip
-requirements file can be found:
+or run `scripts/dev_install.sh` to link everything in editable (development)
+mode; it skips PMX if it is already importable. `chemflow fe-env install`
+(what the desktop **Environments** page runs) installs the same pinned packages.
+
+Linux HPC on NVIDIA GPU nodes: use the headless CUDA 12.6 environment instead.
+It needs no repository-relative paths:
 
 ```bash
-conda env create \
-  --name alchemforge \
-  --file environment-alchemforge-hpc.yaml
+conda env create -n alchemforge -f environment-alchemforge-hpc.yaml
 conda activate alchemforge
-
-python -m pip install -e src --no-deps --no-build-isolation
+python -m pip install -e /path/to/ChemFlow --no-deps --no-build-isolation
+python -m pip install /path/to/ChemFlow/pmx --no-deps --no-build-isolation
 ```
 
 The cluster supplies the NVIDIA driver. The HPC environment installs the CUDA
 12.6 toolkit, including the runtime and NVRTC needed by OpenMM. Test CUDA from
 an allocated GPU compute node, not from a login node. GPUs newer than the CUDA
-12.6 architecture set (for example, Blackwell) require a newer CUDA environment
-rather than this P100-compatible file.
+12.6 architecture set (for example, Blackwell) require a newer CUDA pin. See
+`HPC_GUIDE.md` for the full cluster walkthrough.
 
 No installation path is assumed. On clusters that require explicit Conda
-initialization in batch jobs, configure the initialization script and
-environment on the desktop's **Job Setting** tab.
+initialization in batch jobs, set the initialization script and environment on
+the **Job settings** tab of the ChemFlow Studio GROMACS RBFE page, or in
+`[slurm]` of the TOML.
 
-GROMACS ABFE also requires the Python 3 `develop` branch of PMX. It is not
-available from Bioconda on macOS ARM, so install it after activating the
-AlchemForge environment:
-
-```bash
-git clone --branch develop https://github.com/deGrootLab/pmx.git
-python -m pip install ./pmx --no-deps --no-build-isolation
-```
-
-The dedicated editable install registers the `alchemforge` and
-`alchemforge-desktop` commands without registering ChemFlow or installing its
-dependencies into this environment.
-
-Launch the desktop application with:
+The editable install registers the `alchemforge` command (and `chemflow`).
+Check that everything resolved:
 
 ```bash
-alchemforge-desktop
+python -c "import chemflow, alchemforge, openfe, pmx; print(openfe.__version__)"
 ```
 
 On an allocated GPU compute node, run the self-contained OpenMM and GROMACS
@@ -77,38 +72,20 @@ The command exits with status 0 only when both backends complete their short
 calculations and GROMACS reports GPU offload. Use `--keep-workdir` to retain
 the generated diagnostic files.
 
-The `Jobs` page monitors local background processes and submitted SLURM jobs.
-Select an active row and click `Terminate Selected Job` to stop it. Local jobs
-are launched in an isolated process group so termination also reaches the
-Python/OpenMM/GROMACS child process; a process that ignores `SIGTERM` is killed
-after three seconds. For submitted SLURM jobs, the same action runs `scancel`
-for every recorded job ID.
-
-The desktop includes `Binding Free Energy > Ligand Preparation > OpenFE >
-Charge Molecules`. It runs ligand charging as a background job using the
-packaged `openfe/charge_settings.yaml`. Its defaults are equivalent to:
-
-```bash
-openfe charge-molecules -M input.sdf -o output.sdf -n 4 \
-  -s charge_settings.yaml --overwrite-charges
-```
-
-The dialog allows the input/output SDF, settings YAML, OpenFE executable,
-process count, and overwrite behavior to be changed.
-
-`Binding Free Energy > Ligand Preparation > GROMACS > Prepare Ligands` is a
-standalone Open Babel + ACPYPE/GAFF preparation job. It accepts one MOL2 ligand
+GROMACS ligand preparation (`chemflow rbfe assign-charge`, or the **Ligand Prep**
+tab in ChemFlow Studio) is a standalone Open Babel + ACPYPE/GAFF preparation job. It accepts one MOL2 ligand
 or every molecule in a multi-record SDF and creates a separate directory named
 for each selected residue name. For example, residue `4DY` produces
 `4DY/4DY.mol2`, `4DY/4DY.itp`, `4DY/4DY.gro`, and `4DY/4DY.top` alongside the
-native ACPYPE output. A `ligand_manifest.tsv` maps
-SDF names to the generated three-character residue names. This preparation is
+native ACPYPE output. The residue name you choose is also written inside the
+`.mol2`, `.itp`, `.top` and `.gro` files, so the molecule's residue name matches its
+folder. A `ligand_manifest.tsv` maps SDF names to the residue names. This preparation is
 separate from ABFE, ligand RBFE, SepTop RBFE, and residue FEP workflows so the
 same parameterized ligands can be reused.
 
-`Binding Free Energy > System Preparation > Fix & Assemble PDB` removes hydrogen
+Fix & Assemble PDB (`alchemforge fix-pdb`, `chemflow rbfe fix-pdb`) removes hydrogen
 ATOM/HETATM records from a selected PDB and then runs `pdbfixer
---add-atoms=all`. The dialog accepts a protein PDB, an optional cofactor PDB,
+--add-atoms=all`. It accepts a protein PDB, an optional cofactor PDB,
 and optional membrane and solvent PDB files. A cofactor file may contain one or
 multiple cofactors. They are processed in the same background job. Original
 files are preserved; outputs are named `fixed_protein.pdb`,
@@ -123,7 +100,7 @@ extended identifiers. A large-system-safe `complex.cif` is also written
 for visualization. Cofactor force-field parameters are still required by the
 downstream OpenMM or GROMACS system.
 
-The desktop also accepts an optional `PBC source PDB`. This is intended for a
+An optional PBC source PDB (`--pbc-source`) is also accepted. This is intended for a
 full-system PDB converted from a Desmond `.cms` file. Only its `CRYST1` box is
 read; its atoms are not included a second time. When no PBC source is selected,
 the assembler searches the protein, cofactor, membrane, and solvent inputs for
@@ -149,21 +126,20 @@ CMS-converted PDB with `--pbc-source system_from_cms.pdb`.
 
 Use `--overwrite` to replace existing fixed PDB files and `complex.pdb`.
 
-`Binding Free Energy > System Preparation > Energy Minimization` provides two
-standalone minimizers. `OpenFE / OpenMM` loads an assembled PDB, creates an
+Energy minimization provides two standalone minimizers. `OpenFE / OpenMM` loads an assembled PDB, creates an
 OpenMM system from selected force-field XML files, and writes minimized PDB and
 mmCIF structures plus an energy report. Every protein, lipid, solvent, ion,
 ligand, and cofactor residue must have a force-field template. Periodic membrane
-systems also require box vectors, either in the PDB `CRYST1` record or entered
-in the dialog. Nonstandard ligands and cofactors can be supplied as charged SDF
-or MOL2 definitions in the minimization dialog. AlchemForge registers either a
+systems also require box vectors, either in the PDB `CRYST1` record or supplied
+explicitly. Nonstandard ligands and cofactors can be supplied as charged SDF
+or MOL2 definitions. AlchemForge registers either a
 SMIRNOFF/OpenFF or GAFF template generator before creating the OpenMM system;
 the definition must describe the same atoms and connectivity as its residue in
 the assembled PDB.
 
 For large membrane systems, select the generated `complex.cif` instead of
 `complex.pdb`; mmCIF avoids legacy PDB atom/residue identifier overflow. The
-desktop OpenMM minimizer can also normalize recognized Desmond lipid naming.
+OpenMM minimizer can also normalize recognized Desmond lipid naming.
 The current converter maps Desmond-style POPC headgroup atom names to the
 Amber lipid17/CHARMM POPC convention while preserving coordinates and
 connectivity. The minimization report records how many lipid residues were
@@ -178,14 +154,14 @@ structure-building step, not a substitute for GROMACS topology construction;
 membranes, ligands, ions, and cofactors must be parameterized and included in
 the `.top`/`.itp` files before minimization.
 
-The desktop separates ligand-network planning from molecular-system setup.
-`Binding Free Energy > Ligand Network Planning` accepts only a multi-molecule
+Ligand-network planning is separate from molecular-system setup. `chemflow rbfe plan`
+(or the **Network** tab in ChemFlow Studio) accepts only a multi-molecule
 SDF and graph/mapping settings. It writes a portable network bundle containing
 `ligands.sdf`, full OpenFE `ligand_network.graphml`, `edges.csv`, per-edge mapping
 JSON files, and `network_manifest.json`. The viewer can inspect structures and
 atom mappings or prune edges while keeping the network connected.
 
-The engine-specific entries under `RBFE` are system-setup dialogs. They consume
+The engine-specific system-setup steps consume
 the saved network bundle and collect protein, membrane, solvent, cofactor,
 protocol, lambda, and execution settings. OpenFE loads the saved GraphML rather
 than replanning. GROMACS copies the same bundle into the project and uses the
@@ -204,7 +180,7 @@ prepared protein PDB and one multi-molecule ligand SDF. Staging uses OpenFE's
 LoMap or Kartograf mapper to write a GraphML network, an edge table, and a
 JSON atom mapping for every selected edge. Execution additionally requires a
 GROMACS/PMX worker script. See the complete
-[GROMACS LigandFEP-RBFE tutorial](gromacs/rbfe/README.md) for desktop setup,
+[GROMACS LigandFEP-RBFE tutorial](gromacs/rbfe/README.md) for ChemFlow Studio setup,
 HREX submission, restarts, and adding replicates without rebuilding systems:
 
 ```bash
@@ -228,9 +204,7 @@ alchemforge abfe-gromacs run my_abfe.toml
 alchemforge abfe-gromacs analyze my_abfe.toml
 ```
 
-`abfe` and `abfe_gromacs` remain accepted as compatibility aliases. The
-desktop lists `OpenFE` and `GROMACS` separately beneath `ABFE`; both open their
-dedicated configuration dialogs.
+`abfe` and `abfe_gromacs` remain accepted as compatibility aliases.
 
 GROMACS SepTop RBFE is a separate backend named `septop-gromacs` (also
 `septop_gromacs`). Start with `gromacs/septop/example.toml`. Its ligand SDF is
@@ -252,8 +226,7 @@ alchemforge septop-gromacs submit my_septop.toml
 
 Staging preserves the published four-stage schedules: 12 and 8 complex
 windows, then 18 and 10 solvent windows. It writes one auditable task table and
-a bounded Slurm array. The desktop exposes the same setup as
-`RBFE > SepTop RBFE > GROMACS`.
+a bounded Slurm array.
 
 ## Membrane systems
 
