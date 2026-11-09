@@ -36,11 +36,18 @@ chemflow-desktop
 
 ## ChemFlow Studio Preview
 
-<p align="center">
-  <img src="assets/images/chemflow-desktop-home.png" alt="ChemFlow Desktop — Molecular AI Studio home screen" width="900">
-</p>
-
-<p align="center"><em>ChemFlow Desktop — pick a workflow</em></p>
+<table align="center">
+<tr>
+<td align="center" width="50%">
+  <img src="assets/images/chemflow-desktop-home.png" alt="ChemFlow Desktop — Molecular AI Studio home screen" width="460"><br>
+  <em>ChemFlow Desktop — pick a workflow</em>
+</td>
+<td align="center" width="50%">
+  <img src="assets/movie/protac_generation_movie.gif" alt="PROTAC generation — BRAF (left) linked to CRBN (right)" width="460"><br>
+  <em>PROTAC generation: BRAF (left) &amp; CRBN (right)</em>
+</td>
+</tr>
+</table>
 
 ---
 
@@ -214,14 +221,6 @@ chemflow uncertainty bootstrap \
 ---
 
 ## Examples
-
-### PROTAC generation
-
-<p align="center">
-  <video src="https://github.com/yonglanliu/ChemFlow/raw/main/assets/movie/protac_generation_movie.mp4" controls muted width="900"></video>
-</p>
-
-<p align="center"><em>PROTAC generation walkthrough.</em> If the video does not play inline on GitHub, <a href="assets/movie/protac_generation_movie.mp4">download / watch it here</a>.</p>
 
 ### Molecular similarity
 
