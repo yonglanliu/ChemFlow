@@ -1,13 +1,51 @@
-# ChemFlow
+<div align="center">
+
+<img src="assets/images/chemflow_logo.svg" alt="ChemFlow logo" width="160"/>
+
+<h1>🧪&nbsp; ChemFlow &nbsp;🧬</h1>
+
+<h3>Molecular AI Studio</h3>
+
+<p>An extensible AI-powered platform for molecular design, PROTAC design, property
+prediction, virtual screening, free-energy calculations, and cheminformatics.</p>
+
+</div>
+
+---
+
+## ChemFlow Installation
+
+Refer to the <a href="https://github.com/yonglanliu/ChemFlow/blob/main/INSTALL.md">installation guide</a> for environment setup (conda/mamba), the ChemFlow and AlchemForge/OpenFE environments, the desktop app, and HPC notes.
+
+## Tutorials
+
+Step-by-step guides live in <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/README.md">tutorials/</a>:
+
+- <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/HPC_GUIDE.md">Running on HPC</a> — free-energy, PyRosetta and REINVENT4 workflows on a SLURM GPU cluster.
+- <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/MEMBRANE_PREP.md">Membrane system prep for OpenFE</a> — fix a Maestro/Desmond membrane PDB for `ProteinMembraneComponent`.
+
+---
+
+## Launch **ChemFlow** Desktop
+
+```
+source <myconda>
+conda activate chemflow
+chemflow-desktop
+```
+
+## ChemFlow Studio Preview
 
 <p align="center">
-An extensible AI-powered platform for molecular design, PROTAC design, property prediction,
-virtual screening, and cheminformatics.
+  <img src="assets/images/chemflow-desktop-home.png" alt="ChemFlow Desktop — Molecular AI Studio home screen" width="900">
 </p>
+
+<p align="center"><em>ChemFlow Desktop — pick a workflow</em></p>
 
 ---
 
 ## Modules
+
 - **ADME** property prediction module
 - **PROTAC** design module
 - **LBVS** (Ligand-based virtual screening) module
@@ -15,7 +53,6 @@ virtual screening, and cheminformatics.
 - GROMACS module for binding free energy calculation, alanine scanning
 - OpenFE module for binding free energy calculation and molecular dynamics (MD) simulations
 - Ligand-based virtual screening via similarity search
-
 
 ## Overview
 
@@ -265,211 +302,6 @@ Tests live in `tests/`, while one-off dataset and maintenance programs live in
 
 ---
 
-## Installation
-
-ChemFlow requires Python 3.11. The recommended installation uses
-[Miniforge](https://github.com/conda-forge/miniforge) and Mamba. For a complete
-clean-install, update, GPU-verification, and troubleshooting guide, see
-[`INSTALL.md`](INSTALL.md).
-
-Two environment specifications are provided:
-
-- `env/environment.yaml` for local development, CPU systems, and Apple Silicon.
-- `env/environment-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs. It uses
-  `env/requirements-hpc-torch.txt` to install the CUDA 12.6 PyTorch build.
-
-The free-energy tools (OpenFE, OpenMM, GROMACS/PMX, Open Babel, ACPYPE) live in a
-separate conda env named `alchemforge`, so their NumPy 1.x / RDKit pins never
-touch the ML stack. It has its own specifications:
-
-- `env/environment-alchemforge.yaml` for workstations (macOS or Linux).
-- `env/environment-alchemforge-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs (CUDA 12.6).
-
-Install it from the desktop **Environments** page (or `chemflow fe-env install
-[--cuda 12.6]`), or from the yaml followed by
-`python -m pip install -e . --no-deps --no-build-isolation`. For development,
-`scripts/dev_install.sh` links ChemFlow, AlchemForge and PMX into it in editable
-mode. See [`src/alchemforge/README.md`](src/alchemforge/README.md) and
-[`HPC_GUIDE.md`](HPC_GUIDE.md).
-
-Conda installs the compiled scientific packages first; pip then installs the
-remaining Python packages and ChemFlow itself in editable mode.
-
-### 1. Clone ChemFlow
-
-```bash
-git clone https://github.com/yonglanliu/ChemFlow.git
-cd ChemFlow
-```
-
-### 2A. Local, CPU, or Apple Silicon installation
-
-Run this command from the repository root:
-
-```bash
-mamba env create -f env/environment.yaml
-mamba activate chemflow
-```
-
-If the `chemflow` environment already exists, update it instead:
-
-```bash
-mamba env update --name chemflow --file env/environment.yaml --prune
-mamba activate chemflow
-```
-
-### 2B. NVIDIA GPU installation on an HPC cluster
-
-Use this installation only on a Linux cluster with NVIDIA GPUs and a driver
-compatible with CUDA 12.6. The NVIDIA driver is normally maintained by the HPC
-administrators; do not install or replace the system driver inside the Conda
-environment.
-
-If your cluster uses environment modules, inspect the available CUDA versions
-and load the module recommended by the cluster documentation:
-
-```bash
-module avail cuda
-module load cuda/12.6  # module name may differ on your cluster
-```
-
-Create the HPC environment from the repository root:
-
-```bash
-mamba env create -f env/environment-hpc.yaml
-mamba activate chemflow
-```
-
-To update an existing HPC environment:
-
-```bash
-mamba env update --name chemflow --file env/environment-hpc.yaml --prune
-mamba activate chemflow
-```
-
-`env/environment-hpc.yaml` installs the packages pinned in
-`env/requirements-hpc-torch.txt`, including the CUDA 12.6 builds of PyTorch and
-Torchvision. A complete system CUDA Toolkit is generally unnecessary unless
-you need to compile custom CUDA extensions.
-
-Confirm that the active interpreter is Python 3.11:
-
-```bash
-python --version
-which python
-```
-
-On Windows, use `where python` instead of `which python`.
-
-### 3. Verify the installation
-
-```bash
-chemflow --help
-
-python -c "import torch, chemprop, lightgbm; print(torch.__version__)"
-```
-
-On HPC, perform the GPU check from an allocated GPU compute node rather than a
-login node:
-
-```bash
-nvidia-smi
-chemflow gpu-test
-```
-
-The command performs actual CUDA matrix multiplications through PyTorch and
-returns a nonzero exit status when CUDA is unavailable or execution fails. Use
-`chemflow gpu-test --device 1` to select another visible GPU, or increase the
-workload with `--matrix-size` and `--iterations`. A failed result on a login
-node does not necessarily indicate a broken installation, because many
-clusters expose GPUs only inside scheduled jobs.
-
-If you modify `env/requirements.txt`, synchronize the active environment with:
-
-```bash
-mamba env update --name chemflow --file env/environment.yaml --prune
-```
-
-If you modify `env/requirements-hpc-torch.txt`, update the HPC environment instead:
-
-```bash
-mamba env update --name chemflow --file env/environment-hpc.yaml --prune
-```
-
-### Alternative: pip virtual environment
-
-Use this only when Conda/Mamba is unavailable. Compiled dependencies such as
-RDKit, PyTorch, and LightGBM are generally easier to install through Conda.
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r env/requirements.txt
-```
-
-### Pretrained model weights
-
-CheMeleon downloads its official pretrained weights automatically on the first
-run and reuses the cached file afterward:
-
-```text
-~/.cache/chemflow/chemeleon/chemeleon_mp.pt
-```
-
-Set `CHEMFLOW_CACHE_DIR` before CheMeleon training to use another cache
-location:
-
-```bash
-export CHEMFLOW_CACHE_DIR=/path/to/model_cache
-```
-
-Hugging Face Graphormer accepts either a Hub model through `model_name` or a
-local PCQM4Mv1 checkpoint through `checkpoint_path` in `[ModelConfig]`. A local
-checkpoint is recommended on compute nodes without internet access. The
-included examples use:
-
-```text
-~/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt
-```
-
-ChemBERTa accepts a Hugging Face model ID or a local downloaded model directory
-through `ModelConfig.model_name`. Install its optional dependency with
-`pip install -e '.[chemberta]'`; use `local_files_only = true` on offline HPC
-compute nodes. The included DeepChem checkpoint uses
-`ModelConfig.architecture = "roberta"`. If an institutional proxy causes
-`CERTIFICATE_VERIFY_FAILED`, configure `REQUESTS_CA_BUNDLE` with the trusted
-institution CA or install `pip-system-certs`; do not disable TLS verification.
-
-### Hardware notes
-
-- NVIDIA multi-GPU Graphormer training is launched with `torchrun`; CheMeleon
-  uses Lightning's `strategy = "ddp"` configuration.
-- Apple Silicon uses the MPS GPU backend for single-device training. MPS does
-  not support multi-device DDP.
-- Keep `num_workers = 0` on macOS if multiprocessing or shared-memory errors
-  occur.
-
-To check accelerator availability:
-
-```bash
-python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('MPS:', torch.backends.mps.is_available())"
-```
-
-### Troubleshooting imports
-
-If Python reports a missing package such as `lightgbm` or `chemprop`,
-confirm that the `chemflow` environment is active and reinstall from the
-environment specification:
-
-```bash
-mamba activate chemflow
-mamba env update --name chemflow --file env/environment.yaml --prune
-python -m pip check
-```
-
----
-
 ## Quick start
 
 ### Train Hugging Face Graphormer
@@ -625,12 +457,12 @@ chemflow uncertainty bootstrap \
 
 ## Supported model families
 
-| Category | Models |
-|-----------|--------|
-| Graph | Chemprop v2, Hugging Face Graphormer, CheMeleon, KERMT |
-| Sequence | ChemBERTa, LSTM, GPT |
-| Fine-tuning | LoRA |
-| Learning | single-task and multitask learning |
+| Category    | Models                                                 |
+| ----------- | ------------------------------------------------------ |
+| Graph       | Chemprop v2, Hugging Face Graphormer, CheMeleon, KERMT |
+| Sequence    | ChemBERTa, LSTM, GPT                                   |
+| Fine-tuning | LoRA                                                   |
+| Learning    | single-task and multitask learning                     |
 
 ---
 

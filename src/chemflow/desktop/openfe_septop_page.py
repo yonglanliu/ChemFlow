@@ -346,6 +346,16 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         self.protein_pdb = PathField("protein.pdb (receptor / complex)")
         self.system_ligand_sdf = PathField("charged ligands SDF (defaults to Ligand Prep output)")
         self.cofactor_sdf = PathField("cofactor.sdf (optional)")
+        # Cofactor-from-template: one charged template SDF placed on every matching
+        # residue in the (complex) protein PDB. When set, cofactor SDF is ignored.
+        self.cofactor_template_sdf = PathField(
+            "cofactor_template.sdf (optional; one charged copy, placed from the complex PDB)")
+        self.cofactor_resnames = QLineEdit()
+        self.cofactor_resnames.setPlaceholderText("cofactor PDB resname(s), e.g. 4DY  (comma-separated)")
+        self.cofactor_resnames.setToolTip(
+            "PDB residue name(s) of the cofactor in the protein PDB. With a template "
+            "SDF, each matching residue is built from the template (identical charges) "
+            "and stripped from the protein before parameterization.")
         self.membrane = QCheckBox("Membrane system (requires explicit box vectors)")
         self.membrane.toggled.connect(self._on_membrane_toggle)
         self.box_vectors = QPlainTextEdit()
@@ -373,6 +383,8 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         f.addRow("Protein PDB:", self.protein_pdb)
         f.addRow("Charged ligands SDF:", self.system_ligand_sdf)
         f.addRow("Cofactor SDF:", self.cofactor_sdf)
+        f.addRow("Cofactor template SDF (optional):", self.cofactor_template_sdf)
+        f.addRow("Cofactor resname(s):", self.cofactor_resnames)
         f.addRow("", self.membrane)
         f.addRow("Complex box vectors (membrane):", box_cell)
         f.addRow("Box shape (soluble + solvent leg):", self.box_shape)
@@ -741,6 +753,11 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         over = {
             "ligand_sdf": (self.system_ligand_sdf.text() or self._active_ligand_sdf()) or None,
             "cofactor_sdf": self.cofactor_sdf.text() or None,
+            "cofactor_template_sdf": self.cofactor_template_sdf.text() or None,
+            "cofactor_resnames": (
+                [r.strip() for r in self.cofactor_resnames.text().replace(",", " ").split() if r.strip()]
+                or None
+            ),
             "protein_pdb": self.protein_pdb.text() or None,
             "off_toolkit_backend": self.off_backend.currentText(),
             "partial_charge_method": self.charge_method.currentText(),
@@ -885,6 +902,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
                     ("protein_pdb", "protein PDB"),
                     ("ligand_sdf", "ligand"),
                     ("cofactor_sdf", "cofactor"),
+                    ("cofactor_template_sdf", "cofactor template"),
                 ],
             )
         except (OSError, ValueError) as exc:

@@ -465,6 +465,7 @@ def main() -> None:
             ("protein_pdb", "protein PDB"),
             ("ligand_sdf", "ligand"),
             ("cofactor_sdf", "cofactor"),
+            ("cofactor_template_sdf", "cofactor template"),
         ],
         optional_file_attrs=[
             ("complex_box_vectors", "PBC file"),
@@ -522,17 +523,43 @@ def main() -> None:
         ion_concentration=getattr(conf, "ion_concentration", 0.15) * offunit.molar,
     )
 
+    # Cofactor-from-template mode: build identical-charge cofactor copies from ONE
+    # charged template SDF placed on the matching residues in the complex PDB, and
+    # strip those residues from the protein PDB so the protein FF doesn't see them.
+    protein_pdb_path = str(conf.protein_pdb)
+    template_cofactors = None
+    cof_template = getattr(conf, "cofactor_template_sdf", None)
+    cof_resnames = getattr(conf, "cofactor_resnames", None)
+    if cof_template and cof_resnames:
+        import pathlib as _pl
+
+        from chemflow.fe.openfe.cofactor_from_pdb import (
+            build_cofactors_from_pdb,
+            strip_residues,
+        )
+        template_cofactors = build_cofactors_from_pdb(
+            cof_template, conf.protein_pdb, cof_resnames, charge_settings=charge_settings,
+        )
+        print(f"Built {len(template_cofactors)} cofactor copy/copies from template "
+              f"'{cof_template}' on resname(s) {cof_resnames} (identical charges).")
+        stripped = _pl.Path(conf.json_dir).parent / "inputs" / "protein_nocofactor.pdb"
+        stripped.parent.mkdir(parents=True, exist_ok=True)
+        strip_residues(conf.protein_pdb, cof_resnames, stripped)
+        protein_pdb_path = str(stripped)
+
     if conf.membrane_system:
         box_vectors = box_vectors_matrix(conf.complex_box_vectors) * offunit.nanometer
 
         prot = openfe.ProteinMembraneComponent.from_pdb_file(
-            str(conf.protein_pdb),
+            protein_pdb_path,
             box_vectors=box_vectors,
         )
     else:
-        prot = openfe.ProteinComponent.from_pdb_file(str(conf.protein_pdb))
+        prot = openfe.ProteinComponent.from_pdb_file(protein_pdb_path)
 
-    if conf.cofactor_sdf is not None:
+    if template_cofactors is not None:
+        cofactors = template_cofactors
+    elif conf.cofactor_sdf is not None:
         cofactors = load_cofactor(str(conf.cofactor_sdf))
         print(f"There are {len(cofactors)} cofactor molecule(s)")
         if not skip_charge:

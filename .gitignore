@@ -104,3 +104,5 @@ dataset/ADMET/ExpansionRX/*
 !dataset/ADMET/ExpansionRX/download_expansionrx.ipynb
 lstm_training/
 train/gpt_train.sh
+
+pmx/

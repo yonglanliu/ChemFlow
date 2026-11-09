@@ -305,6 +305,14 @@ protein_pdb: protein.pdb
 cofactor_sdf: null
 restart_json: null
 
+# Cofactor-from-template (optional; avoids the isomorphic-charge error for repeated
+# cofactor copies): define the cofactor ONCE as a charged template SDF (with H) and
+# place it on every matching residue in protein_pdb — all copies then share identical
+# charges. When set, cofactor_sdf is ignored and the listed residues are stripped
+# from protein_pdb before protein parameterization.
+# cofactor_template_sdf: cofactor_template.sdf
+# cofactor_resnames: [4DY]
+
 # --- Output ---
 workdir: .                         # base dir; the project lives at <workdir>/<jobname>/
 jobname: __PROJECT__               # project folder name (holds inputs/, json/, results/, this config)
@@ -547,6 +555,14 @@ protein_pdb: protein.pdb
 cofactor_sdf: null
 restart_json: null
 name: abfe_my_ligand        # transformation name (output JSON basename)
+
+# Cofactor-from-template (optional; avoids the isomorphic-charge error for repeated
+# cofactor copies): define the cofactor ONCE as a charged template SDF (with H) and
+# place it on every matching residue in protein_pdb — all copies then share identical
+# charges. When set, cofactor_sdf is ignored and the listed residues are stripped
+# from protein_pdb before protein parameterization.
+# cofactor_template_sdf: cofactor_template.sdf
+# cofactor_resnames: [4DY]
 
 # --- Output ---
 workdir: .                         # base dir; the project lives at <workdir>/<jobname>/
