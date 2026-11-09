@@ -1,16 +1,5 @@
 <div align="center">
 
-<img src="assets/images/chemflow_logo.svg" alt="ChemFlow logo" width="160"/>
-
-<h1>🧪&nbsp; ChemFlow &nbsp;🧬</h1>
-
-<h3>Molecular AI Studio</h3>
-
-<p>An extensible AI-powered platform for molecular design, PROTAC design, property
-prediction, virtual screening, free-energy calculations, and cheminformatics.</p>
-
-</div>
-
 ---
 
 ## ChemFlow Installation
@@ -44,7 +33,7 @@ chemflow-desktop
 </td>
 <td align="center" width="50%">
   <img src="assets/movie/protac_generation_movie.gif" alt="PROTAC generation — BRAF (left) linked to CRBN (right)" width="460"><br>
-  <em>PROTAC generation: BRAF (left) &amp; CRBN (right)</em>
+  <em>PROTAC generation: BRAF (left) & CRBN (right)</em>
 </td>
 </tr>
 </table>
@@ -60,11 +49,9 @@ chemflow-desktop
 - GROMACS module for binding free energy calculation, alanine scanning
 - OpenFE module for binding free energy calculation and molecular dynamics (MD) simulations
 - Ligand-based virtual screening via similarity search
-- Model training (Chemprop v2, Graphormer, KERMET, cHEmELEON, ChemBERTa, GPT, and LSMT)
-
+- Model training (Chemprop v2, Graphormer, KERMET, CheMeleon, ChemBERTa, GPT, and LSMT)
 
 ---
-
 
 ## Quick start
 
@@ -217,7 +204,6 @@ chemflow uncertainty bootstrap \
     --output-dir bootstrap_results
 ```
 
-
 ---
 
 ## Examples
@@ -246,7 +232,6 @@ chemflow uncertainty bootstrap \
 - uncertainty-aware evaluation
 
 ---
-
 
 ## Generative design with REINVENT4
 
