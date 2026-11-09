@@ -88,14 +88,20 @@ DEFAULTS: dict[str, Any] = {
 
 
 def load_config(path: str | Path) -> SimpleNamespace:
-    """Load a Boltz co-folding YAML, merged over the defaults; resolve paths."""
+    """Load a Boltz co-folding YAML, merged over the defaults; resolve paths.
+
+    ``workdir: "."`` (default) means the current working directory, so outputs
+    land where the command is run rather than in the config/code directory.
+    """
+    import os
+
     config_path = Path(path).expanduser().resolve()
     conf = _to_namespace(_deep_merge(DEFAULTS, _load_yaml(config_path)))
 
     base_dir = config_path.parent
     workdir = getattr(conf, "workdir", ".")
     if not workdir or str(workdir) == ".":
-        conf.workdir = str(base_dir)
+        conf.workdir = os.getcwd()
     else:
         conf.workdir = _resolve(base_dir, workdir)
 

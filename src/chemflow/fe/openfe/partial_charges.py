@@ -114,3 +114,87 @@ def ensure_partial_charges(
             ) from exc
 
     return result
+
+
+def harmonize_isomorphic_charges(components: list, *, molecule_kind: str = "cofactor") -> list:
+    """Give graph-isomorphic SmallMoleculeComponents one shared partial-charge set.
+
+    OpenFE's RFE protocol rejects isomorphic ``SmallMoleculeComponent``s whose
+    partial charges differ ("Found SmallMoleculeComponents that are isomorphic but
+    with different charges"). Cofactors supplied as several copies, or charged
+    per-conformer, commonly trip this. Group the components by graph isomorphism and
+    copy the first member's partial charges onto the rest, remapped through the
+    isomorphism's atom map. Order is preserved; components without an isomorphic
+    duplicate are returned unchanged.
+    """
+    comps = list(components)
+    if len(comps) < 2:
+        return comps
+
+    import numpy as np  # noqa: PLC0415
+    from openff.toolkit import Molecule  # noqa: PLC0415
+    from openff.units import unit as offunit  # noqa: PLC0415
+
+    def _iso(a, b):
+        # Use OpenFF's default (strict) isomorphism — fast and discriminating.
+        # Fully-relaxed matching (ignoring bond order/charge/stereo) is MUCH
+        # slower for symmetric molecules (automorphism blow-up), so we keep the
+        # default here; the atom remap below handles charge-array alignment.
+        return Molecule.are_isomorphic(a, b, return_atom_map=True)
+
+    offs = [c.to_openff() for c in comps]
+    out = list(comps)
+    used = [False] * len(comps)
+    harmonized = 0
+    for i in range(len(offs)):
+        if used[i]:
+            continue
+        group = [i]
+        for j in range(i + 1, len(offs)):
+            if used[j]:
+                continue
+            is_iso, _ = _iso(offs[i], offs[j])
+            if is_iso:
+                group.append(j)
+        for k in group:
+            used[k] = True
+        if len(group) < 2:
+            continue
+        rep_idx = next((k for k in group if offs[k].partial_charges is not None), None)
+        if rep_idx is None:
+            continue
+        rep = offs[rep_idx]
+        rep_charges = rep.partial_charges
+        for k in group:
+            if k == rep_idx:
+                continue
+            mol = offs[k]
+            # atom_map maps mol (member) atom indices -> rep atom indices.
+            is_iso, mol_to_rep = _iso(mol, rep)
+            if not is_iso or not mol_to_rep:
+                continue
+            try:
+                # Reorder the member's atoms into the representative's ordering so
+                # the per-atom charge arrays line up index-for-index (OpenFE
+                # compares charges by atom index). Geometry is remapped too.
+                remapped = mol.remap(mol_to_rep, current_to_new=True)
+                remapped.partial_charges = rep_charges
+                out[k] = type(comps[k]).from_openff(remapped)
+            except Exception:
+                # Fallback: assign chemically-equivalent charges in the member's
+                # own atom order (works if OpenFE remaps before comparing).
+                rep_vals = rep_charges.m_as(offunit.elementary_charge)
+                new = np.zeros(mol.n_atoms)
+                for mol_atom, rep_atom in mol_to_rep.items():
+                    new[mol_atom] = rep_vals[rep_atom]
+                mol.partial_charges = new * offunit.elementary_charge
+                out[k] = type(comps[k]).from_openff(mol)
+            harmonized += 1
+
+    if harmonized:
+        print(
+            f"Harmonized partial charges across {harmonized} isomorphic "
+            f"{molecule_kind} copy/copies (OpenFE requires identical charges "
+            f"for isomorphic components)."
+        )
+    return out

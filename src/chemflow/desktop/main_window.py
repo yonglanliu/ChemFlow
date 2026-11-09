@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDockWidget,
@@ -66,11 +67,12 @@ class MainWindow(QMainWindow):
         # Single registry of workflows: drives both the launcher cards on the
         # dashboard and the lazy page factories below (indices must match).
         self.functions = [
-            {"index": 1, "title": "Property prediction", "detail": "Physicochemical and ADME endpoints"},
-            {"index": 2, "title": "Predict", "detail": "Run a saved model on a molecule set"},
-            {"index": 3, "title": "Similarity search", "detail": "Explore chemical similarity"},
-            {"index": 4, "title": "Generate", "detail": "Sample novel SMILES"},
+            {"index": 1, "title": "ADMET", "detail": "Physicochemical & ADME/Tox endpoints"},
             {"index": 5, "title": "PROTAC design", "detail": "Ternary search, linker design, screening"},
+            {"index": 3, "title": "LBVS", "detail": "Ligand-based virtual screening (chemical similarity)"},
+            {"index": 9, "title": "AI docking & screening", "detail": "Dock or screen with Boltz-2 / Chai-1 + 3D pose"},
+            {"index": 2, "title": "Predict", "detail": "Run a saved model on a molecule set"},
+            {"index": 4, "title": "Generate", "detail": "Sample novel SMILES"},
             {"index": 6, "title": "Binding Free Energy · GROMACS", "detail": "RBFE, ABFE, SepTop, resFEP, alanine scan, MM-GBSA"},
             {"index": 7, "title": "Binding Free Energy · OpenFE", "detail": "RBFE, ABFE, SepTop, OpenMM modeling & MD"},
         ]
@@ -102,6 +104,10 @@ class MainWindow(QMainWindow):
 
         self._make_environments = _make_environments
 
+        def _make_cofold_screening():
+            from chemflow.desktop.cofold_screening_page import CofoldScreeningPage
+            return CofoldScreeningPage(console=self.console)
+
         self._page_factories = {
             1: _make_property,
             2: lambda: PredictPage(runner),
@@ -112,6 +118,7 @@ class MainWindow(QMainWindow):
             7: _make_bfe_openfe,
             # Not a dashboard card — reached via the top-right "Working environment" button.
             8: _make_environments,
+            9: _make_cofold_screening,
         }
         self._environments_index = 8
         self._page_built: set[int] = set()
@@ -177,9 +184,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(18, 24, 18, 18)
         layout.setSpacing(8)
         brand_row = QHBoxLayout()
-        mark = QLabel("CF")
-        mark.setObjectName("BrandMark")
+        mark = QLabel()
+        mark.setFixedSize(42, 42)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        from chemflow.config import PROJECT_ROOT
+        _logo = PROJECT_ROOT / "assets" / "images" / "chemflow_logo.svg"
+        if _logo.is_file():
+            mark.setPixmap(QIcon(str(_logo)).pixmap(42, 42))
+        else:
+            mark.setObjectName("BrandMark")
+            mark.setText("CF")
         brand = QLabel("ChemFlow")
         brand.setObjectName("Brand")
         brand_row.addWidget(mark)

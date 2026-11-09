@@ -49,7 +49,41 @@ from chemflow.desktop.widgets.forms import (  # noqa: F811
     PageHeader,
     PathField,
     action_button,
+    with_help,
 )
+
+GROMACS_JOB_HELP_HTML = """
+<h3>Job settings (HPC) — GROMACS FEP</h3>
+<p>GROMACS <code>mdrun</code> is a <b>CPU+GPU hybrid</b>: it offloads nonbonded/PME to
+the GPU while the CPU handles bonded terms, integration and domain decomposition.</p>
+
+<h4>HPC preset</h4>
+<p>Pick a preset from <code>env/hpc.yaml</code> (e.g. <b>singlenode-singlegpu-week</b>)
+to fill partition / nodes / CPUs / GPUs / memory / walltime; <b>(custom)</b> keeps
+your own values.</p>
+
+<h4>GPU vs CPU — what to request</h4>
+<p>Use <b>1 GPU + ~4&ndash;8 CPUs per lambda window</b>. GPU is strongly preferred;
+CPU-only (GPUs=0) works but is much slower. A single FEP system (tens of thousands
+of atoms) runs fastest on <b>one</b> GPU &mdash; don't split one window across GPUs.</p>
+
+<h4>How to use multiple GPUs</h4>
+<p>Parallelize across <b>lambda windows</b>, not within one:</p>
+<ul>
+<li><b>Independent windows</b> &mdash; each window is its own <code>mdrun</code> on
+1 GPU (keep <code>-ntmpi 1</code>), run via the array. Simplest, backfills, most
+efficient for throughput.</li>
+<li><b>HREX (Hamiltonian replica exchange)</b> &mdash; all windows run together with
+<code>gmx mdrun -multidir ... -replex</code>, one MPI rank (and one GPU) per window.
+This needs an <b>external MPI GROMACS</b> (thread-MPI can't do -multidir): set the
+<i>HREX module / launcher / gmx command</i> fields (e.g. <code>gmx_mpi</code>).</li>
+</ul>
+
+<h4>Multi-node</h4>
+<p>Only for HREX across many windows with fast InfiniBand; otherwise an array of
+single-GPU window jobs schedules faster and scales better. <code>--nodes=1 --gres=gpu:N</code>
+waits for one node with N free GPUs (it pends, never downgrades).</p>
+"""
 
 
 class _EdgeBridge(QObject):
@@ -1143,6 +1177,16 @@ class GromacsRbfePage(QTabWidget):
         self.mdrun_options = QLineEdit("-ntmpi 1")
         self.mdrun_options.setToolTip("Space-separated gmx mdrun flags.")
         self.partition = QLineEdit("gpu")
+        self.hpc_preset = QComboBox()
+        try:
+            from chemflow.desktop.openfe_rbfe_config import slurm_preset_names
+            _preset_names = slurm_preset_names()
+        except Exception:
+            _preset_names = []
+        self.hpc_preset.addItems(["(custom)", *_preset_names])
+        self.hpc_preset.setToolTip("Pick a preset from env/hpc.yaml to fill the SLURM fields "
+                                   "below; '(custom)' keeps your own values.")
+        self.hpc_preset.currentTextChanged.connect(self._apply_hpc_preset)
         self.nodes = _spin(1, 1, 64)
         self.cpus = _spin(8, 1, 128)
         self.gpus = _spin(1, 0, 16)
@@ -1165,6 +1209,7 @@ class GromacsRbfePage(QTabWidget):
         self.hrex_gmx.setToolTip(external_tip)
         for label, w in [("Config file to write:", self.config_path),
                          ("mdrun options:", self.mdrun_options),
+                         ("HPC preset:", self.hpc_preset),
                          ("SLURM partition:", self.partition),
                          ("Nodes:", self.nodes), ("CPUs per task:", self.cpus),
                          ("GPUs:", self.gpus), ("Memory:", self.memory),
@@ -1176,7 +1221,32 @@ class GromacsRbfePage(QTabWidget):
                          ("HREX gmx command (external MPI):", self.hrex_gmx)]:
             f.addRow(label, w)
         return self._wrap(PageHeader("GROMACS RBFE", "5 · Job settings (HPC)",
-                                     "Config path, mdrun options, and the SLURM parameters."), form)
+                                     "Config path, mdrun options, and the SLURM parameters."),
+                          with_help(form, GROMACS_JOB_HELP_HTML))
+
+    def _apply_hpc_preset(self, name: str) -> None:
+        """Fill the SLURM fields from a named env/hpc.yaml preset ('(custom)' = no-op)."""
+        if not name or name == "(custom)":
+            return
+        try:
+            from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset
+            base = {
+                "partition": self.partition.text().strip(),
+                "nodes": self.nodes.value(),
+                "cpus_per_task": self.cpus.value(),
+                "gpus": self.gpus.value(),
+                "memory": self.memory.text().strip(),
+                "walltime": self.walltime.text().strip(),
+            }
+            merged = apply_slurm_preset(base, name)
+        except Exception:
+            return
+        self.partition.setText(str(merged.get("partition", "gpu")))
+        self.nodes.setValue(int(merged.get("nodes", 1) or 1))
+        self.cpus.setValue(int(merged.get("cpus_per_task", 8) or 8))
+        self.gpus.setValue(int(merged.get("gpus", 1) or 0))
+        self.memory.setText(str(merged.get("memory", "16G")))
+        self.walltime.setText(str(merged.get("walltime", "24:00:00")))
 
     # -- Execution ---------------------------------------------------------
     def _exec_tab(self):

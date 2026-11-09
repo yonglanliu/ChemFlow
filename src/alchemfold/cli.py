@@ -19,6 +19,24 @@ import sys
 from pathlib import Path
 
 
+def _hpc_preset_names() -> list[str]:
+    from alchemfold.hpc_config import presets
+
+    return list(presets().keys())
+
+
+def _hpc_default_preset() -> str:
+    from alchemfold.hpc_config import default_preset
+
+    return default_preset()
+
+
+def _hpc_gpu_types() -> list[str]:
+    from alchemfold.hpc_config import gpu_types
+
+    return gpu_types()
+
+
 def _run_cmd(command: list[str], *, dry_run: bool) -> int:
     if dry_run:
         print(" ".join(command))
@@ -95,14 +113,29 @@ def _dock_validate(args: argparse.Namespace) -> int:
 
 def _dock_stage(args: argparse.Namespace) -> int:
     from alchemfold.dock_config import (
-        load_config, stage as stage_dock, validate_config,
+        load_config, stage as stage_dock, stage_slurm, validate_config,
     )
     conf_path = Path(args.config).expanduser().resolve()
     conf = load_config(conf_path)
     validate_config(conf)
-    runner, _ = stage_dock(conf_path, Path(getattr(conf, "workdir", conf_path.parent)))
-    print(f"Wrote docking runner: {runner}")
-    print(f"Run it with: bash {runner} {conf_path}")
+    workdir = Path(getattr(conf, "workdir", conf_path.parent))
+    if args.target == "hpc":
+        script, _ = stage_slurm(
+            conf_path, workdir,
+            preset=args.hpc_preset,
+            partition=args.partition,
+            account=args.account,
+            gpu_type=args.gpu_type,
+            cpus_per_task=args.cpus_per_task,
+            mem=args.mem,
+            conda_env=args.conda_env,
+        )
+        print(f"Wrote SLURM submit script ({args.hpc_preset}): {script}")
+        print(f"Submit it with: sbatch {script}")
+    else:
+        runner, _ = stage_dock(conf_path, workdir)
+        print(f"Wrote docking runner: {runner}")
+        print(f"Run it with: bash {runner} {conf_path}")
     return 0
 
 
@@ -118,7 +151,7 @@ def _dock_run(args: argparse.Namespace) -> int:
 
 
 def _dock_generate(args: argparse.Namespace) -> int:
-    from alchemfold.dock_config import default_yaml_text
+    from alchemfold.dock_config import default_cache_dir, default_yaml_text
 
     text = default_yaml_text(
         engine=args.engine,
@@ -127,6 +160,13 @@ def _dock_generate(args: argparse.Namespace) -> int:
         sequence=args.sequence or "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
         smiles=args.smiles or "CCO",
         with_pocket=args.pocket,
+        ligand_file=args.ligand_file,
+        ligand_file_format=args.ligand_file_format,
+        cache_dir=args.cache_dir or default_cache_dir(),
+        diffusion_samples=args.diffusion_samples,
+        recycling_steps=args.recycling_steps,
+        sampling_steps=args.sampling_steps,
+        use_msa_server=args.use_msa_server,
     )
     output = Path(args.output) if args.output else Path("docking.yaml")
     output = output.expanduser()
@@ -145,6 +185,7 @@ def _screen_generate(args: argparse.Namespace) -> int:
 
     text = default_yaml_text(
         engine=args.engine,
+        library=args.library,
         sequence=args.sequence or "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
     )
     output = Path(args.output) if args.output else Path("screen.yaml")
@@ -237,8 +278,25 @@ def build_parser() -> argparse.ArgumentParser:
     dgen.add_argument("--ligand-id", default="L", help="Ligand chain id")
     dgen.add_argument("--sequence", default=None, help="Protein sequence to pre-fill")
     dgen.add_argument("--smiles", default=None, help="Ligand SMILES to pre-fill")
+    dgen.add_argument("--ligand-file", default=None,
+                      help="Dock ligand(s) from a file instead of --smiles "
+                           "(SMILES/.smi, .cxsmiles, CSV, or .sdf; plain or .bz2/.gz)")
+    dgen.add_argument("--ligand-file-format", default="auto",
+                      choices=["auto", "csv", "smiles", "cxsmiles", "sdf"],
+                      help="Format of --ligand-file (default: auto-detect by extension)")
     dgen.add_argument("--pocket", action="store_true",
                       help="Include a binding-site pocket constraint block")
+    dgen.add_argument("--cache-dir", default=None,
+                      help="Model/CCD weights cache (boltz --cache / chai CHAI_DOWNLOADS_DIR). "
+                           "Point at /data or scratch to avoid the HOME disk quota.")
+    dgen.add_argument("--diffusion-samples", type=int, default=1,
+                      help="Predicted poses (boltz --diffusion_samples / chai --num-diffn-samples)")
+    dgen.add_argument("--recycling-steps", type=int, default=3,
+                      help="boltz --recycling_steps / chai --num-trunk-recycles")
+    dgen.add_argument("--sampling-steps", type=int, default=200, help="boltz only")
+    dgen.add_argument("--use-msa-server", action=argparse.BooleanOptionalAction, default=True,
+                      help="Compute MSAs via the model's server (needs internet; "
+                           "use --no-use-msa-server on offline compute nodes)")
     dgen.add_argument("--force", action="store_true", help="Overwrite an existing file")
     dgen.set_defaults(func=_dock_generate)
 
@@ -248,6 +306,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     dstage = dock_commands.add_parser("stage", help="Write a runner script")
     dstage.add_argument("config", type=Path, help="Docking YAML config")
+    dstage.add_argument("--target", choices=["localhost", "hpc"], default="localhost",
+                        help="localhost: a plain bash runner. hpc: a SLURM submit "
+                             "script (single-node single-GPU). (default: localhost)")
+    _hpc_presets = list(_hpc_preset_names())
+    dstage.add_argument("--hpc-preset", choices=_hpc_presets, default=_hpc_default_preset(),
+                        help="HPC walltime preset (used with --target hpc). "
+                             f"Choices: {', '.join(_hpc_presets)}")
+    dstage.add_argument("--gpu-type", choices=_hpc_gpu_types(), default=None,
+                        help="GPU type for --gres (used with --target hpc; overrides "
+                             "the preset's gpu_type; '' = any)")
+    dstage.add_argument("--partition", default=None, help="SLURM partition (--target hpc)")
+    dstage.add_argument("--account", default=None, help="SLURM account (--target hpc)")
+    dstage.add_argument("--cpus-per-task", type=int, default=None,
+                        help="SLURM --cpus-per-task (--target hpc)")
+    dstage.add_argument("--mem", default=None, help="SLURM --mem (--target hpc)")
+    dstage.add_argument("--conda-env", default=None,
+                        help="conda env to activate in the SLURM job (--target hpc)")
     dstage.set_defaults(func=_dock_stage)
 
     drun = dock_commands.add_parser("run", help="Run docking now (requires the engine)")
@@ -267,6 +342,8 @@ def build_parser() -> argparse.ArgumentParser:
         "generate", help="Write a commented screening config for a chosen engine"
     )
     sgen.add_argument("--engine", choices=["boltz", "chai", "diffdock"], default="boltz")
+    sgen.add_argument("--library", choices=["zinc22", "enamine_real"], default="zinc22",
+                      help="Source ligand catalog to screen (default: zinc22)")
     sgen.add_argument("-o", "--output", type=Path,
                       help="Output YAML path (default: screen.yaml)")
     sgen.add_argument("--sequence", default=None, help="Receptor sequence to pre-fill")

@@ -20,9 +20,10 @@ DEFAULTS: dict[str, Any] = {
     "protein_pdb": "protein.pdb",
     "cofactor_sdf": None,
     # --- Output ---
-    "workdir": "work/rbfe",
-    "result_dir": "work/rbfe/results",
-    "json_dir": "work/rbfe/json",
+    "workdir": ".",
+    "jobname": "rbfe",
+    "result_dir": "rbfe/results",
+    "json_dir": "rbfe/json",
     "input_json_files": None,
     "restart": False,
     # --- Alchemical network ---
@@ -92,6 +93,7 @@ DEFAULTS: dict[str, Any] = {
 # Default HPC settings for the submit script.
 HPC_DEFAULTS: dict[str, Any] = {
     "partition": "gpu",
+    "account": "",            # SBATCH --account (empty -> omitted)
     "nodes": 1,
     "ntasks": 1,
     "cpus_per_task": 16,
@@ -101,10 +103,198 @@ HPC_DEFAULTS: dict[str, Any] = {
     "walltime": "240:00:00",
     "replicates": 3,          # repeats per transformation (array = N_json * replicates)
     "array": "",              # SBATCH --array range, e.g. 0-95 (blank -> auto 0-(N*rep-1) note)
+    "mpi": False,             # multi-GPU: launch quickrun under MPI (auto-on when gpus>1)
+    "mpi_launcher": "srun",   # srun (SLURM) or e.g. "mpirun -np N"
     "modules": "",            # whitespace/comma-separated `module load` names (HPC)
     "conda_init": "",         # path/line to source (e.g. ~/bin/myconda or conda.sh)
     "conda_environment": "",  # env to activate (e.g. openfe)
 }
+
+
+def hpc_defaults() -> dict[str, Any]:
+    """HPC_DEFAULTS merged with the ``openfe.defaults`` block of env/hpc.yaml.
+
+    Lets a cluster set OpenFE's allocated resources (partition, account, cpus,
+    gpus, gpu_type, memory, walltime, replicates, nodes/ntasks, modules/conda) in
+    one customizable file instead of editing code. Lookup order mirrors the
+    AlchemFold HPC config: ``$CHEMFLOW_HPC_CONFIG`` -> ``<PROJECT_ROOT>/env/hpc.yaml``
+    -> ``~/.config/chemflow/hpc.yaml``. Missing file/keys fall back to built-ins.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    merged = dict(HPC_DEFAULTS)
+    candidates = []
+    env = os.environ.get("CHEMFLOW_HPC_CONFIG", "").strip()
+    if env:
+        candidates.append(_Path(env).expanduser())
+    try:
+        from chemflow.config import PROJECT_ROOT  # noqa: PLC0415
+
+        candidates.append(_Path(PROJECT_ROOT) / "env" / "hpc.yaml")
+    except Exception:
+        pass
+    candidates.append(_Path.home() / ".config" / "chemflow" / "hpc.yaml")
+    for candidate in candidates:
+        try:
+            if candidate and candidate.is_file():
+                import yaml  # noqa: PLC0415
+
+                data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+                block = (data.get("openfe") or {}).get("defaults") or {}
+                for key, value in block.items():
+                    if value is not None:
+                        merged[str(key)] = value
+                break
+        except Exception:
+            continue
+    return merged
+
+
+# Embed the HPC allocation as an inline `slurm:` block in the config (alchemfold
+# screen.yaml style), seeded from the file-backed defaults.
+DEFAULTS["slurm"] = dict(hpc_defaults())
+
+
+def _read_hpc_file() -> dict:
+    """Return the parsed env/hpc.yaml (lookup order like hpc_defaults), or {}."""
+    import os
+    from pathlib import Path as _Path
+
+    candidates = []
+    env = os.environ.get("CHEMFLOW_HPC_CONFIG", "").strip()
+    if env:
+        candidates.append(_Path(env).expanduser())
+    try:
+        from chemflow.config import PROJECT_ROOT  # noqa: PLC0415
+
+        candidates.append(_Path(PROJECT_ROOT) / "env" / "hpc.yaml")
+    except Exception:
+        pass
+    candidates.append(_Path.home() / ".config" / "chemflow" / "hpc.yaml")
+    for candidate in candidates:
+        try:
+            if candidate and candidate.is_file():
+                import yaml  # noqa: PLC0415
+
+                return yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+    return {}
+
+
+def slurm_preset_names() -> list[str]:
+    """Named presets available in env/hpc.yaml (e.g. singlenode-singlegpu-long)."""
+    return list((_read_hpc_file().get("presets") or {}).keys())
+
+
+def single_gpu_preset_names() -> list[str]:
+    """Preset names that request at most one GPU (for OpenFE, which is single-GPU).
+
+    Excludes multi-GPU presets (gpus/gpus_per_node > 1); those are only meaningful
+    for GROMACS HREX, not for OpenFE's single-process ``quickrun``.
+    """
+    presets = _read_hpc_file().get("presets") or {}
+    out = []
+    for name, value in presets.items():
+        gpus = 1
+        if isinstance(value, dict):
+            gpus = int(value.get("gpus_per_node", value.get("gpus", 1)) or 1)
+        if gpus <= 1:
+            out.append(name)
+    return out
+
+
+# env/hpc.yaml preset keys -> OpenFE inline `slurm:` block keys.
+_PRESET_KEY_MAP = {
+    "time": "walltime", "walltime": "walltime",
+    "nodes": "nodes",
+    "ntasks_per_node": "ntasks", "ntasks": "ntasks",
+    "gpus_per_node": "gpus", "gpus": "gpus",
+    "gpu_type": "gpu_type",
+    "cpus_per_task": "cpus_per_task",
+    "mem": "memory", "memory": "memory",
+    "mpi": "mpi", "mpi_launcher": "mpi_launcher",
+    "partition": "partition", "account": "account",
+    "conda_environment": "conda_environment", "conda_env": "conda_environment",
+}
+
+
+def apply_slurm_preset(slurm: dict[str, Any], name: str) -> dict[str, Any]:
+    """Overlay a named env/hpc.yaml preset onto an OpenFE `slurm:` block.
+
+    A preset value may be a plain walltime string (single-node single-GPU) or a
+    mapping of resources. Returns a new dict; raises ValueError for unknown names.
+    """
+    presets = _read_hpc_file().get("presets") or {}
+    if name not in presets:
+        raise ValueError(f"unknown HPC preset {name!r}; choose one of {sorted(presets)}")
+    raw = presets[name]
+    raw = {"time": raw} if not isinstance(raw, dict) else dict(raw)
+    out = dict(slurm)
+    for key, value in raw.items():
+        mapped = _PRESET_KEY_MAP.get(key)
+        if mapped and value is not None:
+            out[mapped] = value
+    return out
+
+
+HPC_JOB_HELP_HTML = """
+<h3>Job settings (HPC)</h3>
+<p>These fields build the SLURM submit script and are also written as an inline
+<code>slurm:</code> block in the config, so the script and config stay in sync.</p>
+
+<h4>HPC preset</h4>
+<p>Pick a named preset from <code>env/hpc.yaml</code> (e.g.
+<b>singlenode-singlegpu-long</b>) to fill the fields below in one click. Presets are
+single node / single GPU and differ mainly in walltime (quick=4&nbsp;h, day=1&nbsp;d,
+long=4&nbsp;d, tendays=10&nbsp;d). Choose <b>(custom)</b> to keep your own values.</p>
+
+<h4>CPUs per task &amp; HREX</h4>
+<p>On the <b>CUDA</b> platform dynamics run on the GPU, so more CPUs do <u>not</u>
+speed up the replica-exchange (HREX) lambda windows &mdash; they run on one GPU,
+serially per iteration. 4&ndash;8 is plenty. To parallelize windows you need
+multiple GPUs + MPI, not more CPUs.</p>
+
+<h4>GPUs / GPU type</h4>
+<p><b>GPUs=1</b> with a <b>GPU type</b> (e.g. a100) requests
+<code>--gres=gpu:a100:1</code>; blank type = any GPU. GPUs=0 runs on CPU and is
+impractically slow for production.</p>
+
+<h4>Multi-GPU</h4>
+<p><b>OpenFE's <code>quickrun</code> uses ONE GPU</b> — it runs the whole edge in a
+single process and is not MPI-parallel, so one edge's lambda windows cannot be
+split across GPUs (wrapping quickrun in srun just launches duplicate copies of the
+edge). The script always requests a single GPU per task. Parallelize across
+<i>edges and replicates</i> with the SLURM array instead — that's where throughput
+comes from. (True within-edge multi-GPU exists only for GROMACS HREX via
+<code>-multidir</code>.)</p>
+
+<h4>Replicates &amp; Array</h4>
+<p>Each edge runs <b>Replicates</b> times; the SLURM array is auto-sized to
+<i>transformations &times; replicates</i> when the script is written after
+<b>Setup FEP (create_json)</b>. Leave <b>Array</b> blank to auto-size.</p>
+
+<h4>Walltime</h4>
+<p>Use <code>D-HH:MM:SS</code> or <code>HH:MM:SS</code>. RBFE edges often need days.</p>
+
+<h4>Platform = CUDA</h4>
+<p>Keep <b>platform: CUDA</b>; it is honored literally and the real GPU is chosen at
+run time on the compute node. JSONs generated before this fix carry a baked CPU
+platform &mdash; <b>regenerate</b> them (Setup FEP).</p>
+
+<h4>Modules / conda</h4>
+<p>Optional pre-job lines: <code>module load</code> names, a conda init script to
+<code>source</code>, and the env to activate (usually <code>alchemforge</code>).</p>
+"""
+
+
+def format_slurm_block(slurm: dict[str, Any]) -> str:
+    """Render an inline ``slurm:`` YAML block from a resources dict."""
+    lines = ["slurm:"]
+    for key, value in slurm.items():
+        lines.append(f"  {key}: {_yaml_scalar(value)}")
+    return "\n".join(lines) + "\n"
 
 
 def build_config(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -133,15 +323,52 @@ def _yaml_scalar(value: Any) -> str:
 
 
 def to_yaml(conf: dict[str, Any]) -> str:
-    """Emit a flat YAML mapping for the create_json config."""
-    return "".join(f"{key}: {_yaml_scalar(value)}\n" for key, value in conf.items())
+    """Emit a YAML mapping for the create_json config (supports a nested dict block)."""
+    lines = []
+    for key, value in conf.items():
+        if isinstance(value, dict):
+            lines.append(f"{key}:")
+            for sub_key, sub_value in value.items():
+                lines.append(f"  {sub_key}: {_yaml_scalar(sub_value)}")
+        else:
+            lines.append(f"{key}: {_yaml_scalar(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def _box_is_valid(value: Any) -> bool:
+    """A membrane box is valid if it is 3/6/9 numbers (list or comma/space string),
+    or a path to a file (e.g. pbc.txt) whose contents are parsed at run time."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return False
+        if s.lower().endswith(".txt") or Path(s).is_file():
+            return True
+        parts = [p for p in s.replace(",", " ").split() if p]
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return False
+        return len(nums) in (3, 6, 9)
+    if isinstance(value, (list, tuple)):
+        if len(value) not in (3, 6, 9):
+            return False
+        try:
+            nums = [float(v) for v in value]
+        except (TypeError, ValueError):
+            return False
+        return all(v > 0 for v in nums) if len(nums) == 3 else True
+    return False
 
 
 def validate_setup(conf: dict[str, Any]) -> list[str]:
     """Return a list of problems with the setup (empty = OK).
 
-    Enforces the membrane PBC rule: a membrane system needs an explicit
-    ``complex_box_size`` of three positive numbers.
+    Enforces the membrane PBC rule: a membrane system needs a periodic box via
+    ``complex_box_size``/``complex_box_vectors`` — 3 ``[x,y,z]``, 6
+    ``[a,b,c,alpha,beta,gamma]``, or 9 numbers, or a ``.txt`` file.
     """
     issues: list[str] = []
     if not conf.get("ligand_sdf"):
@@ -149,11 +376,13 @@ def validate_setup(conf: dict[str, Any]) -> list[str]:
     if not conf.get("protein_pdb"):
         issues.append("Protein PDB is required.")
     if conf.get("membrane_system"):
-        box = conf.get("complex_box_size")
-        if not (isinstance(box, (list, tuple)) and len(box) == 3
-                and all(isinstance(v, (int, float)) and v > 0 for v in box)):
-            issues.append("Membrane system requires complex_box_size = [x, y, z] (nm, all > 0) "
-                          "for a valid periodic box.")
+        if not (_box_is_valid(conf.get("complex_box_size"))
+                or _box_is_valid(conf.get("complex_box_vectors"))):
+            issues.append(
+                "Membrane system requires a periodic box: complex_box_size / "
+                "complex_box_vectors = 3 [x,y,z], 6 [a,b,c,alpha,beta,gamma], or 9 "
+                "numbers (nm/deg), or a .txt file (comma-separated)."
+            )
     for key in ("n_lambda_windows_complex_leg", "n_lambda_windows_solvent_leg"):
         value = conf.get(key)
         if not isinstance(value, int) or value < 2:
@@ -164,16 +393,33 @@ def validate_setup(conf: dict[str, Any]) -> list[str]:
 
 
 def parse_box_size(text: str):
-    """Parse 'x,y,z' (or 'x y z') into a float list; '' / None -> None."""
+    """Parse the complex-box entry into an explicit float list (or None).
+
+    '' / None -> None. A path to a ``.txt`` file (or any existing file) is **read
+    and parsed** so the config stores the exact numbers rather than a path.
+    Accepts 3 ([x,y,z]), 6 ([a,b,c,alpha,beta,gamma]) or 9 (3x3) numbers,
+    separated by commas, spaces or newlines.
+    """
     if not text or not str(text).strip():
         return None
-    parts = str(text).replace(",", " ").split()
+    s = str(text).strip()
+    path = Path(s)
+    if s.lower().endswith(".txt") or path.is_file():
+        if not path.is_file():
+            raise ValueError(f"PBC file not found: {s}")
+        s = path.read_text(encoding="utf-8")
+    parts = [p for p in s.replace(";", " ").replace(",", " ").split() if p.strip()]
     try:
         values = [float(p) for p in parts]
     except ValueError as exc:
-        raise ValueError(f"box size must be three numbers, got {text!r}") from exc
-    if len(values) != 3:
-        raise ValueError(f"box size must be three numbers (x y z), got {text!r}")
+        raise ValueError(
+            f"box size must be numbers (3/6/9) or a .txt file of them, got {text!r}"
+        ) from exc
+    if len(values) not in (3, 6, 9):
+        raise ValueError(
+            f"box size must be 3 [x,y,z], 6 [a,b,c,alpha,beta,gamma] or 9 numbers; "
+            f"got {len(values)}"
+        )
     return values
 
 
@@ -185,8 +431,10 @@ def slurm_script(config_path: str | Path, hpc: dict[str, Any] | None = None,
     replicates + rep_index. ``json_dir`` / ``result_dir`` are inlined from the
     config (no ``yq`` dependency); ``input_json_files`` (if set) selects a subset.
     """
-    hpc = {**HPC_DEFAULTS, **(hpc or {})}
     conf = conf or {}
+    # Resource precedence: built-in defaults (+ optional env/hpc.yaml openfe.defaults)
+    # < the inline `slurm:` block in the config < an explicit hpc override.
+    hpc = {**hpc_defaults(), **(conf.get("slurm") or {}), **(hpc or {})}
     config_path = str(config_path)
     json_dir = conf.get("json_dir") or "json"
     result_dir = conf.get("result_dir") or conf.get("output_directory") or "results"
@@ -194,8 +442,26 @@ def slurm_script(config_path: str | Path, hpc: dict[str, Any] | None = None,
     n_rep = int(hpc.get("replicates", 3))
     gpus = int(hpc.get("gpus", 0))
     gpu_type = str(hpc.get("gpu_type", "")).strip()
+    # OpenFE `quickrun` runs the whole DAG in ONE process on ONE GPU — it is NOT
+    # MPI-parallel, so we never wrap it in srun/mpirun (that would just launch N
+    # redundant copies of the same edge). Parallelism is across edges/replicates
+    # via the SLURM array below. Request a single GPU per task regardless of any
+    # multi-GPU preset.
+    gpus = 1 if gpus > 1 else gpus
     gres = (f"gpu:{gpu_type}:{gpus}" if gpu_type else f"gpu:{gpus}") if gpus > 0 else ""
-    array = str(hpc.get("array", "")).strip() or "0-0"
+    array = str(hpc.get("array", "")).strip()
+    if not array:
+        # Auto-size: one array task per (transformation JSON x replicate). Count the
+        # JSONs beside the config if create_json already produced them; otherwise fall
+        # back to a single task (0-0) and flag it in the directive comment + runtime
+        # guard below, so a script written before create_json can't silently run only
+        # one edge.
+        base_dir = Path(config_path).expanduser().resolve().parent
+        jdir = Path(json_dir)
+        if not jdir.is_absolute():
+            jdir = base_dir / jdir
+        n_json = len(list(jdir.glob("*.json"))) if jdir.is_dir() else 0
+        array = f"0-{n_json * n_rep - 1}" if n_json > 0 else "0-0"
 
     header = [
         "#!/bin/bash",
@@ -203,6 +469,11 @@ def slurm_script(config_path: str | Path, hpc: dict[str, Any] | None = None,
         f"#SBATCH --partition={hpc['partition']}",
         f"#SBATCH --time={hpc['walltime']}",
     ]
+    if str(hpc.get("account", "")).strip():
+        header.append(f"#SBATCH --account={str(hpc['account']).strip()}")
+    if int(hpc.get("nodes", 0) or 0) > 0:
+        header.append(f"#SBATCH --nodes={int(hpc['nodes'])}")
+    header.append("#SBATCH --ntasks=1")
     if gres:
         header.append(f"#SBATCH --gres={gres}")
     header += [
@@ -233,6 +504,12 @@ for ((i=0; i<N_REP; i++)); do mkdir -p "${{OUT_ROOT}}/replicate_${{i}}"; done
 export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 export CUDA_VISIBLE_DEVICES="${{SLURM_LOCALID:-0}}"
 
+echo "=== GPU check (before quickrun) ==="
+echo "host=$(hostname)  CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-unset}}  SLURM_JOB_GPUS=${{SLURM_JOB_GPUS:-unset}}"
+nvidia-smi -L 2>/dev/null || echo "nvidia-smi: not available on this node"
+python -c "from openmm import Platform; ns=[Platform.getPlatform(i).getName() for i in range(Platform.getNumPlatforms())]; print('OpenMM platforms:', ns); print('CUDA usable:', 'CUDA' in ns)" 2>/dev/null || echo "OpenMM CUDA probe failed"
+echo "==================================="
+
 # Collect the transformation JSONs: all in JSON_DIR, a .txt list, or one file.
 if [[ -z "$INPUT_JSON" ]]; then
     mapfile -t JSONS < <(find "${{JSON_DIR}}" -maxdepth 1 -type f -name "*.json" | sort)
@@ -243,6 +520,14 @@ else
 fi
 N_JSON="${{#JSONS[@]}}"
 if [[ "${{N_JSON}}" -eq 0 ]]; then echo "No JSON files in ${{JSON_DIR}}"; exit 1; fi
+
+# Guard against an undersized --array (e.g. the script was written before
+# create_json, so the directive stayed 0-0). One task per (JSON x replicate).
+NEEDED=$(( N_JSON * N_REP ))
+if [[ -n "${{SLURM_ARRAY_TASK_COUNT:-}}" && "${{SLURM_ARRAY_TASK_COUNT}}" -lt "${{NEEDED}}" ]]; then
+    echo "WARNING: --array covers ${{SLURM_ARRAY_TASK_COUNT}} task(s) but ${{NEEDED}} are needed" \
+         "(N_JSON=${{N_JSON}} x N_REP=${{N_REP}}). Re-submit with --array=0-$(( NEEDED - 1 ))." >&2
+fi
 
 TASK_ID="${{SLURM_ARRAY_TASK_ID}}"
 JSON_INDEX=$(( TASK_ID / N_REP ))

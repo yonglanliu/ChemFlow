@@ -25,11 +25,16 @@ from typing import Any
 from alchemfold.boltz_config import _deep_merge, _load_yaml, _resolve, _to_namespace
 from alchemfold.dock_config import DEFAULTS as _DOCK_DEFAULTS
 
+# Source ligand catalogs the screen can target (DB build is handled elsewhere).
+SUPPORTED_LIBRARIES = ("zinc22", "enamine_real")
+
 # Screening defaults = docking defaults + screening-specific sections.
 DEFAULTS: dict[str, Any] = copy.deepcopy(_DOCK_DEFAULTS)
 DEFAULTS.update(
     {
         "screen_out": "screen_output",
+        # Source library catalog for the screen. Supported: "zinc22" | "enamine_real".
+        "library": "zinc22",
         "ligand_files": [],        # list of library files; ligand_file also accepted
         # Sharding: set exactly one. n_shards splits into that many subsets;
         # shard_size caps ligands per shard. If neither is set, one shard.
@@ -57,13 +62,21 @@ DEFAULTS.update(
 
 
 def load_config(path: str | Path) -> SimpleNamespace:
-    """Load a screening YAML, merged over the defaults; resolve library paths."""
+    """Load a screening YAML, merged over the defaults; resolve library paths.
+
+    ``workdir: "."`` (default) means the current working directory, so shards,
+    the SLURM array/ranking jobs and results are written where the command is
+    run rather than in the config/code directory. Library/input files still
+    resolve relative to the config file.
+    """
+    import os
+
     config_path = Path(path).expanduser().resolve()
     conf = _to_namespace(_deep_merge(DEFAULTS, _load_yaml(config_path)))
 
     base_dir = config_path.parent
     workdir = getattr(conf, "workdir", ".")
-    conf.workdir = str(base_dir) if (not workdir or str(workdir) == ".") else _resolve(base_dir, workdir)
+    conf.workdir = os.getcwd() if (not workdir or str(workdir) == ".") else _resolve(base_dir, workdir)
 
     for key in ("receptor_pdb", "diffdock_model_dir", "diffdock_config"):
         value = getattr(conf, key, None)
@@ -94,6 +107,10 @@ def validate_config(conf: SimpleNamespace) -> None:
     engine = str(getattr(conf, "engine", "boltz"))
     if engine not in SUPPORTED_ENGINES:
         raise ValueError(f"engine must be one of {sorted(SUPPORTED_ENGINES)}")
+
+    library = str(getattr(conf, "library", "zinc22"))
+    if library not in SUPPORTED_LIBRARIES:
+        raise ValueError(f"library must be one of {sorted(SUPPORTED_LIBRARIES)}")
 
     if not (getattr(conf, "proteins", []) or []):
         raise ValueError("screening requires at least one receptor (protein) chain")
@@ -144,6 +161,7 @@ def write_stage_runner(config_path: str | Path, task_directory: str | Path) -> t
 def default_yaml_text(
     *,
     engine: str = "boltz",
+    library: str = "zinc22",
     protein_id: str = "A",
     sequence: str = "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
 ) -> str:
@@ -157,6 +175,7 @@ def default_yaml_text(
         "# ===================================================================\n"
         "\n"
         f'engine: "{engine}"              # boltz | chai | diffdock\n'
+        f'library: "{library}"           # source catalog: zinc22 | enamine_real\n'
         'screen_out: "screen_output"\n'
         "use_msa_server: true\n"
         'accelerator: "gpu"\n'

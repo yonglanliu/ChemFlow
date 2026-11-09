@@ -89,6 +89,16 @@ def build_command(conf, input_yaml: Path, out_dir: Path) -> list[str]:
         command.append("--use_msa_server")
     if bool(getattr(conf, "override", False)):
         command.append("--override")
+    cache = (getattr(conf, "cache_dir", None)
+             or os.environ.get("CHEMFLOW_MODEL_CACHE")
+             or os.environ.get("CHEMFLOW_BOLTZ_CACHE")
+             or os.environ.get("BOLTZ_CACHE"))
+    if not cache:
+        from alchemfold.dock_config import default_cache_dir
+
+        cache = default_cache_dir()
+    if cache:
+        command += ["--cache", str(Path(cache).expanduser())]
     return command
 
 
@@ -97,7 +107,9 @@ def run_from_config(config_path, *, dry_run: bool = False) -> int:
     conf = load_config(config_path)
     validate_config(conf)
     input_yaml, out_dir = write_inputs(conf)
-    command = build_command(conf, input_yaml, out_dir)
+    from alchemfold._exec import resolve_command
+
+    command = resolve_command(build_command(conf, input_yaml, out_dir))
 
     if dry_run:
         print(" ".join(shlex.quote(part) for part in command))

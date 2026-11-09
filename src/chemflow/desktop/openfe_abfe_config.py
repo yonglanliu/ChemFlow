@@ -12,6 +12,7 @@ transformation JSON × replicate).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from chemflow.desktop.openfe_rbfe_config import (  # shared SLURM array generator
@@ -53,9 +54,10 @@ DEFAULTS: dict[str, Any] = {
     "restart_json": None,
     "name": "abfe_my_ligand",
     # --- Output ---
-    "workdir": "work/abfe",
-    "result_dir": "work/abfe/results",
-    "json_dir": "work/abfe/json",
+    "workdir": ".",
+    "jobname": "abfe",
+    "result_dir": "abfe/results",
+    "json_dir": "abfe/json",
     # --- Platform ---
     "platform": "CUDA",
     # --- Membrane or not ---
@@ -91,13 +93,13 @@ DEFAULTS: dict[str, Any] = {
     "solvent_restraint_spring_constant": 1000.0,  # kJ/mol/nm^2
     # --- Equilibration settings ---
     "complex_equil_mini_steps": 5000,
-    "complex_equil_equil_length": 0.1,       # ns
-    "complex_equil_equil_length_nvt": 0.1,   # ns
-    "complex_equil_production_length": 2.0,  # ns
+    "complex_equil_equil_length": 1.0,       # ns
+    "complex_equil_equil_length_nvt": 1.0,   # ns
+    "complex_equil_production_length": 2.0,   # ns (NPT production equilibration)
     "solvent_equil_mini_steps": 5000,
-    "solvent_equil_equil_length": 0.1,       # ns
-    "solvent_equil_equil_length_nvt": 0.1,   # ns
-    "solvent_equil_production_length": 2.0,  # ns
+    "solvent_equil_equil_length": 1.0,       # ns
+    "solvent_equil_equil_length_nvt": 1.0,   # ns
+    "solvent_equil_production_length": 2.0,   # ns (NPT production equilibration)
     # --- Solvation settings (non-membrane) ---
     "complex_solvation_padding": 1.5,  # nanometer
     "solvent_solvation_padding": 1.5,  # nanometer
@@ -111,10 +113,10 @@ DEFAULTS: dict[str, Any] = {
     "early_termination_target_error": 0.0,   # kcal/mol
     "complex_sim_mini_step": 5000,
     "complex_sim_equil_length": 1.0,         # ns
-    "complex_sim_prod_length": 20.0,         # ns
+    "complex_sim_prod_length": 10.0,         # ns
     "solvent_sim_mini_step": 5000,
-    "solvent_sim_equil_length": 5.0,         # ns
-    "solvent_sim_prod_length": 30.0,         # ns
+    "solvent_sim_equil_length": 1.0,         # ns
+    "solvent_sim_prod_length": 10.0,         # ns
     # --- Lambda schedules (each leg's elec/vdw/restraints lists share one length) ---
     "complex_lambda_elec": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4,
                             0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0,
@@ -228,16 +230,24 @@ def parse_float_list(text: str) -> list[float] | None:
 def parse_box_vectors(text: str):
     """Parse box vectors into [[x,0,0],[0,y,0],[0,0,z]] (nm); ''/None -> None.
 
-    Accepts either three numbers (x y z -> a diagonal box) or nine numbers
-    (full 3×3, row-major). Commas and/or whitespace separate values; newlines OK.
+    Accepts three numbers (x y z -> a diagonal box) or nine numbers (full 3×3,
+    row-major), separated by commas/whitespace/newlines. A path to a ``.txt`` file
+    (or any existing file) is read and parsed the same way, so a membrane PBC file
+    can be used directly.
     """
     if text is None or not str(text).strip():
         return None
-    parts = str(text).replace(",", " ").split()
+    s = str(text).strip()
+    path = Path(s)
+    if s.lower().endswith(".txt") or path.is_file():
+        if not path.is_file():
+            raise ValueError(f"PBC file not found: {s}")
+        s = path.read_text(encoding="utf-8")
+    parts = s.replace(";", " ").replace(",", " ").split()
     try:
         values = [float(p) for p in parts]
     except ValueError as exc:
-        raise ValueError(f"box vectors must be numbers, got {text!r}") from exc
+        raise ValueError(f"box vectors must be numbers or a .txt file, got {text!r}") from exc
     if len(values) == 3:
         x, y, z = values
         return [[x, 0.0, 0.0], [0.0, y, 0.0], [0.0, 0.0, z]]

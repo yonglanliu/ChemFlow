@@ -10,9 +10,10 @@ free-energy workflow through one interpreter:
     chemflow fe-env install                # create 'alchemforge' + full stack + chemflow
     chemflow fe-env install --env myenv    # install into an existing env instead
     chemflow fe-env install --cuda 12.6    # GPU builds (HPC)
+    chemflow fe-env install --staged       # smaller solves (low-memory login nodes; avoids exit -9)
     chemflow fe-env install --dry-run      # print the commands only
 
-The package pins here mirror ``environment-alchemforge.yaml`` (a test keeps them in
+The package pins here mirror ``env/environment-alchemforge.yaml`` (a test keeps them in
 sync), so this installer and ``mamba env create -f`` give the same environment.
 Stack: openfe 1.12 (+ openmm 8.4), rdkit, openbabel, acpype, ambertools, gromacs,
 and PMX (installed from the bundled ``pmx/`` checkout; only needed for GROMACS
@@ -31,7 +32,12 @@ from pathlib import Path
 
 _DEFAULT_ENV = "alchemforge"
 _PMX_SPEC = "pmx"
-# Compute stack, pinned to the same versions as environment-alchemforge.yaml (the
+# conda-forge GROMACS has OpenCL and CUDA GPU variants plus CPU builds. Plain
+# `gromacs` can resolve to the OpenCL build, which cannot offload on NVIDIA nodes;
+# a GPU install uses the CUDA build string instead (see _install).
+_DEFAULT_GROMACS_SPEC = "gromacs"
+_CUDA_GROMACS_SPEC = "gromacs=*=nompi_cuda*"
+# Compute stack, pinned to the same versions as env/environment-alchemforge.yaml (the
 # OpenFE 1.12 / AmberTools line needs NumPy 1.x and pre-2026.03 RDKit; an unpinned
 # `openfe` can resolve to an old release that breaks under pydantic 2). GUI-only
 # libraries (Qt, VTK, ...) are intentionally left to the full yaml.
@@ -65,6 +71,51 @@ def cuda_specs(cuda: str | None) -> list[str]:
     return [f"cuda-version={cuda}", f"cuda-toolkit={cuda}"] if cuda else []
 
 
+def _spec_name(spec: str) -> str:
+    """Bare package name from a conda spec ('numpy>=1.26,<2' -> 'numpy')."""
+    for sep in ("=", ">", "<", "!", "~", " "):
+        spec = spec.split(sep, 1)[0]
+    return spec
+
+
+def staged_groups(specs: tuple[str, ...], gromacs_spec: str) -> list[list[str]]:
+    """Split the compute stack into smaller sequential solves for low-memory nodes.
+
+    A single solve of openfe+openmm+ambertools+gromacs can exhaust a login node's
+    memory cgroup (mamba is OOM-killed, exit -9). Solving in stages keeps each
+    resolver pass small. Stage 1 pins the scientific base (numpy/rdkit/pandas),
+    stage 2 adds the alchemy core (openmm/openff/openfe), stage 3 the MD/FF tooling
+    plus gromacs. The numpy/pandas/rdkit pins are carried into every later stage as
+    constraints so a subsequent group can never bump them out of the OpenFE-
+    compatible range. Derived from ``specs`` so it cannot drift from
+    :data:`FE_CONDA_SPECS`.
+    """
+    base_names = {"rdkit", "numpy", "pandas", "scipy", "pip", "setuptools", "wheel", "pyyaml"}
+    core_names = {"openmm", "openff-toolkit", "openfe"}
+    pin_names = {"numpy", "pandas", "rdkit"}
+
+    pins = [s for s in specs if _spec_name(s) in pin_names]
+    base = [s for s in specs if _spec_name(s) in base_names]
+    core = [s for s in specs if _spec_name(s) in core_names]
+    rest = [s for s in specs if _spec_name(s) not in base_names | core_names]
+
+    groups = [base, [*pins, *core], [*pins, *rest, gromacs_spec]]
+    return [g for g in groups if g]
+
+
+def _attach_extra_specs(groups: list[list[str]], extra_specs: tuple[str, ...]) -> list[list[str]]:
+    """Add extra specs (e.g. CUDA toolkit) to the stage that pulls openmm, so GPU
+    builds are selected while that group is solved; fall back to the last stage."""
+    if not extra_specs:
+        return groups
+    for group in groups:
+        if any(_spec_name(s) == "openmm" for s in group):
+            group.extend(extra_specs)
+            return groups
+    groups[-1].extend(extra_specs)
+    return groups
+
+
 def _conda_tool(prefer_mamba: bool = True) -> str | None:
     order = ("mamba", "conda") if prefer_mamba else ("conda", "mamba")
     for tool in order:
@@ -91,23 +142,39 @@ def _repo_root() -> Path:
 
 def install_commands(env: str, repo: str, *, tool: str, channel: str = "conda-forge",
                      python_version: str = "3.12", gromacs_spec: str = "gromacs",
-                     extra_specs: tuple[str, ...] = (), exists: bool = False) -> list[list[str]]:
+                     extra_specs: tuple[str, ...] = (), exists: bool = False,
+                     staged: bool = False) -> list[list[str]]:
     """Core commands that build + link the compute env (pure, for testing).
 
     Provisions the pinned stack (:data:`FE_CONDA_SPECS` + gromacs) and installs
     chemflow editable (``--no-deps --no-build-isolation``, using the env's pinned
     setuptools). PMX is separate (:func:`pmx_command`). ``exists`` → install into
-    an existing env instead of creating it (idempotent retry).
+    an existing env instead of creating it (idempotent retry). ``staged`` → split
+    the provision into several smaller solves (:func:`staged_groups`) to avoid the
+    OOM-kill (exit -9) seen when one big solve runs on a low-memory login node.
     """
-    specs = [*FE_CONDA_SPECS, gromacs_spec]
-    if exists:
-        provision = [tool, "install", "-y", "-n", env, "-c", channel, *specs, *extra_specs]
-    else:
-        provision = [tool, "create", "-y", "-n", env, "-c", channel,
-                     f"python={python_version}", *specs, *extra_specs]
-    return [provision,
-            [tool, "run", "-n", env, "pip", "install", "-e", repo,
-             "--no-deps", "--no-build-isolation"]]
+    link = [tool, "run", "-n", env, "pip", "install", "-e", repo,
+            "--no-deps", "--no-build-isolation"]
+
+    if not staged:
+        specs = [*FE_CONDA_SPECS, gromacs_spec]
+        if exists:
+            provision = [[tool, "install", "-y", "-n", env, "-c", channel, *specs, *extra_specs]]
+        else:
+            provision = [[tool, "create", "-y", "-n", env, "-c", channel,
+                          f"python={python_version}", *specs, *extra_specs]]
+        return [*provision, link]
+
+    groups = _attach_extra_specs(staged_groups(FE_CONDA_SPECS, gromacs_spec), extra_specs)
+    commands: list[list[str]] = []
+    for i, group in enumerate(groups):
+        if i == 0 and not exists:
+            commands.append([tool, "create", "-y", "-n", env, "-c", channel,
+                             f"python={python_version}", *group])
+        else:
+            commands.append([tool, "install", "-y", "-n", env, "-c", channel, *group])
+    commands.append(link)
+    return commands
 
 
 def pmx_command(env: str, *, tool: str, channel: str = "conda-forge",
@@ -140,9 +207,18 @@ def _install(args) -> int:
 
     extra_specs = list(args.with_specs or [])
     run_env = dict(os.environ)
+    gromacs_spec = args.gromacs_spec
     if args.cuda:
         extra_specs.extend(cuda_specs(args.cuda))
         run_env["CONDA_OVERRIDE_CUDA"] = args.cuda
+        # A GPU install must get the CUDA GROMACS variant: conda-forge otherwise
+        # resolves plain `gromacs` to its OpenCL build, which fails on NVIDIA nodes
+        # with "Cannot run short-ranged nonbonded interactions on a GPU". Only
+        # override when the user left --gromacs-spec at its default.
+        if gromacs_spec == _DEFAULT_GROMACS_SPEC:
+            gromacs_spec = _CUDA_GROMACS_SPEC
+            print(f"GPU build requested (--cuda {args.cuda}); selecting CUDA GROMACS "
+                  f"'{gromacs_spec}'. Override with --gromacs-spec if needed.")
 
     preamble: list[list[str]] = []
     exists = _env_exists(tool, args.env)
@@ -155,8 +231,8 @@ def _install(args) -> int:
 
     commands = preamble + install_commands(
         args.env, repo, tool=tool, channel=args.channel,
-        python_version=args.python_version, gromacs_spec=args.gromacs_spec,
-        extra_specs=tuple(extra_specs), exists=exists)
+        python_version=args.python_version, gromacs_spec=gromacs_spec,
+        extra_specs=tuple(extra_specs), exists=exists, staged=args.staged)
     for command in commands:
         print("$ " + shlex.join(command))
         if args.dry_run:
@@ -221,7 +297,9 @@ def add_fe_env_parser(subparsers, name: str = "fe-env", help: str | None = None)
     install.add_argument("--env", default=_DEFAULT_ENV,
                          help=f"conda env name (default {_DEFAULT_ENV})")
     install.add_argument("--channel", default="conda-forge")
-    install.add_argument("--gromacs-spec", default="gromacs", help="e.g. 'gromacs=2024.*'")
+    install.add_argument("--gromacs-spec", default=_DEFAULT_GROMACS_SPEC,
+                         help="conda spec for GROMACS, e.g. 'gromacs=2024.*'. With --cuda, "
+                              "defaults to the CUDA build ('gromacs=*=nompi_cuda*') unless set here.")
     install.add_argument("--python-version", default="3.12",
                          help="Python version (must satisfy chemflow's >=3.11,<3.13)")
     install.add_argument("--cuda", default=None,
@@ -231,6 +309,10 @@ def add_fe_env_parser(subparsers, name: str = "fe-env", help: str | None = None)
                          help="conda spec for PMX, used only if the repo has no bundled pmx/")
     install.add_argument("--recreate", action="store_true",
                          help="remove the env first and rebuild it cleanly")
+    install.add_argument("--staged", action="store_true",
+                         help="split the conda solve into smaller sequential solves "
+                              "(scientific base, openmm/openfe, md-tooling+gromacs) to "
+                              "avoid OOM-kills (exit -9) on low-memory login nodes")
     install.add_argument("--with", dest="with_specs", action="append", default=[],
                          metavar="SPEC", help="extra conda spec to add (repeatable)")
     install.add_argument("--repo", default=None, help="repo to pip install -e (default: this repo)")

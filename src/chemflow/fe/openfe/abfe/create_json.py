@@ -18,8 +18,15 @@ from openmm import Platform, System, VerletIntegrator, unit
 from openmm.app import Simulation, Topology
 from rdkit import Chem
 
-from chemflow.fe.openfe.partial_charges import ensure_partial_charges
-from chemflow.fe.openfe.workflow_defaults import load_workflow_config
+from chemflow.fe.openfe.partial_charges import (
+    ensure_partial_charges,
+    harmonize_isomorphic_charges,
+)
+from chemflow.fe.openfe.workflow_defaults import (
+    box_vectors_matrix,
+    load_workflow_config,
+    prepare_project,
+)
 
 
 def test_cuda():
@@ -109,12 +116,11 @@ def _create_protocol(conf):
     settings = AbsoluteBindingProtocol.default_settings()
 
     if conf.platform == "CUDA":
-        if test_cuda():
-            settings.engine_settings.compute_platform = "CUDA"
-            print("CUDA is available; using CUDA")
-        else:
-            settings.engine_settings.compute_platform = "CPU"
-            print("CUDA is unavailable; falling back to CPU")
+        # Honor the config literally; don't probe CUDA at generation time on a
+        # GPU-less login node (that would bake CPU into the JSON and the GPU
+        # compute node would run on CPU). OpenMM picks the device at run time.
+        settings.engine_settings.compute_platform = "CUDA"
+        print("Using CUDA (run on a GPU node; set platform: CPU to force CPU)")
     elif conf.platform == "OpenCL":
         settings.engine_settings.compute_platform = "OpenCL"
         print("Using OpenCL")
@@ -244,7 +250,7 @@ def _create_protocol(conf):
         settings.complex_solvation_settings.box_shape = None
         settings.complex_solvation_settings.solvent_padding = None
         settings.complex_solvation_settings.box_vectors = (
-            np.array(conf.complex_box_vectors) * offunit.nanometer
+            box_vectors_matrix(conf.complex_box_vectors) * offunit.nanometer
         )
     else:
         settings.complex_solvation_settings.box_shape = conf.box_shape
@@ -317,32 +323,23 @@ def main() -> None:
     conf = dict_to_namespace(load_workflow_config(args.conf_file, "abfe"))
 
     # ---------------------------------------
-    # Check if every input file exists
+    # Project layout: <workdir>/<jobname>/{inputs,json,results}; copies config +
+    # input files into it and repoints conf at the copies.
     # ---------------------------------------
-    if (
-        not pathlib.Path(conf.protein_pdb).exists()
-        or not pathlib.Path(conf.protein_pdb).is_file()
-    ):
-        raise FileNotFoundError(f"PDB file not found: {conf.protein_pdb}")
-    print(f"Found PDB file: {conf.protein_pdb}")
-
-    if (
-        not pathlib.Path(conf.ligand_sdf).exists()
-        or not pathlib.Path(conf.ligand_sdf).is_file()
-    ):
-        raise FileNotFoundError(f"Ligand file not found: {conf.ligand_sdf}")
-    print(f"Found ligand file: {conf.ligand_sdf}")
-
-    if conf.cofactor_sdf is not None:
-        if (
-            not pathlib.Path(conf.cofactor_sdf).exists()
-            or not pathlib.Path(conf.cofactor_sdf).is_file()
-        ):
-            raise FileNotFoundError(f"Cofactor file not found: {conf.cofactor_sdf}")
-        print(f"Found cofactor file: {conf.cofactor_sdf}")
-
-    pathlib.Path(conf.workdir).mkdir(parents=True, exist_ok=True)
-    pathlib.Path(conf.json_dir).mkdir(parents=True, exist_ok=True)
+    prepare_project(
+        conf,
+        args.conf_file,
+        default_jobname="abfe",
+        input_attrs=[
+            ("protein_pdb", "protein PDB"),
+            ("ligand_sdf", "ligand"),
+            ("cofactor_sdf", "cofactor"),
+        ],
+        optional_file_attrs=[
+            ("complex_box_vectors", "PBC file"),
+            ("complex_box_size", "PBC file"),
+        ],
+    )
 
     # ---------------------------------------
     #           Create protocol
@@ -357,15 +354,19 @@ def main() -> None:
         off_toolkit_backend=conf.off_toolkit_backend,
     )
     ligands = load_ligands(conf.ligand_sdf)
-    ligands = ensure_partial_charges(
-        ligands,
-        molecule_kind="ligand",
-        method=charge_settings.partial_charge_method,
-        toolkit_backend=charge_settings.off_toolkit_backend,
-        generate_n_conformers=charge_settings.number_of_conformers,
-        nagl_model=charge_settings.nagl_model,
-        processors=4,
-    )
+    skip_charge = bool(getattr(conf, "skip_charge_assignment", False))
+    if skip_charge:
+        print("skip_charge_assignment: using stored charges as-is (no charge check).")
+    else:
+        ligands = ensure_partial_charges(
+            ligands,
+            molecule_kind="ligand",
+            method=charge_settings.partial_charge_method,
+            toolkit_backend=charge_settings.off_toolkit_backend,
+            generate_n_conformers=charge_settings.number_of_conformers,
+            nagl_model=charge_settings.nagl_model,
+            processors=4,
+        )
     solv = openfe.SolventComponent(
         positive_ion=getattr(conf, "positive_ion", "Na+"),
         negative_ion=getattr(conf, "negative_ion", "Cl-"),
@@ -374,7 +375,7 @@ def main() -> None:
     )
 
     if conf.membrane_system:
-        box_vectors = np.array(conf.complex_box_vectors) * offunit.nanometer
+        box_vectors = box_vectors_matrix(conf.complex_box_vectors) * offunit.nanometer
 
         prot = openfe.ProteinMembraneComponent.from_pdb_file(
             str(conf.protein_pdb),
@@ -391,15 +392,18 @@ def main() -> None:
     if conf.cofactor_sdf is not None:
         cofactors = load_cofactor(conf.cofactor_sdf)
         print(f"There are {len(cofactors)} cofactor molecule(s)")
-        cofactors = ensure_partial_charges(
-            cofactors,
-            molecule_kind="cofactor",
-            method=charge_settings.partial_charge_method,
-            toolkit_backend=charge_settings.off_toolkit_backend,
-            generate_n_conformers=charge_settings.number_of_conformers,
-            nagl_model=charge_settings.nagl_model,
-            processors=4,
-        )
+        if not skip_charge:
+            cofactors = ensure_partial_charges(
+                cofactors,
+                molecule_kind="cofactor",
+                method=charge_settings.partial_charge_method,
+                toolkit_backend=charge_settings.off_toolkit_backend,
+                generate_n_conformers=charge_settings.number_of_conformers,
+                nagl_model=charge_settings.nagl_model,
+                processors=4,
+            )
+            # Identical (graph-isomorphic) cofactor copies must share one charge set.
+            cofactors = harmonize_isomorphic_charges(cofactors, molecule_kind="cofactor")
         for idx, cofactor in enumerate(cofactors):
             components_dict[f"cofactor_{idx}"] = cofactor
     else:

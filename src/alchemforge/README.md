@@ -15,7 +15,7 @@ is ChemFlow Studio (`chemflow-desktop`), which runs these tools through this env
 Workstation (macOS or Linux), from the repository root:
 
 ```bash
-mamba env create -f environment-alchemforge.yaml
+mamba env create -f env/environment-alchemforge.yaml
 mamba activate alchemforge
 
 python -m pip install -e . --no-deps --no-build-isolation   # chemflow + alchemforge, editable
@@ -30,7 +30,7 @@ Linux HPC on NVIDIA GPU nodes: use the headless CUDA 12.6 environment instead.
 It needs no repository-relative paths:
 
 ```bash
-conda env create -n alchemforge -f environment-alchemforge-hpc.yaml
+conda env create -n alchemforge -f env/environment-alchemforge-hpc.yaml
 conda activate alchemforge
 python -m pip install -e /path/to/ChemFlow --no-deps --no-build-isolation
 python -m pip install /path/to/ChemFlow/pmx --no-deps --no-build-isolation
@@ -84,8 +84,7 @@ separate from ABFE, ligand RBFE, SepTop RBFE, and residue FEP workflows so the
 same parameterized ligands can be reused.
 
 Fix & Assemble PDB (`alchemforge fix-pdb`, `chemflow rbfe fix-pdb`) removes hydrogen
-ATOM/HETATM records from a selected PDB and then runs `pdbfixer
---add-atoms=all`. It accepts a protein PDB, an optional cofactor PDB,
+ATOM/HETATM records from a selected PDB and then runs `pdbfixer --add-atoms=all`. It accepts a protein PDB, an optional cofactor PDB,
 and optional membrane and solvent PDB files. A cofactor file may contain one or
 multiple cofactors. They are processed in the same background job. Original
 files are preserved; outputs are named `fixed_protein.pdb`,
@@ -253,8 +252,7 @@ remain isotropic.
   user-supplied CSV of validated leg corrections. The staged worker contract is
   written to `.alchemforge/charge_strategy.json`, and the edge-level values are
   written to `network/charge_changes.csv`.
-- `resfep` requires the same two prepared complex files and `setup_mode =
-  "SKIP"`. `prepare-system` stages them instead of invoking the soluble
+- `resfep` requires the same two prepared complex files and `setup_mode = "SKIP"`. `prepare-system` stages them instead of invoking the soluble
   pdb2gmx/solvation path, and writes `mdp/membrane_pressure.mdp` for the
   residue-FEP worker.
 

@@ -17,8 +17,15 @@ from openmm import Platform, System, VerletIntegrator
 from openmm.app import Simulation, Topology
 from rdkit import Chem
 
-from chemflow.fe.openfe.partial_charges import ensure_partial_charges
-from chemflow.fe.openfe.workflow_defaults import load_workflow_config
+from chemflow.fe.openfe.partial_charges import (
+    ensure_partial_charges,
+    harmonize_isomorphic_charges,
+)
+from chemflow.fe.openfe.workflow_defaults import (
+    box_vectors_matrix,
+    load_workflow_config,
+    prepare_project,
+)
 
 
 def test_cuda():
@@ -224,17 +231,18 @@ def _create_alchemical_network(
             sysA_dict = {"ligand": mapping.componentA, "solvent": solvent}
             sysB_dict = {"ligand": mapping.componentB, "solvent": solvent}
 
-            if cofactors is not None:
-                for idx, cofactor in enumerate(cofactors):
-                    sysA_dict[f"cofactor_{idx}"] = cofactor
-                    sysB_dict[f"cofactor_{idx}"] = cofactor
-
             if leg == "complex":
                 # If this is a complex transformation we use the complex protocol
-                # and add in the protein to the chemical states
+                # and add in the protein (and cofactors) to the chemical states.
+                # Cofactors are part of the binding-site environment, so they belong
+                # ONLY in the complex leg -- never the solvent leg.
                 protocol = complex_protocol
                 sysA_dict["protein"] = protein
                 sysB_dict["protein"] = protein
+                if cofactors is not None:
+                    for idx, cofactor in enumerate(cofactors):
+                        sysA_dict[f"cofactor_{idx}"] = cofactor
+                        sysB_dict[f"cofactor_{idx}"] = cofactor
             else:
                 # If this is a solvent transformation we just use the solvent protocol
                 protocol = solvent_protocol
@@ -266,12 +274,12 @@ def _create_solvent_leg_protocol(conf):
     settings = RelativeHybridTopologyProtocol.default_settings()
 
     if conf.platform == "CUDA":
-        if test_cuda():
-            settings.engine_settings.compute_platform = "CUDA"
-            print("CUDA is available; using CUDA")
-        else:
-            settings.engine_settings.compute_platform = "CPU"
-            print("CUDA is unavailable; falling back to CPU")
+        # Honor the config literally. create_json usually runs on a login node
+        # with no GPU; probing CUDA here would wrongly bake "CPU" into the JSON
+        # and the GPU compute node would then run on CPU. OpenMM selects the real
+        # device at run time (and errors if CUDA is genuinely unavailable).
+        settings.engine_settings.compute_platform = "CUDA"
+        print("Using CUDA (run on a GPU node; set platform: CPU to force CPU)")
     elif conf.platform == "OpenCL":
         settings.engine_settings.compute_platform = "OpenCL"
         print("Using OpenCL")
@@ -362,12 +370,10 @@ def _create_complex_leg_protocol(conf):
     settings = RelativeHybridTopologyProtocol.default_settings()
 
     if conf.platform == "CUDA":
-        if test_cuda():
-            settings.engine_settings.compute_platform = "CUDA"
-            print("CUDA is available; using CUDA")
-        else:
-            settings.engine_settings.compute_platform = "CPU"
-            print("CUDA is unavailable; falling back to CPU")
+        # Honor the config literally (see solvent-leg note): don't probe CUDA at
+        # generation time on a GPU-less login node; OpenMM picks the device at run.
+        settings.engine_settings.compute_platform = "CUDA"
+        print("Using CUDA (run on a GPU node; set platform: CPU to force CPU)")
     elif conf.platform == "OpenCL":
         settings.engine_settings.compute_platform = "OpenCL"
         print("Using OpenCL")
@@ -436,7 +442,7 @@ def _create_complex_leg_protocol(conf):
         settings.solvation_settings.box_shape = None
         settings.solvation_settings.solvent_padding = None
         settings.solvation_settings.box_vectors = (
-            np.array(box) * offunit.nanometer
+            box_vectors_matrix(box) * offunit.nanometer
         )
     else:
         settings.solvation_settings.box_shape = (
@@ -465,6 +471,10 @@ def _create_complex_leg_protocol(conf):
         conf.barostat_frequency * offunit.timestep
     )
     if conf.membrane_system:
+        # A nonzero surface_tension is only valid with a membrane barostat; the
+        # default MonteCarloBarostat rejects it (gufe validation). Mirror the ABFE
+        # and SepTop create_json paths.
+        settings.integrator_settings.barostat = "MonteCarloMembraneBarostat"
         settings.integrator_settings.surface_tension = (
             conf.surface_tension * offunit.bar * offunit.nanometer
         )
@@ -489,32 +499,25 @@ def main() -> None:
     conf = dict_to_namespace(load_workflow_config(args.conf_file, "rbfe"))
 
     # ---------------------------------------
-    # Check if every input file exists
+    # Project layout: <workdir>/<jobname>/{inputs,json,results}.
+    # Copies the config file into the project root and the input files into
+    # inputs/, then repoints conf (ligand/protein/cofactor + json_dir) at them.
     # ---------------------------------------
-    if (
-        not pathlib.Path(conf.protein_pdb).exists()
-        or not pathlib.Path(conf.protein_pdb).is_file()
-    ):
-        raise FileNotFoundError(f"PDB file not found: {conf.protein_pdb}")
-    print(f"Found PDB file: {conf.protein_pdb}")
-
-    if (
-        not pathlib.Path(conf.ligand_sdf).exists()
-        or not pathlib.Path(conf.ligand_sdf).is_file()
-    ):
-        raise FileNotFoundError(f"Ligand file not found: {conf.ligand_sdf}")
-    print(f"Found ligand file: {conf.ligand_sdf}")
-
-    if conf.cofactor_sdf is not None:
-        if (
-            not pathlib.Path(conf.cofactor_sdf).exists()
-            or not pathlib.Path(conf.cofactor_sdf).is_file()
-        ):
-            raise FileNotFoundError(f"Cofactor file not found: {conf.cofactor_sdf}")
-        print(f"Found cofactor file: {conf.cofactor_sdf}")
-
-    pathlib.Path(conf.workdir).mkdir(parents=True, exist_ok=True)
-    pathlib.Path(conf.json_dir).mkdir(parents=True, exist_ok=True)
+    prepare_project(
+        conf,
+        args.conf_file,
+        default_jobname="rbfe",
+        input_attrs=[
+            ("protein_pdb", "protein PDB"),
+            ("ligand_sdf", "ligand"),
+            ("cofactor_sdf", "cofactor"),
+            ("cofactor_template_sdf", "cofactor template"),
+        ],
+        optional_file_attrs=[
+            ("complex_box_vectors", "PBC file"),
+            ("complex_box_size", "PBC file"),
+        ],
+    )
 
     # ---------------------------------------
     #           Create protocol
@@ -537,15 +540,20 @@ def main() -> None:
 
     ligands = load_ligands(conf.ligand_sdf, names)
 
-    ligands = ensure_partial_charges(
-        ligands,
-        molecule_kind="ligand",
-        method=charge_settings.partial_charge_method,
-        toolkit_backend=charge_settings.off_toolkit_backend,
-        generate_n_conformers=charge_settings.number_of_conformers,
-        nagl_model=charge_settings.nagl_model,
-        processors=4,
-    )
+    # When charges are already in the SDFs, skip the (slow) charge check/assignment.
+    skip_charge = bool(getattr(conf, "skip_charge_assignment", False))
+    if skip_charge:
+        print("skip_charge_assignment: using stored charges as-is (no charge check).")
+    else:
+        ligands = ensure_partial_charges(
+            ligands,
+            molecule_kind="ligand",
+            method=charge_settings.partial_charge_method,
+            toolkit_backend=charge_settings.off_toolkit_backend,
+            generate_n_conformers=charge_settings.number_of_conformers,
+            nagl_model=charge_settings.nagl_model,
+            processors=4,
+        )
 
     ligand_network = (
         _load_ligand_network(
@@ -568,28 +576,67 @@ def main() -> None:
         ion_concentration=getattr(conf, "ion_concentration", 0.15) * offunit.molar,
     )
 
+    # Cofactor-from-template mode: build identical-charge cofactor copies from ONE
+    # charged template SDF placed on the matching residues in the complex PDB, and
+    # strip those residues from the protein PDB so the protein FF doesn't see them.
+    protein_pdb_path = str(conf.protein_pdb)
+    template_cofactors = None
+    cof_template = getattr(conf, "cofactor_template_sdf", None)
+    cof_resnames = getattr(conf, "cofactor_resnames", None)
+    if cof_template and cof_resnames:
+        import pathlib as _pl
+
+        from chemflow.fe.openfe.cofactor_from_pdb import (
+            build_cofactors_from_pdb,
+            strip_residues,
+        )
+        template_cofactors = build_cofactors_from_pdb(
+            cof_template, conf.protein_pdb, cof_resnames, charge_settings=charge_settings,
+        )
+        print(f"Built {len(template_cofactors)} cofactor copy/copies from template "
+              f"'{cof_template}' on resname(s) {cof_resnames} (identical charges).")
+        stripped = _pl.Path(conf.json_dir).parent / "inputs" / "protein_nocofactor.pdb"
+        stripped.parent.mkdir(parents=True, exist_ok=True)
+        strip_residues(conf.protein_pdb, cof_resnames, stripped)
+        protein_pdb_path = str(stripped)
+
     if conf.membrane_system:
-        box_vectors = np.array(conf.complex_box_vectors) * offunit.nanometer
+        # Accept either complex_box_vectors or complex_box_size, matching
+        # _create_complex_leg_protocol (so a config that sets only one still works).
+        box = getattr(conf, "complex_box_vectors", None) or getattr(conf, "complex_box_size", None)
+        if box is None:
+            raise ValueError(
+                "complex_box_size (or complex_box_vectors) must be provided when "
+                "membrane_system is set"
+            )
+        box_vectors = box_vectors_matrix(box) * offunit.nanometer
 
         prot = openfe.ProteinMembraneComponent.from_pdb_file(
-            str(conf.protein_pdb),
+            protein_pdb_path,
             box_vectors=box_vectors,
         )
     else:
-        prot = openfe.ProteinComponent.from_pdb_file(str(conf.protein_pdb))
+        prot = openfe.ProteinComponent.from_pdb_file(protein_pdb_path)
 
-    if conf.cofactor_sdf is not None:
+    if template_cofactors is not None:
+        cofactors = template_cofactors
+    elif conf.cofactor_sdf is not None:
         cofactors = load_cofactor(str(conf.cofactor_sdf))
         print(f"There are {len(cofactors)} cofactor molecule(s)")
-        cofactors = ensure_partial_charges(
-            cofactors,
-            molecule_kind="cofactor",
-            method=charge_settings.partial_charge_method,
-            toolkit_backend=charge_settings.off_toolkit_backend,
-            generate_n_conformers=charge_settings.number_of_conformers,
-            nagl_model=charge_settings.nagl_model,
-            processors=4,
-        )
+        if not skip_charge:
+            cofactors = ensure_partial_charges(
+                cofactors,
+                molecule_kind="cofactor",
+                method=charge_settings.partial_charge_method,
+                toolkit_backend=charge_settings.off_toolkit_backend,
+                generate_n_conformers=charge_settings.number_of_conformers,
+                nagl_model=charge_settings.nagl_model,
+                processors=4,
+            )
+            # Identical (graph-isomorphic) cofactor copies must carry identical partial
+            # charges — otherwise OpenFE rejects them ("isomorphic but with different
+            # charges"), and physically the same molecule should have the same charges.
+            cofactors = harmonize_isomorphic_charges(cofactors, molecule_kind="cofactor")
     else:
         cofactors = None
 

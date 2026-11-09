@@ -100,6 +100,7 @@ class OpenMMModelingPage(QTabWidget):
             ("Validate", lambda: self._cli(writer, step, "validate", status)),
             ("Run (local)", lambda: self._cli(writer, step, "run", status)),
             ("Write SLURM", lambda: self._write_slurm(writer, step, status)),
+            ("Submit (sbatch)", lambda: self._submit_slurm(writer, step, status)),
         ]:
             btn = action_button(label)
             btn.clicked.connect(slot)
@@ -142,11 +143,20 @@ class OpenMMModelingPage(QTabWidget):
         step = self._resolve_step(step)
         path = self._write_config(writer, step, status)
         if not path:
-            return
+            return None
         script = slurm_script(step, path, self._hpc())
         script_path = Path(path).expanduser().with_suffix(".slurm")
         script_path.write_text(script, encoding="utf-8")
         status.setText(f"Wrote SLURM script: {script_path}  (sbatch {script_path})")
+        return str(script_path)
+
+    def _submit_slurm(self, writer, step, status: QLabel):
+        step = self._resolve_step(step)
+        script_path = self._write_slurm(writer, step, status)
+        if not script_path or self._console is None:
+            return
+        job_dir = str(Path(script_path).parent)
+        self._console.run_program("sbatch", [Path(script_path).name], cwd=job_dir)
 
     # -- 1 · System build --------------------------------------------------
     def _build_tab(self):
@@ -467,7 +477,24 @@ class OpenMMModelingPage(QTabWidget):
         self.cfg_md = PathField("md.yaml", mode="save", save_filter="YAML (*.yaml *.yml)")
         self.cfg_md.setText("openmm_md.yaml")
 
+        self.workdir = PathField("base dir — each step's files go to <workdir>/<jobname>/",
+                                 mode="directory")
+        self.workdir.setText(".")
+        self.jobname = QLineEdit("md")
+        self.jobname.setToolTip("Project folder name. Each step's config and SLURM script "
+                                "are written under <workdir>/<jobname>/.")
+
         self.partition = QLineEdit("gpu")
+        self.hpc_preset = QComboBox()
+        try:
+            from chemflow.desktop.openfe_rbfe_config import single_gpu_preset_names
+            _preset_names = single_gpu_preset_names()
+        except Exception:
+            _preset_names = []
+        self.hpc_preset.addItems(["(custom)", *_preset_names])
+        self.hpc_preset.setToolTip("Pick a preset from env/hpc.yaml (e.g. singlenode-singlegpu-long) "
+                                   "to fill the SLURM fields below; '(custom)' keeps your own values.")
+        self.hpc_preset.currentTextChanged.connect(self._apply_hpc_preset)
         self.cpus = _spin(8, 1, 128)
         self.gpus = _spin(1, 0, 16)
         self.gpu_type = QComboBox()
@@ -485,10 +512,13 @@ class OpenMMModelingPage(QTabWidget):
 
         form = QWidget()
         f = QFormLayout(form)
-        for label, w in [("Soluble config:", self.cfg_soluble),
+        for label, w in [("Work dir (base):", self.workdir),
+                         ("Job name:", self.jobname),
+                         ("Soluble config:", self.cfg_soluble),
                          ("Membrane config:", self.cfg_membrane),
                          ("Relax config:", self.cfg_relax),
                          ("MD config:", self.cfg_md),
+                         ("HPC preset:", self.hpc_preset),
                          ("SLURM partition:", self.partition),
                          ("CPUs per task:", self.cpus), ("GPUs:", self.gpus),
                          ("GPU type (--gres):", self.gpu_type),
@@ -503,16 +533,46 @@ class OpenMMModelingPage(QTabWidget):
         layout.addWidget(PageHeader("OpenMM Modeling", "4 · Job settings (HPC)",
                                     "Where each step's config is written, and the SLURM parameters "
                                     "for the Write-SLURM buttons on each tab."))
-        layout.addWidget(form)
+        from chemflow.desktop.openfe_rbfe_config import HPC_JOB_HELP_HTML
+        from chemflow.desktop.widgets.forms import with_help
+        layout.addWidget(with_help(form, HPC_JOB_HELP_HTML))
         layout.addStretch()
         return page
+
+    def _root(self) -> str:
+        """Project folder: <workdir>/<jobname>."""
+        base = self.workdir.text().strip() or "."
+        job = self.jobname.text().strip() or "md"
+        return str(Path(base) / job)
 
     def _config_path(self, step: str):
         field = {
             "soluble": self.cfg_soluble, "membrane": self.cfg_membrane,
             "relax": self.cfg_relax, "md": self.cfg_md,
         }[step]
-        return field.text() or None
+        name = field.text()
+        if not name:
+            return None
+        # Each step's config (and its .slurm) lives in the project folder.
+        return str((Path(self._root()) / Path(name).name).expanduser().resolve())
+
+    def _apply_hpc_preset(self, name: str) -> None:
+        """Fill the SLURM fields from a named env/hpc.yaml preset ('(custom)' = no-op)."""
+        if not name or name == "(custom)":
+            return
+        try:
+            from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset
+            merged = apply_slurm_preset(self._hpc(), name)
+        except Exception:
+            return
+        self.partition.setText(str(merged.get("partition", "gpu")))
+        self.cpus.setValue(int(merged.get("cpus_per_task", 8) or 8))
+        self.gpus.setValue(int(merged.get("gpus", 1) or 0))
+        self.gpu_type.setCurrentText(str(merged.get("gpu_type", "") or ""))
+        self.memory.setText(str(merged.get("memory", "32G")))
+        self.walltime.setText(str(merged.get("walltime", "48:00:00")))
+        if merged.get("conda_environment"):
+            self.conda_env.setText(str(merged["conda_environment"]))
 
     def _hpc(self) -> dict:
         return {

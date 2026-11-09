@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -167,3 +168,44 @@ def action_button(text: str) -> QPushButton:
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     button.setMinimumHeight(39)
     return button
+
+
+def with_help(body: QWidget, help_html: str, *, button_text: str = "Explain settings",
+              width: int = 360) -> QWidget:
+    """Return ``body`` with a toggleable right-side help panel.
+
+    A small button at the top toggles a read-only ``QTextBrowser`` (rendered from
+    ``help_html``) docked to the right, so clicking it shows an in-app explanation
+    of the settings without leaving the page.
+    """
+    container = QWidget()
+    outer = QVBoxLayout(container)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(8)
+
+    bar = QHBoxLayout()
+    bar.addStretch()
+    toggle = QPushButton("❔ " + button_text)
+    toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+    toggle.setCheckable(True)
+    bar.addWidget(toggle)
+    outer.addLayout(bar)
+
+    split = QHBoxLayout()
+    split.setContentsMargins(0, 0, 0, 0)
+    split.addWidget(body, 1)
+    panel = QTextBrowser()
+    panel.setOpenExternalLinks(True)
+    panel.setHtml(help_html)
+    panel.setFixedWidth(width)
+    panel.setVisible(False)
+    split.addWidget(panel)
+    outer.addLayout(split)
+
+    def _toggle(on: bool) -> None:
+        panel.setVisible(on)
+        toggle.setText(("✕ Hide help" if on else "❔ " + button_text))
+
+    toggle.toggled.connect(_toggle)
+    return container
+

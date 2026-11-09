@@ -23,6 +23,11 @@ from pathlib import Path
 
 _DEFAULT_ENV = "alchemfold"
 _PACKAGES = ("boltz", "chai_lab")
+# Conda deps that must match env/environment-alchemfold.yaml so the CLI/desktop
+# one-click build the SAME env as `conda env create -f env/environment-alchemfold.yaml`.
+_CONDA_EXTRAS = ("pyyaml", "rdkit>=2024.03", "setuptools>=80", "wheel")
+# GNU C++ runtime for enterprise-Linux clusters (Linux-only on conda-forge).
+_LINUX_RUNTIME = ("libgcc-ng>=12", "libstdcxx-ng>=12")
 
 
 def _conda_tool(prefer_mamba: bool = True) -> str | None:
@@ -50,22 +55,28 @@ def _repo_root() -> Path:
 
 def install_commands(env: str, repo: str, *, tool: str, channel: str = "conda-forge",
                      python_version: str = "3.11", packages: tuple[str, ...] = _PACKAGES,
+                     conda_extras: tuple[str, ...] = _CONDA_EXTRAS,
                      torch_index: str | None = None, exists: bool = False) -> list[list[str]]:
     """Commands that build + link the AlchemFold env (pure, for testing).
 
-    1. create the base env (just Python) — or reuse an existing one (``exists``);
+    1. create the base env (Python + conda deps that mirror
+       env/environment-alchemfold.yaml) — or reuse an existing one (``exists``);
     2. pip-install Boltz-2 + Chai-1 (optionally from a CUDA Torch index URL);
-    3. pip-install chemflow editable (``--no-deps``).
+    3. pip-install chemflow editable (``--no-deps --no-build-isolation``).
     """
     commands: list[list[str]] = []
     if not exists:
         commands.append([tool, "create", "-y", "-n", env, "-c", channel,
-                         f"python={python_version}"])
+                         f"python={python_version}", *conda_extras])
+    elif conda_extras:
+        # updating an existing env: make sure the conda deps are present too
+        commands.append([tool, "install", "-y", "-n", env, "-c", channel, *conda_extras])
     pip_pkgs = [tool, "run", "-n", env, "pip", "install", *packages]
     if torch_index:
         pip_pkgs += ["--extra-index-url", torch_index]
     commands.append(pip_pkgs)
-    commands.append([tool, "run", "-n", env, "pip", "install", "-e", repo, "--no-deps"])
+    commands.append([tool, "run", "-n", env, "pip", "install", "-e", repo,
+                     "--no-deps", "--no-build-isolation"])
     return commands
 
 
@@ -97,6 +108,7 @@ def _install(args) -> int:
 
     commands = preamble + install_commands(
         args.env, repo, tool=tool, channel=args.channel, python_version=args.python_version,
+        conda_extras=_CONDA_EXTRAS + (_LINUX_RUNTIME if sys.platform == "linux" else ()),
         torch_index=torch_index, exists=exists)
     for command in commands:
         print("$ " + " ".join(command))

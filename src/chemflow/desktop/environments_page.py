@@ -48,9 +48,11 @@ ENVIRONMENTS = [
         "stack; set GPU for a CUDA build.",
         default_env="alchemfold", gpu=True, recreate=True),
     _EnvSpec(
-        "rosetta-env", "PyRosetta — PROTAC docking",
-        "PyRosetta for PROTAC ternary docking and KIC loop building.",
-        default_env="pyrosetta", gpu=False, recreate=False, status_env=False),
+        "rosetta-env", "Rosetta — PROTAC docking",
+        "Classic Rosetta C++ apps (rosetta_scripts, docking_protocol, molfile_to_params) "
+        "AND PyRosetta, from the RosettaCommons conda channel — one-click, no license tarball. "
+        "Used for PROTAC ternary docking and KIC loop building.",
+        default_env="rosetta", gpu=False, recreate=False, status_env=False),
     _EnvSpec(
         "reinvent-env", "REINVENT4 — generative design",
         "REINVENT4 for generative molecule / linker design.",

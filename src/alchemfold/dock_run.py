@@ -16,18 +16,25 @@ from types import SimpleNamespace
 
 from alchemfold.dock_config import load_config, load_ligands_from_file, validate_config
 from alchemfold.engines import get_engine
+from alchemfold._exec import resolve_command
 
 
 def _run_one(engine, conf, workdir: Path, *, dry_run: bool) -> int:
+    import os
+
     inputs, out_dir = engine.write_inputs(conf, workdir)
-    command = engine.build_command(conf, inputs, out_dir)
+    command = resolve_command(engine.build_command(conf, inputs, out_dir))
+    env = os.environ.copy()
+    if hasattr(engine, "build_env"):
+        extra = engine.build_env(conf) or {}
+        env.update({str(k): str(v) for k, v in extra.items()})
     if dry_run:
         print(" ".join(shlex.quote(part) for part in command))
         return 0
     for label, path in inputs.items():
         print(f"  {label}: {path}")
     print(f"Running: {' '.join(shlex.quote(p) for p in command)}")
-    result = subprocess.run(command, check=False)
+    result = subprocess.run(command, check=False, env=env)
     if result.returncode == 0:
         print(f"  -> predictions in: {out_dir}")
     return result.returncode

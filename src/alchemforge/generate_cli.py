@@ -306,9 +306,10 @@ cofactor_sdf: null
 restart_json: null
 
 # --- Output ---
-workdir: work/__PROJECT__
-result_dir: work/__PROJECT__/results
-json_dir: work/__PROJECT__/json
+workdir: .                         # base dir; the project lives at <workdir>/<jobname>/
+jobname: __PROJECT__               # project folder name (holds inputs/, json/, results/, this config)
+result_dir: __PROJECT__/results
+json_dir: __PROJECT__/json
 
 # --- Platform ---
 platform: CUDA              # CPU | CUDA | OpenCL
@@ -331,6 +332,7 @@ hydrogen_mass: 3.0
 # --- Partial charges ---
 off_toolkit_backend: ambertools   # openeye | rdkit | ambertools
 partial_charge_method: am1bcc     # am1bcc | nagl
+skip_charge_assignment: false     # true = use charges already in the SDFs (skip the slow charge check/gen)
 
 # --- Alchemical settings ---
 disable_alchemical_dispersion_correction: false
@@ -396,6 +398,25 @@ surface_tension: 0.0
 # --- Mapper / planner ---
 mapper: KartografAtomMapper   # LomapAtomMapper | KartografAtomMapper
 planner: minimal_spanning     # minimal_spanning | minimal_redundant | radial
+
+# --- HPC resources (inline; used to write the SLURM array submit script) ---
+slurm:
+  partition: gpu
+  account: ""                 # SBATCH --account (blank -> omitted)
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 16
+  gpus: 1
+  gpu_type: ""                # e.g. a100 -> --gres=gpu:a100:1 (blank -> gpu:1)
+  memory: 32G
+  walltime: "240:00:00"
+  replicates: 3               # repeats per transformation (array = N_json * replicates)
+  array: ""                   # blank -> auto 0-(N_json*replicates - 1)
+  mpi: false                  # multi-GPU: parallelize lambda windows across GPUs (auto-on if gpus>1)
+  mpi_launcher: srun          # srun (SLURM) or e.g. "mpirun -np N"
+  modules: ""                 # e.g. "cuda/12.1 gcc/11"
+  conda_init: ""              # line to source, e.g. ~/miniconda3/etc/profile.d/conda.sh
+  conda_environment: alchemforge
 """
 
 
@@ -407,10 +428,19 @@ ligand_sdf: ligands.sdf
 protein_pdb: protein.pdb
 cofactor_sdf: null
 
+# Cofactor-from-template (optional; avoids the isomorphic-charge error for repeated
+# cofactor copies): define the cofactor ONCE as a charged template SDF (with H) and
+# place it on every matching residue in protein_pdb — all copies then share identical
+# charges. When set, cofactor_sdf is ignored and the listed residues are stripped
+# from protein_pdb before protein parameterization.
+# cofactor_template_sdf: cofactor_template.sdf
+# cofactor_resnames: [4DY]
+
 # --- Output ---
-workdir: work/__PROJECT__
-result_dir: work/__PROJECT__/results
-json_dir: work/__PROJECT__/json
+workdir: .                         # base dir; the project lives at <workdir>/<jobname>/
+jobname: __PROJECT__               # project folder name (holds inputs/, json/, results/, this config)
+result_dir: __PROJECT__/results
+json_dir: __PROJECT__/json
 
 # Which transformation JSONs to execute (used by `run`):
 #   null      -> every JSON in json_dir
@@ -447,6 +477,7 @@ hydrogen_mass: 3.0
 # --- Partial charges ---
 off_toolkit_backend: ambertools   # openeye | rdkit | ambertools
 partial_charge_method: am1bcc     # am1bcc | nagl
+skip_charge_assignment: false     # true = use charges already in the SDFs (skip the slow charge check/gen)
 
 # --- Alchemical settings ---
 endstate_dispersion_correction: false
@@ -482,6 +513,27 @@ surface_tension: 300.0     # bar*nm (membrane only)
 # --- Mapper / planner ---
 mapper: KartografAtomMapper   # LomapAtomMapper | KartografAtomMapper
 planner: minimal_redundant    # minimal_spanning | minimal_redundant | radial
+
+# --- HPC resources (inline; used to write the SLURM array submit script) ---
+# Edit these to change the allocation; `generate`/desktop read this block to build
+# the .slurm script (one array task per transformation JSON x replicate).
+slurm:
+  partition: gpu
+  account: ""                 # SBATCH --account (blank -> omitted)
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 16
+  gpus: 1
+  gpu_type: ""                # e.g. a100 -> --gres=gpu:a100:1 (blank -> gpu:1)
+  memory: 32G
+  walltime: "240:00:00"
+  replicates: 3               # repeats per transformation (array = N_json * replicates)
+  array: ""                   # blank -> auto 0-(N_json*replicates - 1)
+  mpi: false                  # multi-GPU: parallelize lambda windows across GPUs (auto-on if gpus>1)
+  mpi_launcher: srun          # srun (SLURM) or e.g. "mpirun -np N"
+  modules: ""                 # e.g. "cuda/12.1 gcc/11"
+  conda_init: ""              # line to source, e.g. ~/miniconda3/etc/profile.d/conda.sh
+  conda_environment: alchemforge
 """
 
 
@@ -497,9 +549,10 @@ restart_json: null
 name: abfe_my_ligand        # transformation name (output JSON basename)
 
 # --- Output ---
-workdir: work/__PROJECT__
-result_dir: work/__PROJECT__/results
-json_dir: work/__PROJECT__/json
+workdir: .                         # base dir; the project lives at <workdir>/<jobname>/
+jobname: __PROJECT__               # project folder name (holds inputs/, json/, results/, this config)
+result_dir: __PROJECT__/results
+json_dir: __PROJECT__/json
 
 # --- Platform ---
 platform: CUDA             # CPU | CUDA | OpenCL
@@ -523,6 +576,7 @@ hydrogen_mass: 3.0
 # --- Partial charges ---
 off_toolkit_backend: ambertools   # openeye | rdkit | ambertools
 partial_charge_method: am1bcc     # am1bcc | nagl
+skip_charge_assignment: false     # true = use charges already in the SDFs (skip the slow charge check/gen)
 
 # --- Alchemical settings ---
 disable_alchemical_dispersion_correction: false
@@ -542,13 +596,13 @@ solvent_restraint_spring_constant: 1000.0   # kJ/mol/nm^2
 
 # --- Equilibration settings ---
 complex_equil_mini_steps: 5000
-complex_equil_equil_length: 0.1        # nanosecond
-complex_equil_equil_length_nvt: 0.1    # nanosecond
-complex_equil_production_length: 2.0   # nanosecond
+complex_equil_equil_length: 1.0        # nanosecond
+complex_equil_equil_length_nvt: 1.0    # nanosecond
+complex_equil_production_length: 2.0   # nanosecond (NPT production equilibration)
 solvent_equil_mini_steps: 5000
-solvent_equil_equil_length: 0.1        # nanosecond
-solvent_equil_equil_length_nvt: 0.1    # nanosecond
-solvent_equil_production_length: 2.0   # nanosecond
+solvent_equil_equil_length: 1.0        # nanosecond
+solvent_equil_equil_length_nvt: 1.0    # nanosecond
+solvent_equil_production_length: 2.0   # nanosecond (NPT production equilibration)
 
 # --- Solvation ---
 complex_solvation_padding: 1.5    # nanometer (non-membrane)
@@ -559,10 +613,10 @@ solvent_model: tip3p
 early_termination_target_error: 0.0   # kcal/mol
 complex_sim_mini_step: 5000
 complex_sim_equil_length: 1.0         # nanosecond
-complex_sim_prod_length: 20.0         # nanosecond
+complex_sim_prod_length: 10.0         # nanosecond
 solvent_sim_mini_step: 5000
-solvent_sim_equil_length: 5.0         # nanosecond
-solvent_sim_prod_length: 30.0         # nanosecond
+solvent_sim_equil_length: 1.0         # nanosecond
+solvent_sim_prod_length: 10.0         # nanosecond
 
 # --- Lambda schedules (each leg's elec/vdw/restraints lists must share one length) ---
 complex_lambda_elec: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
@@ -577,6 +631,25 @@ complex_timestep: 4.0      # femtosecond
 solvent_timestep: 4.0      # femtosecond
 barostat_frequency: 25.0
 surface_tension: 300.0     # bar*nm (membrane only)
+
+# --- HPC resources (inline; used to write the SLURM array submit script) ---
+slurm:
+  partition: gpu
+  account: ""                 # SBATCH --account (blank -> omitted)
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 16
+  gpus: 1
+  gpu_type: ""                # e.g. a100 -> --gres=gpu:a100:1 (blank -> gpu:1)
+  memory: 32G
+  walltime: "240:00:00"
+  replicates: 3               # repeats per transformation (array = N_json * replicates)
+  array: ""                   # blank -> auto 0-(N_json*replicates - 1)
+  mpi: false                  # multi-GPU: parallelize lambda windows across GPUs (auto-on if gpus>1)
+  mpi_launcher: srun          # srun (SLURM) or e.g. "mpirun -np N"
+  modules: ""                 # e.g. "cuda/12.1 gcc/11"
+  conda_init: ""              # line to source, e.g. ~/miniconda3/etc/profile.d/conda.sh
+  conda_environment: alchemforge
 """
 
 
@@ -775,6 +848,31 @@ _ENGINE_CHOICES = tuple(_ENGINES)
 _ALIASES = {"resfep": "res_rbfe", "res-fep": "res_rbfe", "abfe-gromacs": "abfe"}
 
 
+def _overlay_toml_slurm(text: str, merged: dict) -> str:
+    """Overlay resolved preset values onto a TOML ``[slurm]`` table (active keys only).
+
+    Replaces the value of each active (non-commented) ``key = ...`` assignment for
+    the keys present in ``merged``; commented lines and other tables are untouched.
+    """
+    import re
+
+    str_keys = {"walltime", "memory", "partition", "account", "conda_environment"}
+    int_keys = {"nodes", "ntasks", "cpus_per_task", "gpus"}
+    for key in ("partition", "nodes", "cpus_per_task", "gpus", "memory", "walltime"):
+        if key not in merged or merged[key] in (None, ""):
+            continue
+        value = merged[key]
+        if key in str_keys:
+            rendered = f'"{value}"'
+        elif key in int_keys:
+            rendered = str(int(value))
+        else:
+            rendered = str(value)
+        pattern = re.compile(rf"^(\s*){key}\s*=\s*.*$", re.MULTILINE)
+        text = pattern.sub(rf"\g<1>{key} = {rendered}", text, count=1)
+    return text
+
+
 def _generate(args: argparse.Namespace) -> int:
     engine = args.engine
     workflow = _ALIASES.get(args.generate_workflow, args.generate_workflow)
@@ -791,23 +889,63 @@ def _generate(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / f"{project}.{ext}"
     sh_path = output_dir / f"{project}.sh"
+    # OpenFE workflows also get an example SLURM array script next to the config.
+    slurm_path = output_dir / f"{project}.slurm" if engine == "openfe" else None
 
-    for path in (config_path, sh_path):
+    check_paths = [config_path, sh_path] + ([slurm_path] if slurm_path else [])
+    for path in check_paths:
         if path.exists() and not args.force:
             raise ValueError(f"{path} already exists (use --force to overwrite)")
 
     header = f"# engine = {engine}\n"
-    config_path.write_text(
-        header + text.replace("__PROJECT__", project), encoding="utf-8"
-    )
+    config_text = text.replace("__PROJECT__", project)
+    # OpenFE: an optional named HPC preset (e.g. singlenode-singlegpu-long) is
+    # overlaid onto the inline `slurm:` block so the config + .slurm both reflect it.
+    if engine == "openfe" and getattr(args, "hpc_preset", None):
+        import yaml  # noqa: PLC0415
+
+        from chemflow.desktop.openfe_rbfe_config import (  # noqa: PLC0415
+            apply_slurm_preset, format_slurm_block,
+        )
+        conf_full = yaml.safe_load(config_text) or {}
+        slurm = apply_slurm_preset(conf_full.get("slurm") or {}, args.hpc_preset)
+        if "\nslurm:" in config_text:
+            config_text = config_text.split("\nslurm:")[0].rstrip() + "\n\n"
+        config_text += (
+            f"# --- HPC resources (preset: {args.hpc_preset}) ---\n"
+            + format_slurm_block(slurm)
+        )
+    # GROMACS: overlay the preset onto the TOML [slurm] table (active keys only).
+    elif engine == "gromacs" and getattr(args, "hpc_preset", None):
+        from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset  # noqa: PLC0415
+
+        merged = apply_slurm_preset({}, args.hpc_preset)
+        config_text = _overlay_toml_slurm(config_text, merged)
+    config_path.write_text(header + config_text, encoding="utf-8")
     sh_text = driver_fn(engine, command, submit_hint, ext).replace(
         "__PROJECT__", project
     )
     sh_path.write_text(sh_text, encoding="utf-8")
     sh_path.chmod(sh_path.stat().st_mode | 0o100)
 
+    # Example SLURM array script for the OpenFE workflows (one task per
+    # transformation JSON x replicate). The --array starts as a 0-0 placeholder;
+    # it auto-sizes when written after create_json, and the script guards at run
+    # time, so edit --array (= transformations x replicates) before sbatch.
+    if slurm_path is not None:
+        import yaml  # noqa: PLC0415
+
+        from chemflow.desktop.openfe_rbfe_config import slurm_script  # noqa: PLC0415
+
+        conf = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        # Resources come from the inline `slurm:` block in the config (edit it there,
+        # or pass --hpc-preset to seed it from env/hpc.yaml).
+        slurm_path.write_text(slurm_script(config_path, None, conf), encoding="utf-8")
+
     print(f"Wrote {config_path}  (engine: {engine})")
     print(f"Wrote {sh_path}")
+    if slurm_path is not None:
+        print(f"Wrote {slurm_path}  (set --array after create_json, then: sbatch {slurm_path.name})")
     print(f"Next: edit {config_path.name}, then run  bash {sh_path.name}")
     return 0
 
@@ -866,6 +1004,12 @@ def add_generate_parser(
         )
         step.add_argument(
             "--force", action="store_true", help="Overwrite existing files"
+        )
+        step.add_argument(
+            "--hpc-preset",
+            default=None,
+            help="OpenFE only: overlay a named HPC preset from env/hpc.yaml "
+                 "(e.g. singlenode-singlegpu-long) onto the config's inline slurm: block.",
         )
         step.set_defaults(func=_generate)
     return parser

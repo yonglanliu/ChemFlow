@@ -110,17 +110,43 @@ class ProcessConsole(QWidget):
 
         self.run_module("chemflow.cli.main", arguments, python=find_rosetta_python())
 
-    def run_module(self, module: str, arguments: list[str], *, python: str | None = None) -> None:
+    def run_alchemfold(self, arguments: list[str], *, cwd: str | None = None) -> None:
+        """Run the ``alchemfold`` CLI through the AlchemFold env's interpreter.
+
+        Boltz-2 / Chai-1 co-folding & screening live in the dedicated ``alchemfold``
+        conda env; resolve that interpreter (or fall back to the current one).
+        ``cwd`` sets the working directory so outputs land next to the config.
+        """
+        from chemflow.desktop.alchemfold_env import find_alchemfold_python
+
+        self.run_module("alchemfold", arguments, python=find_alchemfold_python(), cwd=cwd)
+
+    def run_module(self, module: str, arguments: list[str], *, python: str | None = None,
+                   cwd: str | None = None) -> None:
         """Run ``python -m <module> <arguments>`` (defaults to this interpreter)."""
         if self.process.state() != QProcess.ProcessState.NotRunning:
             raise RuntimeError("A ChemFlow task is already running.")
         interpreter = python or sys.executable
         command = ["-m", module, *arguments]
+        if cwd:
+            self.process.setWorkingDirectory(cwd)
         self.output.appendPlainText("\n$ " + shlex.join([interpreter, *command]))
         self.status.setText("Running")
         self.cancel.setEnabled(True)
         self.state_changed.emit(True)
         self.process.start(interpreter, command)
+
+    def run_program(self, program: str, arguments: list[str], *, cwd: str | None = None) -> None:
+        """Run an arbitrary external program (e.g. ``sbatch``), optionally in ``cwd``."""
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            raise RuntimeError("A ChemFlow task is already running.")
+        if cwd:
+            self.process.setWorkingDirectory(cwd)
+        self.output.appendPlainText("\n$ " + shlex.join([program, *arguments]))
+        self.status.setText("Running")
+        self.cancel.setEnabled(True)
+        self.state_changed.emit(True)
+        self.process.start(program, arguments)
 
     def _read_output(self) -> None:
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")

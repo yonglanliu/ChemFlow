@@ -36,6 +36,11 @@ DEFAULTS: dict[str, Any] = {
     "sampling_steps": 200,        # boltz only
     "output_format": "pdb",       # boltz pdb|mmcif (chai writes mmCIF)
     "override": False,
+    # Where the engines download model weights / CCD data. Default (None) uses
+    # each engine's own default under $HOME (boltz: ~/.boltz, chai: ~/.cache),
+    # which on HPC often hits the HOME disk quota. Point this at /data or scratch.
+    # Env fallback: CHEMFLOW_MODEL_CACHE (or CHEMFLOW_BOLTZ_CACHE / BOLTZ_CACHE).
+    "cache_dir": None,
     # --- Boltz-2 specific ---
     "boltz_command": "boltz",
     "predict_affinity": False,
@@ -70,24 +75,70 @@ DEFAULTS: dict[str, Any] = {
 
 
 def load_config(path: str | Path) -> SimpleNamespace:
-    """Load a docking YAML, merged over the defaults; resolve paths."""
+    """Load a docking YAML, merged over the defaults; resolve paths.
+
+    ``workdir: "."`` (the default) means the **current working directory** — all
+    outputs (``out_dir``, SLURM script, per-ligand folders) are written there, so
+    running from a project directory keeps results out of the code/config dir.
+    Input files (ligands, receptor, MSAs) still resolve relative to the config.
+    """
+    import os
+
     config_path = Path(path).expanduser().resolve()
     conf = _to_namespace(_deep_merge(DEFAULTS, _load_yaml(config_path)))
 
     base_dir = config_path.parent
     workdir = getattr(conf, "workdir", ".")
-    conf.workdir = str(base_dir) if (not workdir or str(workdir) == ".") else _resolve(base_dir, workdir)
+    if not workdir or str(workdir) == ".":
+        conf.workdir = os.getcwd()
+    else:
+        conf.workdir = _resolve(base_dir, workdir)
 
     for key in ("receptor_pdb", "diffdock_model_dir", "diffdock_config", "ligand_file"):
         value = getattr(conf, key, None)
         if value:
             setattr(conf, key, _resolve(base_dir, value))
 
+    # Model/CCD cache: expand ~ and make absolute (relative to cwd), so the engine
+    # downloads weights where there is room rather than under $HOME. If unset,
+    # fall back to a /data (or scratch) location — never the HOME quota.
+    cache = getattr(conf, "cache_dir", None) or default_cache_dir()
+    if cache:
+        conf.cache_dir = str(Path(cache).expanduser().absolute())
     for protein in getattr(conf, "proteins", []) or []:
         msa = getattr(protein, "msa", None)
         if msa and str(msa) not in {"empty", "server"}:
             protein.msa = _resolve(base_dir, msa)
     return conf
+
+
+def default_cache_dir() -> str | None:
+    """A non-HOME default for model/CCD weight downloads.
+
+    HPC HOME directories have small disk quotas, so weights must not land under
+    ``~``. Resolution order: ``CHEMFLOW_MODEL_CACHE`` / ``CHEMFLOW_BOLTZ_CACHE``
+    / ``BOLTZ_CACHE`` env vars, then ``<base>/<user>/.alchemfold_cache`` for the
+    first existing ``base`` in ``/data``, ``/scratch``, ``/gpfs/data``,
+    ``/vf/users``. Returns None only if none of those exist (e.g. a laptop),
+    letting the engine use its own default.
+    """
+    import getpass
+    import os
+
+    for var in ("CHEMFLOW_MODEL_CACHE", "CHEMFLOW_BOLTZ_CACHE", "BOLTZ_CACHE"):
+        value = os.environ.get(var)
+        if value:
+            return str(Path(value).expanduser())
+    try:
+        user = os.environ.get("USER") or getpass.getuser()
+    except Exception:
+        user = None
+    if user:
+        for base in ("/data", "/scratch", "/gpfs/data", "/vf/users"):
+            candidate = Path(base) / user
+            if candidate.is_dir():
+                return str(candidate / ".alchemfold_cache")
+    return None
 
 
 def _chain_ids(conf) -> set[str]:
@@ -155,6 +206,9 @@ def load_ligands_from_file(path: str | Path, fmt: str = "auto") -> list[dict]:
       * SMILES (``.smi`` / ``.txt``): one ``SMILES [name]`` per line.
       * CXSMILES (``.cxsmiles``): ``SMILES[ |cx-extensions|] [id]``, tab- or
         space-separated (e.g. Enamine REAL). ``#`` comment lines are ignored.
+      * SDF (``.sdf``): parsed with RDKit; each record's title (``_Name``) is the
+        id and the molecule is canonicalized to SMILES. Needs ``rdkit`` installed
+        (present in the ``alchemfold`` env).
     """
     path = Path(path)
     text = _read_library_text(path)
@@ -165,11 +219,32 @@ def load_ligands_from_file(path: str | Path, fmt: str = "auto") -> list[dict]:
             fmt = "csv"
         elif inner == ".cxsmiles":
             fmt = "cxsmiles"
+        elif inner == ".sdf":
+            fmt = "sdf"
         else:
             fmt = "smiles"
 
     parsed: list[dict] = []
-    if fmt == "csv":
+    if fmt == "sdf":
+        import io as _io
+
+        try:
+            from rdkit import Chem  # type: ignore
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise ValueError(
+                "reading an .sdf ligand file needs RDKit; install it in the "
+                "'alchemfold' env (conda install -c conda-forge rdkit)"
+            ) from exc
+        supplier = Chem.ForwardSDMolSupplier(_io.BytesIO(text.encode("utf-8")))
+        for n, mol in enumerate(supplier, start=1):
+            if mol is None:
+                continue
+            raw_name = mol.GetProp("_Name").strip() if mol.HasProp("_Name") else ""
+            smiles = Chem.MolToSmiles(mol)
+            if not smiles:
+                continue
+            parsed.append({"id": _sanitize_id(raw_name, f"lig{n}"), "smiles": smiles})
+    elif fmt == "csv":
         import csv as _csv
         import io
 
@@ -340,6 +415,105 @@ def stage(config_path: str | Path, task_directory: str | Path) -> tuple[Path, Pa
     return runner, config_path
 
 
+# Named HPC presets, selectable GPU types and SLURM resources are user-
+# customizable via a YAML file (see :mod:`alchemfold.hpc_config`). Presets may be
+# single-node single-GPU (a plain walltime string) or multi-node / multi-GPU (a
+# mapping). These imports resolve the current file contents.
+from alchemfold.hpc_config import (  # noqa: E402
+    DEFAULT_PARTITION,
+    default_preset as _default_preset,
+    gpu_types as _gpu_types,
+    preset_resources as _preset_resources,
+    presets as _presets,
+    resource_defaults as _resource_defaults,
+)
+
+
+def stage_slurm(
+    config_path: str | Path,
+    task_directory: str | Path,
+    *,
+    preset: str | None = None,
+    partition: str | None = None,
+    account: str | None = None,
+    gpu_type: str | None = None,
+    cpus_per_task: int | None = None,
+    mem: str | None = None,
+    conda_env: str | None = None,
+) -> tuple[Path, Path]:
+    """Write a SLURM submit script for one docking run.
+
+    Resources come from the chosen ``preset`` (resolved via the customizable HPC
+    config, :mod:`alchemfold.hpc_config`), which may be single-node single-GPU (a
+    plain walltime string) or multi-node / multi-GPU (a mapping of
+    ``time/nodes/ntasks_per_node/gpus_per_node/gpu_type/cpus_per_task/mem``).
+    Any non-None argument overrides the preset/defaults. Returns
+    ``(slurm_script, config_path)``.
+
+    Note: AI co-folding (Boltz-2/Chai-1) is single-GPU inference, so multi-node
+    presets do not speed up one docking run — they exist for cluster policies and
+    for users who deliberately want them.
+    """
+    preset = preset or _default_preset()
+    try:
+        res = _preset_resources(preset)
+    except KeyError:
+        raise ValueError(
+            f"unknown HPC preset {preset!r}; choose one of {sorted(_presets())}"
+        )
+    # Explicit args override the preset/defaults.
+    partition = partition if partition is not None else res["partition"]
+    account = account if account is not None else res["account"]
+    gpu_type = gpu_type if gpu_type is not None else res["gpu_type"]
+    cpus_per_task = cpus_per_task if cpus_per_task is not None else res["cpus_per_task"]
+    mem = mem if mem is not None else res["mem"]
+    conda_env = conda_env if conda_env is not None else res["conda_env"]
+    nodes = int(res["nodes"])
+    ntasks_per_node = int(res["ntasks_per_node"])
+    gpus_per_node = int(res["gpus_per_node"])
+    walltime = res["time"]
+
+    config_path = Path(config_path).expanduser().resolve()
+    task = Path(task_directory).expanduser().resolve()
+    task.mkdir(parents=True, exist_ok=True)
+    script = task / "run_docking.slurm"
+
+    gtype = str(gpu_type or "").strip()
+    gres = ""
+    if gpus_per_node > 0:
+        gres = f"#SBATCH --gres=gpu:{gtype + ':' if gtype else ''}{gpus_per_node}\n"
+    account_line = f"#SBATCH --account={account}\n" if str(account).strip() else ""
+    env = str(conda_env or "").strip()
+    activate = (
+        'source "$(conda info --base)/etc/profile.d/conda.sh"\n'
+        f"conda activate {env}\n"
+        if env
+        else ""
+    )
+    script.write_text(
+        "#!/bin/bash\n"
+        f"#SBATCH --job-name=alchemfold_dock\n"
+        f"#SBATCH --chdir={shlex.quote(str(task))}\n"
+        f"#SBATCH --partition={partition}\n"
+        f"{account_line}"
+        f"#SBATCH --nodes={nodes}\n"
+        f"#SBATCH --ntasks-per-node={ntasks_per_node}\n"
+        f"#SBATCH --cpus-per-task={int(cpus_per_task)}\n"
+        f"{gres}"
+        f"#SBATCH --mem={mem}\n"
+        f"#SBATCH --time={walltime}            # preset: {preset}\n"
+        "#SBATCH --output=dock_%j.out\n"
+        "set -euo pipefail\n"
+        "trap 'echo \"[FAILED] line $LINENO: $BASH_COMMAND (exit $?)\" >&2' ERR\n"
+        f"{activate}"
+        f'exec {shlex.quote(sys.executable)} -m alchemfold.dock_run '
+        f'--config {shlex.quote(str(config_path))}\n',
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | 0o100)
+    return script, config_path
+
+
 def default_yaml_text(
     *,
     engine: str = "boltz",
@@ -348,8 +522,20 @@ def default_yaml_text(
     sequence: str = "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
     smiles: str = "CCO",
     with_pocket: bool = False,
+    ligand_file: str | None = None,
+    ligand_file_format: str = "auto",
+    cache_dir: str | None = None,
+    diffusion_samples: int = 1,
+    recycling_steps: int = 3,
+    sampling_steps: int = 200,
+    use_msa_server: bool = True,
 ) -> str:
-    """Return a commented example docking config for the chosen engine."""
+    """Return a commented example docking config for the chosen engine.
+
+    If ``ligand_file`` is given, the config docks the ligand(s) from that file
+    (SMILES / .smi / .cxsmiles / CSV / .sdf) and the inline ligand is commented
+    out; otherwise a single inline ligand with ``smiles`` is used.
+    """
     affinity_block = (
         "predict_affinity: false         # Boltz-2 only; binding-affinity prediction\n"
         '# affinity_binder: "L"          # ligand id to score when predict_affinity: true\n'
@@ -370,6 +556,30 @@ def default_yaml_text(
             f"#     - {{chain: {protein_id}, residue: 123}}\n"
         )
     )
+    if ligand_file:
+        ligand_block = (
+            "# Dock the ligand(s) from an uploaded file (one run per entry, output\n"
+            "# under <workdir>/ligands/<id>/). Supports SMILES/.smi, .cxsmiles, CSV,\n"
+            "# and .sdf (plain or .bz2/.gz).\n"
+            f'ligand_file: "{ligand_file}"\n'
+            f'ligand_file_format: "{ligand_file_format}"   # auto | csv | smiles | cxsmiles | sdf\n'
+            "\n"
+            "# ligands:                      # (inline ligand disabled — using ligand_file)\n"
+            f'#   - id: "{ligand_id}"\n'
+            f'#     smiles: "{smiles}"\n'
+        )
+    else:
+        ligand_block = (
+            "ligands:\n"
+            f'  - id: "{ligand_id}"\n'
+            f'    smiles: "{smiles}"          # or use `ccd: "ATP"`\n'
+            "\n"
+            "# Dock a ligand FILE instead of the single ligand above — one run per\n"
+            "# entry, output under <workdir>/ligands/<id>/. SMILES/.smi, .cxsmiles,\n"
+            "# CSV ('smiles' column + optional 'name'), or .sdf; plain or .bz2/.gz:\n"
+            '# ligand_file: "library.cxsmiles.bz2"\n'
+            '# ligand_file_format: "auto"    # auto | csv | smiles | cxsmiles | sdf\n'
+        )
     return (
         "# ===================================================================\n"
         "# AlchemFold docking (co-folding). Jointly predict a receptor+ligand\n"
@@ -384,15 +594,21 @@ def default_yaml_text(
         f'engine: "{engine}"              # boltz | chai\n'
         'out_dir: "docking_output"\n'
         'output_format: "pdb"            # pdb | mmcif (Chai writes mmCIF)\n'
-        "use_msa_server: true            # compute MSAs via the model's server (needs internet)\n"
+        f"use_msa_server: {'true' if use_msa_server else 'false'}            "
+        "# compute MSAs via the model's server (needs internet; false on offline nodes)\n"
         "seed: 1\n"
         'accelerator: "gpu"              # gpu | cpu | tpu\n'
         "devices: 1\n"
-        "diffusion_samples: 1            # predicted poses\n"
-        "recycling_steps: 3\n"
-        "sampling_steps: 200             # Boltz only\n"
+        f"diffusion_samples: {int(diffusion_samples)}            # predicted poses (chai: --num-diffn-samples)\n"
+        f"recycling_steps: {int(recycling_steps)}               # chai: --num-trunk-recycles\n"
+        f"sampling_steps: {int(sampling_steps)}             # Boltz only\n"
         "override: false\n"
-        f"{affinity_block}"
+        + (f'cache_dir: "{cache_dir}"' + " " * max(1, 10 - len(str(cache_dir)))
+           + "# model/CCD weights cache (boltz --cache / chai downloads); avoid HOME quota\n"
+           if cache_dir else
+           '# cache_dir: "/data/$USER/.alchemfold_cache"  # model/CCD weights cache; '
+           "use /data or scratch, never HOME (disk quota)\n")
+        + f"{affinity_block}"
         'boltz_command: "boltz"          # used when engine: boltz\n'
         'chai_command: "chai-lab"        # used when engine: chai\n'
         "# --- DiffDock (engine: diffdock) docks into a receptor structure ---\n"
@@ -405,16 +621,7 @@ def default_yaml_text(
         f'  - id: "{protein_id}"\n'
         f'    sequence: "{sequence}"\n'
         "\n"
-        "ligands:\n"
-        f'  - id: "{ligand_id}"\n'
-        f'    smiles: "{smiles}"          # or use `ccd: "ATP"`\n'
-        "\n"
-        "# Screen a ligand LIBRARY instead of the single ligand above — one run per\n"
-        "# entry, output under <workdir>/ligands/<id>/. CSV ('smiles' column +\n"
-        "# optional 'name'), a .smi file, or a .cxsmiles file (e.g. Enamine REAL);\n"
-        "# plain or .bz2/.gz compressed:\n"
-        '# ligand_file: "library.cxsmiles.bz2"\n'
-        '# ligand_file_format: "auto"    # auto | csv | smiles | cxsmiles\n'
+        f"{ligand_block}"
         "\n"
         f"{pocket_block}"
     )

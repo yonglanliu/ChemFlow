@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from chemflow.desktop.env_locate import find_env_python
 
-_ROSETTA_ENV_NAMES = ("pyrosetta", "rosetta")
+_ROSETTA_ENV_NAMES = ("rosetta", "pyrosetta")
 _ROSETTA_ENV_VARS = ("CHEMFLOW_ROSETTA_PYTHON", "PYROSETTA_PYTHON")
 
 

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QScrollArea,
     QSpinBox,
     QTableWidget,
@@ -46,6 +47,7 @@ from chemflow.desktop.openfe_septop_config import (
     to_yaml,
     validate_setup,
 )
+from chemflow.desktop.openfe_rbfe_config import HPC_JOB_HELP_HTML
 from chemflow.desktop.widgets.forms import (  # noqa: F811
     NoScrollComboBox as QComboBox,
     NoScrollDoubleSpinBox as QDoubleSpinBox,
@@ -53,6 +55,7 @@ from chemflow.desktop.widgets.forms import (  # noqa: F811
     PageHeader,
     PathField,
     action_button,
+    with_help,
 )
 
 
@@ -133,6 +136,9 @@ class OpenFESeptopWorkflowPage(QTabWidget):
                                      save_filter="SDF (*.sdf)")
         self.overwrite_charges = QCheckBox("Overwrite existing partial charges")
         self.overwrite_charges.setChecked(True)
+        self.skip_charge = QCheckBox("Skip charge assignment (use stored SDF charges — faster)")
+        self.skip_charge.setToolTip("When the ligand/cofactor SDFs already carry partial charges, "
+                                    "skip the charge check/generation at Setup FEP (create_json).")
         self.smff = QLineEdit("openff-2.1.0")
         f.addRow("Ligand SDF:", self.ligand_sdf)
         f.addRow("Charge toolkit backend:", self.off_backend)
@@ -140,6 +146,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         f.addRow("Charging processes:", self.charge_cores)
         f.addRow("Charged SDF output:", self.charged_out)
         f.addRow("", self.overwrite_charges)
+        f.addRow("", self.skip_charge)
         f.addRow("Small-molecule force field:", self.smff)
 
         row = QHBoxLayout()
@@ -276,7 +283,13 @@ class OpenFESeptopWorkflowPage(QTabWidget):
                         "(writes ligand_network.graphml into the work dir).")
         plan.clicked.connect(self._plan_network)
         plan_row.addWidget(plan)
+        graph_btn = action_button("Show network graph")
+        graph_btn.setToolTip("Render the planned perturbation network")
+        graph_btn.clicked.connect(self._show_graph)
+        plan_row.addWidget(graph_btn)
         plan_row.addStretch()
+
+        self._graph_layout = QVBoxLayout()
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -291,6 +304,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         self.network_note.setObjectName("Muted")
         self.network_note.setWordWrap(True)
         layout.addWidget(self.network_note)
+        layout.addLayout(self._graph_layout)
         layout.addStretch()
         return page
 
@@ -307,6 +321,24 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         self.network_note.setText(f"Planning the network into {out_dir}… the graphml can be reused "
                                   "via 'Existing network'.")
 
+    def _show_graph(self) -> None:
+        bundle = self.network_graphml.text().strip()
+        bundle = str(Path(bundle).parent) if bundle else self._json_dir()
+        try:
+            from chemflow.fe.openfe.network_view import render_network_html
+            html = render_network_html(bundle)
+        except Exception as exc:
+            self.network_note.setText(f"Could not draw network: {exc}")
+            return
+        if not hasattr(self, "_graph_view"):
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+            self._graph_view = QWebEngineView()
+            self._graph_view.setMinimumHeight(360)
+            self._graph_layout.addWidget(self._graph_view)
+        from PySide6.QtCore import QUrl
+        self._graph_view.setHtml(html, QUrl("about:blank"))
+        self.network_note.setText("Network drawn.")
+
     # -- 3 · System --------------------------------------------------------
     def _system_tab(self):
         form = QWidget()
@@ -320,6 +352,15 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         self.box_vectors.setPlaceholderText("x, y, z  (nm, diagonal box)  — or 9 numbers for a full 3×3")
         self.box_vectors.setFixedHeight(64)
         self.box_vectors.setEnabled(False)
+        self.box_browse = QPushButton("Browse pbc.txt")
+        self.box_browse.setToolTip("Load a .txt file of box values (3 numbers x,y,z, or 9 for a full 3×3).")
+        self.box_browse.setEnabled(False)
+        self.box_browse.clicked.connect(self._browse_pbc)
+        box_cell = QWidget()
+        box_cell_layout = QVBoxLayout(box_cell)
+        box_cell_layout.setContentsMargins(0, 0, 0, 0)
+        box_cell_layout.addWidget(self.box_vectors)
+        box_cell_layout.addWidget(self.box_browse)
         self.box_shape = _combo(["dodecahedron", "cube", "octahedron"], "dodecahedron")
         self.complex_pad = _dspin(1.5, 0.5, 5.0, 0.1, 2)
         self.solvent_pad = _dspin(1.5, 0.5, 5.0, 0.1, 2)
@@ -333,7 +374,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         f.addRow("Charged ligands SDF:", self.system_ligand_sdf)
         f.addRow("Cofactor SDF:", self.cofactor_sdf)
         f.addRow("", self.membrane)
-        f.addRow("Complex box vectors (membrane):", self.box_vectors)
+        f.addRow("Complex box vectors (membrane):", box_cell)
         f.addRow("Box shape (soluble + solvent leg):", self.box_shape)
         f.addRow("Complex solvation padding (nm):", self.complex_pad)
         f.addRow("Solvent solvation padding (nm):", self.solvent_pad)
@@ -357,10 +398,42 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         layout.addStretch()
         return page
 
+    def _apply_hpc_preset(self, name: str) -> None:
+        """Fill the SLURM fields from a named env/hpc.yaml preset ('(custom)' = no-op)."""
+        if not name or name == "(custom)":
+            return
+        try:
+            from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset
+            merged = apply_slurm_preset(self._hpc(), name)
+        except Exception:
+            return
+        self.partition.setText(str(merged.get("partition", "gpu")))
+        self.nodes.setValue(int(merged.get("nodes", 1) or 1))
+        self.ntasks.setValue(int(merged.get("ntasks", 1) or 1))
+        self.cpus.setValue(int(merged.get("cpus_per_task", 16) or 16))
+        self.gpus.setValue(int(merged.get("gpus", 1) or 0))
+        self.gpu_type.setCurrentText(str(merged.get("gpu_type", "") or ""))
+        self.memory.setText(str(merged.get("memory", "32G")))
+        self.walltime.setText(str(merged.get("walltime", "240:00:00")))
+        if merged.get("conda_environment"):
+            self.conda_env.setText(str(merged["conda_environment"]))
+
     def _on_membrane_toggle(self, on: bool) -> None:
         self.box_vectors.setEnabled(on)
+        self.box_browse.setEnabled(on)
         self.box_shape.setEnabled(not on)
         self.complex_pad.setEnabled(not on)
+
+    def _browse_pbc(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose PBC file", "", "Text/PBC (*.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            self.box_vectors.setPlainText(Path(path).read_text(encoding="utf-8").strip())
+        except OSError:
+            pass
         self.pbc_note.setText(
             "Membrane system: set complex box vectors (nm) so the periodic box is valid. "
             "The solvent leg still uses the box shape + solvent padding."
@@ -575,13 +648,26 @@ class OpenFESeptopWorkflowPage(QTabWidget):
     def _job_tab(self):
         form = QWidget()
         f = QFormLayout(form)
-        self.config_path = PathField("septop.yaml", mode="save",
+        self.config_path = PathField("septop.yaml (written into <workdir>/<jobname>/)", mode="save",
                                      save_filter="YAML (*.yaml *.yml)")
         self.config_path.setText("septop.yaml")
-        self.workdir = PathField("work/septop (results/ and json/ are created inside it)",
+        self.workdir = PathField("base dir — project goes to <workdir>/<jobname>/",
                                  mode="directory")
-        self.workdir.setText("work/septop")
+        self.workdir.setText(".")
+        self.jobname = QLineEdit("septop")
+        self.jobname.setToolTip("Project folder name. The config, inputs/, json/ and "
+                                "results/ all live under <workdir>/<jobname>/.")
         self.partition = QLineEdit("gpu")
+        self.hpc_preset = QComboBox()
+        try:
+            from chemflow.desktop.openfe_rbfe_config import single_gpu_preset_names
+            _preset_names = single_gpu_preset_names()
+        except Exception:
+            _preset_names = []
+        self.hpc_preset.addItems(["(custom)", *_preset_names])
+        self.hpc_preset.setToolTip("Pick a preset from env/hpc.yaml (e.g. singlenode-singlegpu-long) "
+                                   "to fill the SLURM fields below; '(custom)' keeps your own values.")
+        self.hpc_preset.currentTextChanged.connect(self._apply_hpc_preset)
         self.nodes = _spin(1, 1, 64)
         self.ntasks = _spin(1, 1, 256)
         self.cpus = _spin(16, 1, 128)
@@ -604,8 +690,10 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         self.conda_init.setPlaceholderText("<conda-prefix>/etc/profile.d/conda.sh")
         self.conda_env = QLineEdit("")
         self.conda_env.setPlaceholderText("alchemforge")
-        for label, w in [("Config file to write:", self.config_path),
-                         ("Work dir:", self.workdir), ("SLURM partition:", self.partition),
+        for label, w in [("Config file name:", self.config_path),
+                         ("Work dir (base):", self.workdir), ("Job name:", self.jobname),
+                         ("HPC preset:", self.hpc_preset),
+                         ("SLURM partition:", self.partition),
                          ("Nodes:", self.nodes), ("Tasks:", self.ntasks),
                          ("CPUs per task:", self.cpus), ("GPUs:", self.gpus),
                          ("GPU type (--gres):", self.gpu_type),
@@ -618,7 +706,8 @@ class OpenFESeptopWorkflowPage(QTabWidget):
             f.addRow(label, w)
         return self._wrap(PageHeader("OpenFE SepTop", "6 · Job settings (HPC)",
                                      "Output locations and the SLURM parameters for submission. "
-                                     "results/ and json/ are created under the work dir."), form)
+                                     "results/ and json/ are created under the work dir."),
+                          with_help(form, HPC_JOB_HELP_HTML))
 
     # -- Execution ---------------------------------------------------------
     def _exec_tab(self):
@@ -632,6 +721,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
                             ("Validate", self._validate),
                             ("Generate JSON (create_json)", self._generate),
                             ("Write SLURM script", self._write_slurm),
+                            ("Submit (sbatch)", self._submit_slurm),
                             ("Submit (local)", self._submit_local)]:
             btn = action_button(label)
             btn.clicked.connect(slot)
@@ -654,6 +744,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
             "protein_pdb": self.protein_pdb.text() or None,
             "off_toolkit_backend": self.off_backend.currentText(),
             "partial_charge_method": self.charge_method.currentText(),
+            "skip_charge_assignment": self.skip_charge.isChecked(),
             "small_molecule_forcefield": self.smff.text().strip(),
             # Network
             "mapper": self.mapper.currentText(),
@@ -716,7 +807,8 @@ class OpenFESeptopWorkflowPage(QTabWidget):
             "barostat_frequency": self.barostat_freq.value(),
             "surface_tension": self.surface_tension.value(),
             # Output
-            "workdir": self.workdir.text().strip(),
+            "workdir": self.workdir.text().strip() or ".",
+            "jobname": self.jobname.text().strip() or "septop",
             "result_dir": self._result_dir(),
             "json_dir": self._json_dir(),
         }
@@ -742,21 +834,31 @@ class OpenFESeptopWorkflowPage(QTabWidget):
             "conda_environment": self.conda_env.text().strip(),
         }
 
+    def _root(self) -> str:
+        """Project folder: <workdir>/<jobname>."""
+        base = self.workdir.text().strip() or "."
+        job = self.jobname.text().strip() or "septop"
+        return str(Path(base) / job)
+
     def _workdir(self) -> str:
-        return self.workdir.text().strip() or "work/septop"
+        return self.workdir.text().strip() or "."
 
     def _result_dir(self) -> str:
-        return str(Path(self._workdir()) / "results")
+        """Results live under <workdir>/<jobname>/results."""
+        return str(Path(self._root()) / "results")
 
     def _json_dir(self) -> str:
-        return str(Path(self._workdir()) / "json")
+        """Transformation JSONs live under <workdir>/<jobname>/json."""
+        return str(Path(self._root()) / "json")
 
     def _config_path(self) -> str | None:
-        path = self.config_path.text()
-        if not path:
-            self.status.setText("Set a config file path on the Job settings tab first.")
+        name = self.config_path.text().strip()
+        if not name:
+            self.status.setText("Set a config file name on the Job settings tab first.")
             return None
-        return str(Path(path).expanduser().resolve())
+        # The config always lives inside the project folder (<workdir>/<jobname>/).
+        # Only the file name is taken from the field; the directory is the job root.
+        return str((Path(self._root()) / Path(name).name).expanduser().resolve())
 
     def _write_config(self) -> str | None:
         try:
@@ -764,16 +866,36 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         except ValueError as exc:
             self.status.setText(f"Cannot build config: {exc}")
             return None
+        # Resolve the base workdir to an absolute path so copied inputs and the
+        # json/results dirs resolve the same from the separate-env console's cwd.
+        conf["workdir"] = str(Path(self._workdir()).expanduser().resolve())
         issues = validate_setup(conf)
         path = self._config_path()
         if path is None:
+            return None
+        # Create the job folder and copy the input files into <jobdir>/inputs/,
+        # repoint the config at the copies, and set json_dir/result_dir to the job
+        # dir. Inputs are optional here so a partially-filled form can still save.
+        try:
+            from chemflow.fe.openfe.workflow_defaults import prepare_project
+            prepare_project(
+                conf,
+                default_jobname=self.jobname.text().strip() or "septop",
+                optional_file_attrs=[
+                    ("protein_pdb", "protein PDB"),
+                    ("ligand_sdf", "ligand"),
+                    ("cofactor_sdf", "cofactor"),
+                ],
+            )
+        except (OSError, ValueError) as exc:
+            self.status.setText(f"Could not stage inputs: {exc}")
             return None
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(to_yaml(conf), encoding="utf-8")
         if issues:
             self.status.setText("Wrote config with warnings: " + " ".join(issues))
         else:
-            self.status.setText(f"Wrote config: {path}")
+            self.status.setText(f"Wrote config + staged inputs under: {Path(path).parent}")
         return path
 
     def _validate(self) -> None:
@@ -797,11 +919,18 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         if path:
             self._run(["openfe", "septop", "run", path])
 
-    def _write_slurm(self) -> None:
+    def _write_slurm(self) -> str | None:
         path = self._write_config()
         if not path:
-            return
+            return None
         conf = build_config(self._overrides())
+        # Use the same absolute job-dir paths _write_config staged, so the script's
+        # JSON_DIR / OUT_ROOT resolve correctly no matter where sbatch is launched.
+        conf["workdir"] = str(Path(self._workdir()).expanduser().resolve())
+        from chemflow.fe.openfe.workflow_defaults import resolve_layout
+        layout = resolve_layout(conf, default_jobname=self.jobname.text().strip() or "septop")
+        conf["json_dir"] = str(layout["json"])
+        conf["result_dir"] = str(layout["results"])
         hpc = self._hpc()
         replicates = max(1, int(hpc.get("replicates", 1)))
         n_json = self._count_json_files()
@@ -821,6 +950,17 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         script_path.write_text(script, encoding="utf-8")
         self.status.setText(f"Wrote SLURM array script: {script_path}. {note} "
                             f"Submit: sbatch {script_path}")
+        return str(script_path)
+
+    def _submit_slurm(self) -> None:
+        """Write the SLURM script into the job dir and sbatch it from there."""
+        script_path = self._write_slurm()
+        if not script_path:
+            return
+        if self._console is None:
+            return
+        job_dir = str(Path(script_path).parent)
+        self._console.run_program("sbatch", [Path(script_path).name], cwd=job_dir)
 
     def _count_json_files(self) -> int:
         try:

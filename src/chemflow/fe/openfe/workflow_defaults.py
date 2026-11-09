@@ -2,10 +2,154 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
+
+
+def _conf_get(conf: Any, name: str) -> Any:
+    return conf.get(name) if isinstance(conf, dict) else getattr(conf, name, None)
+
+
+def _conf_set(conf: Any, name: str, value: Any) -> None:
+    if isinstance(conf, dict):
+        conf[name] = value
+    else:
+        setattr(conf, name, value)
+
+
+def resolve_layout(conf: Any, *, default_jobname: str = "job") -> dict[str, Path]:
+    """Project layout: everything lives under ``<workdir>/<jobname>/``.
+
+    Reads ``workdir`` (base directory, default ``.``) and ``jobname`` (falling back
+    to ``job_name`` then ``default_jobname``) from a dict or namespace. Returns the
+    ``root`` project folder plus its ``inputs``/``json``/``results`` subfolders.
+    """
+    workdir = Path(str(_conf_get(conf, "workdir") or "."))
+    jobname = _conf_get(conf, "jobname") or _conf_get(conf, "job_name") or default_jobname
+    root = workdir / str(jobname)
+    return {
+        "root": root,
+        "inputs": root / "inputs",
+        "json": root / "json",
+        "results": root / "results",
+    }
+
+
+def prepare_project(conf: Any, conf_file: Any = None, *, default_jobname: str = "job",
+                    input_attrs: list[tuple[str, str]] | None = None,
+                    optional_file_attrs: list[tuple[str, str]] | None = None) -> dict[str, Path]:
+    """Create the project layout and stage inputs/config into it.
+
+    Creates ``<workdir>/<jobname>/{inputs,json,results}``, copies the config file
+    into the project root for provenance, copies each named input file into
+    ``inputs/``, and updates ``conf`` in place: the input attributes point at the
+    copies, and ``json_dir``/``result_dir`` are set to the resolved job-dir paths
+    (``workdir``/``jobname`` are left as given, so re-loading the written config
+    recomputes the same root rather than nesting again). ``input_attrs`` is a list of ``(conf_attr, label)`` pairs that must be
+    existing files. ``optional_file_attrs`` is for attributes whose value *may* be a
+    file path (e.g. a ``complex_box_size`` that points at a ``pbc.txt`` instead of
+    holding numbers) -- these are staged only when the value is an existing file,
+    and left untouched otherwise. Returns the layout dict from :func:`resolve_layout`.
+    """
+    layout = resolve_layout(conf, default_jobname=default_jobname)
+    for key in ("inputs", "json", "results"):
+        layout[key].mkdir(parents=True, exist_ok=True)
+
+    # Copy the config file into the project root (provenance).
+    if conf_file:
+        src = Path(conf_file)
+        if src.is_file():
+            dst = layout["root"] / src.name
+            try:
+                if src.resolve() != dst.resolve():
+                    shutil.copy2(src, dst)
+            except OSError:
+                pass
+
+    def _stage(attr: str, label: str, *, required: bool) -> None:
+        val = _conf_get(conf, attr)
+        if val in (None, "", "null") or not isinstance(val, (str, Path)):
+            return  # unset, or a non-path value (e.g. a numeric box list)
+        src = Path(str(val))
+        if not src.is_file():
+            if required:
+                raise FileNotFoundError(f"{label} file not found: {src}")
+            return  # optional value that isn't a file (e.g. "6,6,9") -- leave as-is
+        dst = layout["inputs"] / src.name
+        if src.resolve() != dst.resolve():
+            shutil.copy2(src, dst)
+        _conf_set(conf, attr, str(dst))
+        print(f"Staged {label}: {dst}")
+
+    for attr, label in (input_attrs or []):
+        _stage(attr, label, required=True)
+    for attr, label in (optional_file_attrs or []):
+        _stage(attr, label, required=False)
+
+    # Point the derived output dirs at the job folder. Note: workdir/jobname are
+    # left as given (not overwritten) so the config stays idempotent -- writing it
+    # out and re-loading recomputes the same root instead of nesting again.
+    _conf_set(conf, "json_dir", str(layout["json"]))
+    _conf_set(conf, "result_dir", str(layout["results"]))
+    return layout
+
+
+def box_vectors_matrix(box: Any) -> np.ndarray:
+    """Return periodic box vectors as a unitless ``(3, 3)`` numpy array.
+
+    OpenFE/gufe require box vectors in reduced 3x3 form
+    (``gufe...._box_vectors_are_in_reduced_form`` asserts ``shape == (3, 3)``). This
+    accepts:
+
+    * a path to a ``.txt`` file holding the values (comma-separated), or a raw
+      comma-separated string -- e.g. a PBC line exported for a membrane system;
+    * 3 values ``[Lx, Ly, Lz]`` (orthorhombic -> diagonal);
+    * 6 values ``[a, b, c, alpha, beta, gamma]`` (lengths in nm + angles in degrees
+      -> reduced lower-triangular 3x3);
+    * 9 values (-> reshaped to 3x3);
+    * a full 3x3 matrix (returned as-is).
+
+    Multiply the result by a length unit, e.g.
+    ``box_vectors_matrix(box) * offunit.nanometer``.
+    """
+    # A string/path: read the file if it exists, then split on commas (tolerating
+    # newlines/semicolons) into floats.
+    if isinstance(box, str):
+        text = box
+        path = Path(box)
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+        text = text.replace(";", ",").replace("\n", ",")
+        box = [float(part) for part in text.split(",") if part.strip()]
+
+    arr = np.asarray(box, dtype=float)
+    if arr.shape == (6,):
+        # a, b, c (lengths) + alpha, beta, gamma (degrees) -> reduced 3x3 box
+        # (OpenMM/GROMACS lower-triangular convention; 90/90/90 collapses to diag).
+        a, b, c = arr[:3]
+        alpha, beta, gamma = np.radians(arr[3:])
+        bx, by = b * np.cos(gamma), b * np.sin(gamma)
+        cx = c * np.cos(beta)
+        cy = (b * c * np.cos(alpha) - bx * cx) / by if by else 0.0
+        cz = np.sqrt(max(c * c - cx * cx - cy * cy, 0.0))
+        arr = np.array([[a, 0.0, 0.0], [bx, by, 0.0], [cx, cy, cz]])
+        arr[np.abs(arr) < 1e-10] = 0.0
+    if arr.shape == (9,):
+        arr = arr.reshape(3, 3)
+    if arr.shape == (3,):
+        arr = np.diag(arr)
+    if arr.shape != (3, 3):
+        raise ValueError(
+            "box vectors must be 3 ([Lx,Ly,Lz]), 6 ([a,b,c,alpha,beta,gamma]), 9, or "
+            "a 3x3 matrix -- as numbers, a comma-separated string, or a .txt file; "
+            f"got shape {arr.shape}"
+        )
+    return arr
+
 
 
 def _value(item: Any) -> Any:

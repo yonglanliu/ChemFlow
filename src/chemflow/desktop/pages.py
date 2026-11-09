@@ -311,7 +311,7 @@ class DashboardPage(QWidget):
             self._functions, self._query, self._expanded, self.MAX_VISIBLE)
 
         self._empty.setVisible(not visible)
-        columns = 2
+        columns = 3
         for position, function in enumerate(visible):
             card = Card(function["title"], function.get("detail", ""))
             button = QPushButton("Open workflow  →")

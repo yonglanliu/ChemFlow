@@ -100,3 +100,24 @@ def build_command(conf, inputs: dict, out_dir: Path) -> list[str]:
     if "restraints" in inputs:
         command += ["--constraint-path", str(inputs["restraints"])]
     return command
+
+
+def build_env(conf) -> dict:
+    """Extra environment for the Chai run.
+
+    Chai-1 downloads model weights to ``$CHAI_DOWNLOADS_DIR`` (default under
+    ``~/.cache``), which on HPC can hit the HOME disk quota. Redirect it to the
+    configured ``cache_dir`` (or the CHEMFLOW_MODEL_CACHE env var).
+    """
+    import os
+    from pathlib import Path
+
+    cache = (getattr(conf, "cache_dir", None)
+             or os.environ.get("CHEMFLOW_MODEL_CACHE"))
+    if not cache:
+        from alchemfold.dock_config import default_cache_dir
+
+        cache = default_cache_dir()
+    if not cache:
+        return {}
+    return {"CHAI_DOWNLOADS_DIR": str(Path(cache).expanduser())}

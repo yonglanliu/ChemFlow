@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QScrollArea,
     QSpinBox,
     QTableWidget,
@@ -44,6 +45,7 @@ from chemflow.desktop.openfe_abfe_config import (
     to_yaml,
     validate_setup,
 )
+from chemflow.desktop.openfe_rbfe_config import HPC_JOB_HELP_HTML
 from chemflow.desktop.widgets.forms import (  # noqa: F811
     NoScrollComboBox as QComboBox,
     NoScrollDoubleSpinBox as QDoubleSpinBox,
@@ -51,6 +53,7 @@ from chemflow.desktop.widgets.forms import (  # noqa: F811
     PageHeader,
     PathField,
     action_button,
+    with_help,
 )
 
 
@@ -119,6 +122,9 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         self.cofactor_sdf = PathField("cofactor.sdf (optional)")
         self.off_backend = _combo(["ambertools", "openeye", "rdkit"], "ambertools")
         self.charge_method = _combo(["am1bcc", "am1bccelf10", "espaloma", "nagl"], "am1bcc")
+        self.skip_charge = QCheckBox("Skip charge assignment (use stored SDF charges — faster)")
+        self.skip_charge.setToolTip("When the ligand/cofactor SDFs already carry partial charges, "
+                                    "skip the charge check/generation at Setup FEP (create_json).")
         self.charge_cores = _spin(4, 1, 64)
         self.charged_out = PathField("charged_ligand.sdf (output)", mode="save",
                                      save_filter="SDF (*.sdf)")
@@ -135,6 +141,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         f.addRow("Charged ligand output:", self.charged_out)
         f.addRow("Charged cofactor output:", self.charged_cofactor_out)
         f.addRow("", self.overwrite_charges)
+        f.addRow("", self.skip_charge)
         f.addRow("Small-molecule force field:", self.smff)
 
         row = QHBoxLayout()
@@ -288,6 +295,16 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         self.box_vectors.setPlaceholderText("x, y, z  (nm, diagonal box)  — or 9 numbers for a full 3×3")
         self.box_vectors.setFixedHeight(64)
         self.box_vectors.setEnabled(False)
+        self.box_browse = QPushButton("Browse pbc.txt")
+        self.box_browse.setToolTip("Load periodic box from a .txt file "
+                                   "(comma/space separated: 3 numbers x,y,z or 9 for a full 3×3)")
+        self.box_browse.setEnabled(False)
+        self.box_browse.clicked.connect(self._browse_pbc)
+        box_container = QWidget()
+        box_layout = QVBoxLayout(box_container)
+        box_layout.setContentsMargins(0, 0, 0, 0)
+        box_layout.addWidget(self.box_vectors)
+        box_layout.addWidget(self.box_browse)
         self.box_shape = _combo(["dodecahedron", "cube", "octahedron"], "dodecahedron")
         self.complex_pad = _dspin(1.5, 0.5, 5.0, 0.1, 2)
         self.solvent_pad = _dspin(1.5, 0.5, 5.0, 0.1, 2)
@@ -301,7 +318,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         f.addRow("Charged ligand SDF:", self.system_ligand_sdf)
         f.addRow("Charged cofactor SDF:", self.system_cofactor_sdf)
         f.addRow("", self.membrane)
-        f.addRow("Complex box vectors (membrane):", self.box_vectors)
+        f.addRow("Complex box vectors (membrane):", box_container)
         f.addRow("Box shape (soluble + solvent leg):", self.box_shape)
         f.addRow("Complex solvation padding (nm):", self.complex_pad)
         f.addRow("Solvent solvation padding (nm):", self.solvent_pad)
@@ -325,8 +342,29 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         layout.addStretch()
         return page
 
+    def _apply_hpc_preset(self, name: str) -> None:
+        """Fill the SLURM fields from a named env/hpc.yaml preset ('(custom)' = no-op)."""
+        if not name or name == "(custom)":
+            return
+        try:
+            from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset
+            merged = apply_slurm_preset(self._hpc(), name)
+        except Exception:
+            return
+        self.partition.setText(str(merged.get("partition", "gpu")))
+        self.nodes.setValue(int(merged.get("nodes", 1) or 1))
+        self.ntasks.setValue(int(merged.get("ntasks", 1) or 1))
+        self.cpus.setValue(int(merged.get("cpus_per_task", 16) or 16))
+        self.gpus.setValue(int(merged.get("gpus", 1) or 0))
+        self.gpu_type.setCurrentText(str(merged.get("gpu_type", "") or ""))
+        self.memory.setText(str(merged.get("memory", "32G")))
+        self.walltime.setText(str(merged.get("walltime", "240:00:00")))
+        if merged.get("conda_environment"):
+            self.conda_env.setText(str(merged["conda_environment"]))
+
     def _on_membrane_toggle(self, on: bool) -> None:
         self.box_vectors.setEnabled(on)
+        self.box_browse.setEnabled(on)
         # Membrane uses explicit box vectors; the box shape/padding are for the
         # soluble complex (and always the solvent leg).
         self.box_shape.setEnabled(not on)
@@ -335,6 +373,19 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
             "Membrane system: set complex box vectors (nm) so the periodic box is valid. "
             "The solvent leg still uses the box shape + solvent padding."
             if on else "Soluble system: box is padded automatically (box shape used).")
+
+    def _browse_pbc(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose PBC file", "", "Text/PBC (*.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            self.pbc_note.setText(f"Could not read PBC file: {path}")
+            return
+        self.box_vectors.setPlainText(text)
 
     # -- 3 · Restraints ----------------------------------------------------
     def _restraints_tab(self):
@@ -405,12 +456,12 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
 
         # Equilibration
         self.c_eq_mini = _spin(5000, 0, 1000000)
-        self.c_eq_len = _dspin(0.1, 0.0, 100.0, 0.1, 3)
-        self.c_eq_nvt = _dspin(0.1, 0.0, 100.0, 0.1, 3)
+        self.c_eq_len = _dspin(1.0, 0.0, 100.0, 0.1, 3)
+        self.c_eq_nvt = _dspin(1.0, 0.0, 100.0, 0.1, 3)
         self.c_eq_prod = _dspin(2.0, 0.0, 1000.0, 0.5, 3)
         self.s_eq_mini = _spin(5000, 0, 1000000)
-        self.s_eq_len = _dspin(0.1, 0.0, 100.0, 0.1, 3)
-        self.s_eq_nvt = _dspin(0.1, 0.0, 100.0, 0.1, 3)
+        self.s_eq_len = _dspin(1.0, 0.0, 100.0, 0.1, 3)
+        self.s_eq_nvt = _dspin(1.0, 0.0, 100.0, 0.1, 3)
         self.s_eq_prod = _dspin(2.0, 0.0, 1000.0, 0.5, 3)
         equil = self._group("Equilibration", [
             ("Complex mini steps:", self.c_eq_mini),
@@ -427,10 +478,10 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         self.early_term = _dspin(0.0, 0.0, 100.0, 0.1, 3)
         self.c_sim_mini = _spin(5000, 0, 1000000)
         self.c_sim_eq = _dspin(1.0, 0.0, 100.0, 0.5, 3)
-        self.c_sim_prod = _dspin(20.0, 0.0, 1000.0, 1.0, 3)
+        self.c_sim_prod = _dspin(10.0, 0.0, 1000.0, 1.0, 3)
         self.s_sim_mini = _spin(5000, 0, 1000000)
-        self.s_sim_eq = _dspin(5.0, 0.0, 100.0, 0.5, 3)
-        self.s_sim_prod = _dspin(30.0, 0.0, 1000.0, 1.0, 3)
+        self.s_sim_eq = _dspin(1.0, 0.0, 100.0, 0.5, 3)
+        self.s_sim_prod = _dspin(10.0, 0.0, 1000.0, 1.0, 3)
         simulation = self._group("Production simulation", [
             ("Early-termination target error (kcal/mol):", self.early_term),
             ("Complex mini step:", self.c_sim_mini),
@@ -556,13 +607,26 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         f = QFormLayout(form)
         self.name = QLineEdit("abfe_my_ligand")
         self.name.setToolTip("Transformation name — the output JSON basename.")
-        self.config_path = PathField("abfe.yaml", mode="save",
+        self.config_path = PathField("abfe.yaml (written into <workdir>/<jobname>/)", mode="save",
                                      save_filter="YAML (*.yaml *.yml)")
         self.config_path.setText("abfe.yaml")
-        self.workdir = PathField("work/abfe (results/ and json/ are created inside it)",
+        self.workdir = PathField("base dir — project goes to <workdir>/<jobname>/",
                                  mode="directory")
-        self.workdir.setText("work/abfe")
+        self.workdir.setText(".")
+        self.jobname = QLineEdit("abfe")
+        self.jobname.setToolTip("Project folder name. The config, inputs/, json/ and "
+                                "results/ all live under <workdir>/<jobname>/.")
         self.partition = QLineEdit("gpu")
+        self.hpc_preset = QComboBox()
+        try:
+            from chemflow.desktop.openfe_rbfe_config import single_gpu_preset_names
+            _preset_names = single_gpu_preset_names()
+        except Exception:
+            _preset_names = []
+        self.hpc_preset.addItems(["(custom)", *_preset_names])
+        self.hpc_preset.setToolTip("Pick a preset from env/hpc.yaml (e.g. singlenode-singlegpu-long) "
+                                   "to fill the SLURM fields below; '(custom)' keeps your own values.")
+        self.hpc_preset.currentTextChanged.connect(self._apply_hpc_preset)
         self.nodes = _spin(1, 1, 64)
         self.ntasks = _spin(1, 1, 256)
         self.cpus = _spin(16, 1, 128)
@@ -586,8 +650,10 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         self.conda_env = QLineEdit("")
         self.conda_env.setPlaceholderText("alchemforge")
         for label, w in [("Transformation name:", self.name),
-                         ("Config file to write:", self.config_path),
-                         ("Work dir:", self.workdir), ("SLURM partition:", self.partition),
+                         ("Config file name:", self.config_path),
+                         ("Work dir (base):", self.workdir), ("Job name:", self.jobname),
+                         ("HPC preset:", self.hpc_preset),
+                         ("SLURM partition:", self.partition),
                          ("Nodes:", self.nodes), ("Tasks:", self.ntasks),
                          ("CPUs per task:", self.cpus), ("GPUs:", self.gpus),
                          ("GPU type (--gres):", self.gpu_type),
@@ -600,7 +666,8 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
             f.addRow(label, w)
         return self._wrap(PageHeader("OpenFE ABFE", "5 · Job settings (HPC)",
                                      "Output locations and the SLURM parameters for submission. "
-                                     "results/ and json/ are created under the work dir."), form)
+                                     "results/ and json/ are created under the work dir."),
+                          with_help(form, HPC_JOB_HELP_HTML))
 
     # -- Execution ---------------------------------------------------------
     def _exec_tab(self):
@@ -614,6 +681,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
                             ("Validate", self._validate),
                             ("Generate JSON (create_json)", self._generate),
                             ("Write SLURM script", self._write_slurm),
+                            ("Submit (sbatch)", self._submit_slurm),
                             ("Submit (local)", self._submit_local)]:
             btn = action_button(label)
             btn.clicked.connect(slot)
@@ -637,6 +705,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
             "protein_pdb": self.protein_pdb.text() or None,
             "off_toolkit_backend": self.off_backend.currentText(),
             "partial_charge_method": self.charge_method.currentText(),
+            "skip_charge_assignment": self.skip_charge.isChecked(),
             "small_molecule_forcefield": self.smff.text().strip(),
             # System
             "membrane_system": self.membrane.isChecked(),
@@ -702,7 +771,8 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
             "solvent_lambda_vdw": parse_float_list(self.lam_s_vdw.text()),
             "solvent_lambda_restraints": parse_float_list(self.lam_s_rest.text()),
             # Output
-            "workdir": self.workdir.text().strip(),
+            "workdir": self.workdir.text().strip() or ".",
+            "jobname": self.jobname.text().strip() or "abfe",
             "result_dir": self._result_dir(),
             "json_dir": self._json_dir(),
         }
@@ -724,21 +794,28 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
             "conda_environment": self.conda_env.text().strip(),
         }
 
+    def _root(self) -> str:
+        """Project folder: <workdir>/<jobname>."""
+        base = self.workdir.text().strip() or "."
+        job = self.jobname.text().strip() or "abfe"
+        return str(Path(base) / job)
+
     def _workdir(self) -> str:
-        return self.workdir.text().strip() or "work/abfe"
+        return self.workdir.text().strip() or "."
 
     def _result_dir(self) -> str:
-        return str(Path(self._workdir()) / "results")
+        return str(Path(self._root()) / "results")
 
     def _json_dir(self) -> str:
-        return str(Path(self._workdir()) / "json")
+        return str(Path(self._root()) / "json")
 
     def _config_path(self) -> str | None:
-        path = self.config_path.text()
-        if not path:
-            self.status.setText("Set a config file path on the Job settings tab first.")
+        name = self.config_path.text().strip()
+        if not name:
+            self.status.setText("Set a config file name on the Job settings tab first.")
             return None
-        return str(Path(path).expanduser().resolve())
+        # The config always lives inside the project folder (<workdir>/<jobname>/).
+        return str((Path(self._root()) / Path(name).name).expanduser().resolve())
 
     def _write_config(self) -> str | None:
         try:
@@ -746,16 +823,31 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         except ValueError as exc:
             self.status.setText(f"Cannot build config: {exc}")
             return None
+        conf["workdir"] = str(Path(self._workdir()).expanduser().resolve())
         issues = validate_setup(conf)
         path = self._config_path()
         if path is None:
+            return None
+        try:
+            from chemflow.fe.openfe.workflow_defaults import prepare_project
+            prepare_project(
+                conf,
+                default_jobname=self.jobname.text().strip() or "abfe",
+                optional_file_attrs=[
+                    ("protein_pdb", "protein PDB"),
+                    ("ligand_sdf", "ligand"),
+                    ("cofactor_sdf", "cofactor"),
+                ],
+            )
+        except (OSError, ValueError) as exc:
+            self.status.setText(f"Could not stage inputs: {exc}")
             return None
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(to_yaml(conf), encoding="utf-8")
         if issues:
             self.status.setText("Wrote config with warnings: " + " ".join(issues))
         else:
-            self.status.setText(f"Wrote config: {path}")
+            self.status.setText(f"Wrote config + staged inputs under: {Path(path).parent}")
         return path
 
     def _validate(self) -> None:
@@ -779,11 +871,16 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         if path:
             self._run(["openfe", "abfe", "run", path])
 
-    def _write_slurm(self) -> None:
+    def _write_slurm(self) -> str | None:
         path = self._write_config()
         if not path:
-            return
+            return None
         conf = build_config(self._overrides())
+        conf["workdir"] = str(Path(self._workdir()).expanduser().resolve())
+        from chemflow.fe.openfe.workflow_defaults import resolve_layout
+        layout = resolve_layout(conf, default_jobname=self.jobname.text().strip() or "abfe")
+        conf["json_dir"] = str(layout["json"])
+        conf["result_dir"] = str(layout["results"])
         hpc = self._hpc()
         replicates = max(1, int(hpc.get("replicates", 1)))
         n_json = self._count_json_files()
@@ -803,6 +900,17 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         script_path.write_text(script, encoding="utf-8")
         self.status.setText(f"Wrote SLURM array script: {script_path}. {note} "
                             f"Submit: sbatch {script_path}")
+        return str(script_path)
+
+    def _submit_slurm(self) -> None:
+        """Write the SLURM script into the job dir and sbatch it from there."""
+        script_path = self._write_slurm()
+        if not script_path:
+            return
+        if self._console is None:
+            return
+        job_dir = str(Path(script_path).parent)
+        self._console.run_program("sbatch", [Path(script_path).name], cwd=job_dir)
 
     def _count_json_files(self) -> int:
         try:

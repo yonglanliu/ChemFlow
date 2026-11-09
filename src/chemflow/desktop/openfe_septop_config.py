@@ -132,9 +132,10 @@ DEFAULTS: dict[str, Any] = {
     "cofactor_sdf": None,
     "restart_json": None,
     # --- Output ---
-    "workdir": "work/septop",
-    "result_dir": "work/septop/results",
-    "json_dir": "work/septop/json",
+    "workdir": ".",
+    "jobname": "septop",
+    "result_dir": "septop/results",
+    "json_dir": "septop/json",
     "ligand_network_graphml": None,
     # --- Platform ---
     "platform": "CUDA",

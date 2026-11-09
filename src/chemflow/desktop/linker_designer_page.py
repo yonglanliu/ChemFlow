@@ -44,6 +44,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from chemflow.desktop.widgets.forms import (
+    NoScrollComboBox,
+    NoScrollDoubleSpinBox,
+    NoScrollSpinBox,
+)
 from chemflow.generative.reinvent.linker.scene_html import (
     build_pose_html,
     build_workspace_html,
@@ -246,7 +251,7 @@ class LinkerDesignerPage(QWidget):
         col.addLayout(row)
 
         col.addWidget(QLabel("Linker source:"))
-        self.source_combo = QComboBox()
+        self.source_combo = NoScrollComboBox()
         self.source_combo.addItems(["LinkInvent (de novo generation)", "Linker library (search, e.g. Enamine)"])
         self.source_combo.currentIndexChanged.connect(self._update_source)
         col.addWidget(self.source_combo)
@@ -290,13 +295,13 @@ class LinkerDesignerPage(QWidget):
         lbox.addLayout(lib_row)
         len_row = QHBoxLayout()
         len_row.addWidget(QLabel("Linker length (bonds): min"))
-        self.min_len_spin = QSpinBox()
+        self.min_len_spin = NoScrollSpinBox()
         self.min_len_spin.setRange(0, 60)
         self.min_len_spin.setValue(0)
         self.min_len_spin.setToolTip("0 = no minimum")
         len_row.addWidget(self.min_len_spin)
         len_row.addWidget(QLabel("max"))
-        self.max_len_spin = QSpinBox()
+        self.max_len_spin = NoScrollSpinBox()
         self.max_len_spin.setRange(0, 60)
         self.max_len_spin.setValue(0)
         self.max_len_spin.setToolTip("0 = no maximum")
@@ -312,17 +317,17 @@ class LinkerDesignerPage(QWidget):
 
         opts = QHBoxLayout()
         opts.addWidget(QLabel("Linkers:"))
-        self.num_spin = QSpinBox()
+        self.num_spin = NoScrollSpinBox()
         self.num_spin.setRange(10, 5000)
         self.num_spin.setValue(200)
         opts.addWidget(self.num_spin)
         opts.addWidget(QLabel("3D fit top:"))
-        self.fit_spin = QSpinBox()
+        self.fit_spin = NoScrollSpinBox()
         self.fit_spin.setRange(0, 1000)
         self.fit_spin.setValue(50)
         opts.addWidget(self.fit_spin)
         opts.addWidget(QLabel("Device:"))
-        self.device = QComboBox()
+        self.device = NoScrollComboBox()
         self.device.addItems(["cpu", "cuda:0", "mps"])
         opts.addWidget(self.device)
         col.addLayout(opts)
@@ -507,7 +512,7 @@ class LinkerDesignerPage(QWidget):
                 self.entry_table.setItem(r, 3, role_item)
                 self.entry_table.removeCellWidget(r, 3)
             else:
-                combo = QComboBox()
+                combo = NoScrollComboBox()
                 combo.addItems([_ROLE_NONE, _ROLE_A, _ROLE_B])
                 combo.setCurrentText(
                     _ROLE_A if e.role == "A" else _ROLE_B if e.role == "B" else _ROLE_NONE)

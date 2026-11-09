@@ -27,7 +27,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from chemflow.desktop.widgets.forms import Card, PageHeader, PathField, action_button, field
+from chemflow.desktop.widgets.forms import (
+    Card,
+    NoScrollComboBox,
+    NoScrollDoubleSpinBox,
+    NoScrollSpinBox,
+    PageHeader,
+    PathField,
+    action_button,
+    field,
+)
 
 
 def _scrollable(widget: QWidget, content: QWidget) -> None:
@@ -63,10 +72,10 @@ class RosettaDockPage(QWidget):
         self.input_pdb = PathField("Both partners in one PDB (chains A and B)")
         card.body.addWidget(field("Input structure", self.input_pdb))
         self.partners = QLineEdit("A_B")
-        self.mode = QComboBox()
+        self.mode = NoScrollComboBox()
         self.mode.addItems(["global", "local"])
         card.body.addWidget(self._row("Partners (e.g. A_B)", self.partners, "Mode", self.mode))
-        self.nstruct = QSpinBox()
+        self.nstruct = NoScrollSpinBox()
         self.nstruct.setRange(1, 1000000)
         self.nstruct.setValue(1000)
         self.out_dir = PathField("Output folder", mode="directory")
@@ -170,15 +179,15 @@ class LinkabilityPage(QWidget):
 
         card = Card("Posed warheads", "From the same candidate complex (same coordinate frame).")
         self.head1 = PathField("Target warhead (SDF/MOL/PDB)")
-        self.atom1 = QSpinBox(); self.atom1.setRange(0, 100000)
+        self.atom1 = NoScrollSpinBox(); self.atom1.setRange(0, 100000)
         card.body.addWidget(field("Target warhead", self.head1))
         card.body.addWidget(field("Attachment atom index (head 1)", self.atom1))
         self.head2 = PathField("E3 warhead (SDF/MOL/PDB)")
-        self.atom2 = QSpinBox(); self.atom2.setRange(0, 100000)
+        self.atom2 = NoScrollSpinBox(); self.atom2.setRange(0, 100000)
         card.body.addWidget(field("E3 warhead", self.head2))
         card.body.addWidget(field("Attachment atom index (head 2)", self.atom2))
-        self.min_dist = QDoubleSpinBox(); self.min_dist.setRange(0.1, 50.0); self.min_dist.setValue(3.0)
-        self.max_dist = QDoubleSpinBox(); self.max_dist.setRange(0.1, 100.0); self.max_dist.setValue(20.0)
+        self.min_dist = NoScrollDoubleSpinBox(); self.min_dist.setRange(0.1, 50.0); self.min_dist.setValue(3.0)
+        self.max_dist = NoScrollDoubleSpinBox(); self.max_dist.setRange(0.1, 100.0); self.max_dist.setValue(20.0)
         row = QWidget(); r = QHBoxLayout(row); r.setContentsMargins(0, 0, 0, 0)
         r.addWidget(field("Min distance (A)", self.min_dist), 1)
         r.addWidget(field("Max distance (A)", self.max_dist), 1)
@@ -285,15 +294,15 @@ class FixStructurePage(QWidget):
                                     "PDBFixer for atoms + short loops; Rosetta KIC for interface loops."))
         card = Card("Input", "")
         self.input = PathField("Structure (PDB)")
-        self.method = QComboBox(); self.method.addItems(["pdbfixer", "kic"])
+        self.method = NoScrollComboBox(); self.method.addItems(["pdbfixer", "kic"])
         self.output = PathField("Output PDB", mode="save", save_filter="PDB (*.pdb)")
         self.output.setText("fixed.pdb")
         self.include_termini = QCheckBox("Also model terminal residues (pdbfixer)")
         self.add_h = QCheckBox("Add hydrogens (pdbfixer)")
-        self.max_gap = QSpinBox(); self.max_gap.setRange(0, 1000); self.max_gap.setSpecialValueText("no limit")
+        self.max_gap = NoScrollSpinBox(); self.max_gap.setRange(0, 1000); self.max_gap.setSpecialValueText("no limit")
         self.loops = QLineEdit(); self.loops.setPlaceholderText("kic refine existing loops: A:45-52, A:88-93")
         # Reference sequence (to fill missing residues) with three sources.
-        self.seq_source = QComboBox(); self.seq_source.addItems(["Paste sequence", "FASTA file", "UniProt ID"])
+        self.seq_source = NoScrollComboBox(); self.seq_source.addItems(["Paste sequence", "FASTA file", "UniProt ID"])
         self.seq_paste = QPlainTextEdit(); self.seq_paste.setPlaceholderText("paste the one-letter sequence…")
         self.seq_paste.setMaximumHeight(90)
         self.fasta = PathField("Browse a FASTA / .fa file", save_filter="FASTA (*.fa *.fasta)")
@@ -427,8 +436,8 @@ class PyRosettaDockPage(QWidget):
         card = Card("Inputs", "One PDB with both partners as chains (see Merge PDB).")
         self.input_pdb = PathField("Both partners in one PDB")
         self.partners = QLineEdit("A_B")
-        self.mode = QComboBox(); self.mode.addItems(["global", "local"])
-        self.nstruct = QSpinBox(); self.nstruct.setRange(1, 1000000); self.nstruct.setValue(100)
+        self.mode = NoScrollComboBox(); self.mode.addItems(["global", "local"])
+        self.nstruct = NoScrollSpinBox(); self.nstruct.setRange(1, 1000000); self.nstruct.setValue(100)
         self.proteins_only = QCheckBox("Dock proteins only (no ligand params)"); self.proteins_only.setChecked(True)
         self.pre_relax = QCheckBox("Pre-relax input (FastRelax)")
         self.post_relax = QCheckBox("Post-relax each model (slow)")
@@ -437,8 +446,8 @@ class PyRosettaDockPage(QWidget):
         self.restraint_on = QCheckBox("Distance restraint between two protein residues")
         self.r_atom1 = QLineEdit(); self.r_atom1.setPlaceholderText("residue on partner 1: chain resseq, e.g. A 123")
         self.r_atom2 = QLineEdit(); self.r_atom2.setPlaceholderText("residue on partner 2: e.g. B 456")
-        self.r_dist = QDoubleSpinBox(); self.r_dist.setRange(0.1, 100.0); self.r_dist.setValue(10.0)
-        self.r_std = QDoubleSpinBox(); self.r_std.setRange(0.1, 20.0); self.r_std.setValue(2.0)
+        self.r_dist = NoScrollDoubleSpinBox(); self.r_dist.setRange(0.1, 100.0); self.r_dist.setValue(10.0)
+        self.r_std = NoScrollDoubleSpinBox(); self.r_std.setRange(0.1, 20.0); self.r_std.setValue(2.0)
         card.body.addWidget(field("Input structure", self.input_pdb))
         row = QWidget(); r = QHBoxLayout(row); r.setContentsMargins(0, 0, 0, 0)
         r.addWidget(field("Partners", self.partners), 1)
@@ -546,7 +555,7 @@ class ScreenPage(QWidget):
         self.models_dir = PathField("Models folder (if not next to the CSV)", mode="directory")
         self.atom1 = QLineEdit(); self.atom1.setPlaceholderText("target warhead atom, e.g. LIG:C7")
         self.atom2 = QLineEdit(); self.atom2.setPlaceholderText("E3 warhead atom, e.g. VH1:C3")
-        self.top = QSpinBox(); self.top.setRange(1, 100000); self.top.setValue(20)
+        self.top = NoScrollSpinBox(); self.top.setRange(1, 100000); self.top.setValue(20)
         card.body.addWidget(field("Output folder or score.csv", self.dir))
         card.body.addWidget(field("Models folder (optional, if separate from the CSV)", self.models_dir))
         row = QWidget(); r = QHBoxLayout(row); r.setContentsMargins(0, 0, 0, 0)
@@ -587,29 +596,30 @@ class ScreenPage(QWidget):
 
 
 class RosettaEnvSetupPage(QWidget):
-    """Create/link the PyRosetta conda env (one-click), runs `chemflow rosetta-env`."""
+    """Create/link the Rosetta conda env (one-click), runs `chemflow rosetta-env`."""
 
     def __init__(self, console=None, parent=None):
         super().__init__(parent)
         self._console = console
         layout = QVBoxLayout(self)
         layout.addWidget(PageHeader(
-            "PROTAC design", "PyRosetta environment",
-            "PyRosetta runs in its own conda env (CPU). Install it once; the PyRosetta "
-            "steps (ternary dock, KIC fix-structure) then run through it. Needs a "
-            "RosettaCommons license."))
+            "PROTAC design", "Rosetta environment",
+            "Installs the classic Rosetta C++ apps (rosetta_scripts, docking_protocol, "
+            "molfile_to_params) AND PyRosetta in one conda env (CPU), from the "
+            "RosettaCommons channel — one-click, no license tarball. The PROTAC steps "
+            "(ternary dock, KIC fix-structure, params) then run through it."))
         row = QHBoxLayout()
         row.addWidget(QLabel("Env name:"))
-        self.env_name = QLineEdit("pyrosetta")
+        self.env_name = QLineEdit("rosetta")
         row.addWidget(self.env_name)
         row.addWidget(QLabel("Method:"))
-        self.method = QComboBox()
+        self.method = NoScrollComboBox()
         self.method.addItems(["pip-installer", "conda"])
         row.addWidget(self.method)
         row.addStretch()
         layout.addLayout(row)
         buttons = QHBoxLayout()
-        for label, slot in [("Install PyRosetta env", self._install),
+        for label, slot in [("Install Rosetta env", self._install),
                             ("Preview commands", self._dry),
                             ("Check environment", self._status)]:
             btn = action_button(label)
@@ -617,15 +627,16 @@ class RosettaEnvSetupPage(QWidget):
             buttons.addWidget(btn)
         buttons.addStretch()
         layout.addLayout(buttons)
-        self.note = QLabel("Install streams to the Activity console. 'pip-installer' uses the "
-                           "pyrosetta-installer helper; 'conda' uses the RosettaCommons channel.")
+        self.note = QLabel("Install streams to the Activity console. By default it installs "
+                           "classic Rosetta apps + PyRosetta from the RosettaCommons conda channel. "
+                           "'Method' only applies to the PyRosetta-only fallback.")
         self.note.setObjectName("Muted")
         self.note.setWordWrap(True)
         layout.addWidget(self.note)
         layout.addStretch()
 
     def _argv(self, dry: bool) -> list[str]:
-        argv = ["rosetta-env", "install", "--env", self.env_name.text().strip() or "pyrosetta",
+        argv = ["rosetta-env", "install", "--env", self.env_name.text().strip() or "rosetta",
                 "--method", self.method.currentText()]
         if dry:
             argv.append("--dry-run")
