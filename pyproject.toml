@@ -61,9 +61,7 @@ kermt = [
 [project.scripts]
 chemflow = "chemflow.cli.main:main"
 alchemforge = "alchemforge.cli:main"
-alchemforge-desktop = "alchemforge.desktop.main_window:main"
 chemflow-desktop = "chemflow.desktop.app:main"
-admet-desktop = "chemflow.desktop.admet_app:main"
 chemflow-install-ketcher = "chemflow.desktop.install_ketcher:main"
 
 [tool.setuptools.packages.find]

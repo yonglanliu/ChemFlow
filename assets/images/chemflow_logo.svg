@@ -1,0 +1,33 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ChemFlow Studio logo">
+  <defs>
+    <linearGradient id="cfTile" x1="24" y1="24" x2="232" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#43e0c2"/>
+      <stop offset="1" stop-color="#6da8ff"/>
+    </linearGradient>
+    <linearGradient id="cfFlow" x1="56" y1="180" x2="200" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#06141c"/>
+      <stop offset="1" stop-color="#0a2233"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded tile -->
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="#07111f"/>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#cfTile)"/>
+
+  <!-- molecular flow: bonds forming a flow peak -->
+  <g fill="none" stroke="url(#cfFlow)" stroke-width="15"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M60 176 L112 84 L168 148 L200 96"/>
+  </g>
+
+  <!-- atoms along the flow -->
+  <g fill="#06141c">
+    <circle cx="60"  cy="176" r="20"/>
+    <circle cx="168" cy="148" r="20"/>
+  </g>
+  <!-- accent (hub) atom -->
+  <circle cx="112" cy="84" r="24" fill="#06141c"/>
+  <circle cx="112" cy="84" r="11" fill="#eafff9"/>
+  <!-- trailing flow node -->
+  <circle cx="200" cy="96" r="13" fill="#06141c"/>
+</svg>
