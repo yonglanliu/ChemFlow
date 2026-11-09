@@ -1,11 +1,21 @@
 # ChemFlow
 
 <p align="center">
-An extensible AI-powered platform for molecular design, property prediction,
+An extensible AI-powered platform for molecular design, PROTAC design, property prediction,
 virtual screening, and cheminformatics.
 </p>
 
 ---
+
+## Modules
+- **ADME** property prediction module
+- **PROTAC** design module
+- **LBVS** (Ligand-based virtual screening) module
+- AI/cofold-based virtual screening
+- GROMACS module for binding free energy calculation, alanine scanning
+- OpenFE module for binding free energy calculation and molecular dynamics (MD) simulations
+- Ligand-based virtual screening via similarity search
+
 
 ## Overview
 
@@ -264,16 +274,16 @@ clean-install, update, GPU-verification, and troubleshooting guide, see
 
 Two environment specifications are provided:
 
-- `environment.yaml` for local development, CPU systems, and Apple Silicon.
-- `environment-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs. It uses
-  `requirements-hpc-torch.txt` to install the CUDA 12.6 PyTorch build.
+- `env/environment.yaml` for local development, CPU systems, and Apple Silicon.
+- `env/environment-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs. It uses
+  `env/requirements-hpc-torch.txt` to install the CUDA 12.6 PyTorch build.
 
 The free-energy tools (OpenFE, OpenMM, GROMACS/PMX, Open Babel, ACPYPE) live in a
 separate conda env named `alchemforge`, so their NumPy 1.x / RDKit pins never
 touch the ML stack. It has its own specifications:
 
-- `environment-alchemforge.yaml` for workstations (macOS or Linux).
-- `environment-alchemforge-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs (CUDA 12.6).
+- `env/environment-alchemforge.yaml` for workstations (macOS or Linux).
+- `env/environment-alchemforge-hpc.yaml` for Linux HPC nodes with NVIDIA GPUs (CUDA 12.6).
 
 Install it from the desktop **Environments** page (or `chemflow fe-env install
 [--cuda 12.6]`), or from the yaml followed by
@@ -297,14 +307,14 @@ cd ChemFlow
 Run this command from the repository root:
 
 ```bash
-mamba env create -f environment.yaml
+mamba env create -f env/environment.yaml
 mamba activate chemflow
 ```
 
 If the `chemflow` environment already exists, update it instead:
 
 ```bash
-mamba env update --name chemflow --file environment.yaml --prune
+mamba env update --name chemflow --file env/environment.yaml --prune
 mamba activate chemflow
 ```
 
@@ -326,19 +336,19 @@ module load cuda/12.6  # module name may differ on your cluster
 Create the HPC environment from the repository root:
 
 ```bash
-mamba env create -f environment-hpc.yaml
+mamba env create -f env/environment-hpc.yaml
 mamba activate chemflow
 ```
 
 To update an existing HPC environment:
 
 ```bash
-mamba env update --name chemflow --file environment-hpc.yaml --prune
+mamba env update --name chemflow --file env/environment-hpc.yaml --prune
 mamba activate chemflow
 ```
 
-`environment-hpc.yaml` installs the packages pinned in
-`requirements-hpc-torch.txt`, including the CUDA 12.6 builds of PyTorch and
+`env/environment-hpc.yaml` installs the packages pinned in
+`env/requirements-hpc-torch.txt`, including the CUDA 12.6 builds of PyTorch and
 Torchvision. A complete system CUDA Toolkit is generally unnecessary unless
 you need to compile custom CUDA extensions.
 
@@ -374,16 +384,16 @@ workload with `--matrix-size` and `--iterations`. A failed result on a login
 node does not necessarily indicate a broken installation, because many
 clusters expose GPUs only inside scheduled jobs.
 
-If you modify `requirements.txt`, synchronize the active environment with:
+If you modify `env/requirements.txt`, synchronize the active environment with:
 
 ```bash
-mamba env update --name chemflow --file environment.yaml --prune
+mamba env update --name chemflow --file env/environment.yaml --prune
 ```
 
-If you modify `requirements-hpc-torch.txt`, update the HPC environment instead:
+If you modify `env/requirements-hpc-torch.txt`, update the HPC environment instead:
 
 ```bash
-mamba env update --name chemflow --file environment-hpc.yaml --prune
+mamba env update --name chemflow --file env/environment-hpc.yaml --prune
 ```
 
 ### Alternative: pip virtual environment
@@ -395,7 +405,7 @@ RDKit, PyTorch, and LightGBM are generally easier to install through Conda.
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r env/requirements.txt
 ```
 
 ### Pretrained model weights
@@ -454,7 +464,7 @@ environment specification:
 
 ```bash
 mamba activate chemflow
-mamba env update --name chemflow --file environment.yaml --prune
+mamba env update --name chemflow --file env/environment.yaml --prune
 python -m pip check
 ```
 

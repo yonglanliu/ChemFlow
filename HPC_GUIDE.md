@@ -23,7 +23,7 @@ source <conda-prefix>/etc/profile.d/conda.sh
 ## 1. Create the `alchemforge` environment
 
 Two equivalent routes. Both use the same package pins
-(`environment-alchemforge-hpc.yaml` and `chemflow fe-env install` are kept in sync
+(`env/environment-alchemforge-hpc.yaml` and `chemflow fe-env install` are kept in sync
 by a test).
 
 **A. From the yaml (works without ChemFlow installed first).** Run from any
@@ -44,11 +44,16 @@ e.g. a base ML env where you ran `pip install -e /path/to/ChemFlow`):
 chemflow fe-env install --cuda 12.6      # creates env 'alchemforge' (python 3.12) + links chemflow + PMX
 ```
 
-`--cuda 12.6` adds `cuda-version`/`cuda-toolkit` and sets `CONDA_OVERRIDE_CUDA`, so
-the GPU build resolves even when you install from a **GPU-less login node**. CUDA
-12.6 still supports Pascal GPUs (e.g. P100); newer GPUs such as Blackwell need a
-newer CUDA pin (`--cuda 12.8` or later). Omit `--cuda` on a CPU-only machine. Add
-`--dry-run` to print the commands first.
+`--cuda 12.6` adds `cuda-version`/`cuda-toolkit`, sets `CONDA_OVERRIDE_CUDA` (so the
+GPU build resolves even from a **GPU-less login node**), and selects the **CUDA
+GROMACS** build (`gromacs=*=nompi_cuda*`) instead of conda-forge's OpenCL build.
+Pin the CUDA version to one your **node's driver supports** — `nvidia-smi` shows the
+maximum as "CUDA Version: X.Y" top-right; choosing a higher toolkit gives OpenMM
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at runtime. CUDA 12.6 still supports Pascal
+GPUs (e.g. P100); newer GPUs such as Blackwell need a newer CUDA pin (`--cuda 12.8`
+or later). Omit `--cuda` on a CPU-only machine. Override the GROMACS build with
+`--gromacs-spec` if needed. Add `--dry-run` to print the commands first. On a
+low-memory login node where the solve is OOM-killed (`exit -9`), add `--staged`.
 
 Other tools keep their own envs:
 
@@ -66,6 +71,25 @@ chemflow rosetta-env status
 chemflow reinvent-env status
 alchemforge gpu-test
 ```
+
+### Troubleshooting `alchemforge gpu-test`
+
+Run it **inside an allocated GPU job**, never the login node, and check `nvidia-smi`
+first so you know the driver and its maximum CUDA version.
+
+- **OpenMM: `CUDA_ERROR_UNSUPPORTED_PTX_VERSION (222)`** — the env's CUDA toolkit is
+  newer than the node's driver. Reinstall with a CUDA pin at or below the driver's
+  "CUDA Version" from `nvidia-smi`, e.g. `chemflow fe-env install --env alchemforge
+  --cuda 12.2 --recreate` (or just `mamba install -n alchemforge -c conda-forge
+  cuda-version=12.2 cuda-toolkit=12.2`).
+- **GROMACS: `GPU support: OpenCL` / `Cannot run short-ranged nonbonded interactions
+  on a GPU because no GPU is detected`** — the OpenCL GROMACS build was installed
+  instead of the CUDA one. Reinstall the CUDA variant: `mamba install -n alchemforge
+  -c conda-forge "gromacs=*=nompi_cuda*"`, or re-run the installer with `--cuda`
+  (which now selects that build automatically).
+
+After fixing both, re-run `alchemforge gpu-test`; a healthy node prints `[PASS]` for
+OpenMM and GROMACS and ends with `GPU TEST: PASSED`.
 
 ## 2. Link the envs (only if conda lives somewhere unusual)
 
