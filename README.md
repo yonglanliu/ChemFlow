@@ -1,5 +1,16 @@
 <div align="center">
 
+<img src="assets/images/chemflow_logo.svg" alt="ChemFlow logo" width="160"/>
+
+<h1>🧪&nbsp; ChemFlow &nbsp;🧬</h1>
+
+<h3>Molecular AI Studio</h3>
+
+<p>An extensible AI-powered platform for molecular design, PROTAC design, property
+prediction, virtual screening, free-energy calculations, and cheminformatics.</p>
+
+</div>
+
 ---
 
 ## ChemFlow Installation
