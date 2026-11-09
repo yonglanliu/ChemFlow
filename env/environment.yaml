@@ -1,5 +1,13 @@
 name: chemflow
 
+# Local / CPU / Apple Silicon spec (macOS or a personal Linux box).
+# On an NVIDIA GPU cluster use env/environment-hpc.yaml instead: it adds the CUDA
+# PyTorch wheels and the GNU C++ runtime (libgcc-ng / libstdcxx-ng) that enterprise
+# Linux needs. Those runtime packages are Linux-only on conda-forge, so they cannot
+# live here without breaking the macOS solve. If you hit
+# "GLIBCXX_3.4.29 not found" from numpy/torch, you are on Linux with this file —
+# recreate the env from env/environment-hpc.yaml (see INSTALL.md troubleshooting).
+
 channels:
   - conda-forge
 
@@ -10,7 +18,7 @@ dependencies:
   # Native and compiled dependencies are installed by Conda first.
   - lightgbm=4.7.0
   - llvmlite=0.47.0
-  - matplotlib=3.11.0
+  - matplotlib-base=3.11.0   # -base avoids conda's pyside6/shiboken6, which collide with the pip PySide6==6.9.3 below
   - numba=0.65.1
   - numpy=2.4.6
   - pandas=3.0.3
@@ -33,4 +41,15 @@ dependencies:
   # Pip installs the remaining pinned packages and this local project.
   - pip:
       - descriptastorus==2.8.0
+      # ChemFlow Studio (`chemflow-desktop`) GUI toolkit. Installed from PyPI,
+      # NOT conda-forge: the conda `pyside6` package omits QtWebEngine, which the
+      # desktop's RBFE/ABFE graph, linker-designer, and 3D-viewer pages require.
+      # The PyPI wheel bundles QtWebEngine. Verify with:
+      #   python -c "from PySide6.QtWebEngineWidgets import QWebEngineView"
+      # pip must be the SOLE owner of the Qt stack (see matplotlib-base above): if
+      # conda also installs pyside6/shiboken6 they collide, and a shiboken6 version
+      # that differs from PySide6 crashes at import ("could not initialize part 2").
+      # shiboken6 is pinned to the same version so the binding ABI always matches.
+      - PySide6==6.9.3
+      - shiboken6==6.9.3
       - -r requirements.txt

@@ -3,11 +3,11 @@ name: alchemforge
 # Workstation environment (macOS or Linux) for the free-energy stack: OpenFE,
 # OpenMM, GROMACS/PMX RBFE, Open Babel + ACPYPE. It is headless — the GUI is
 # ChemFlow Studio (`chemflow-desktop`, installed in the ChemFlow environment),
-# which runs these tools through this env. Keeping it separate from environment.yaml
+# which runs these tools through this env. Keeping it separate from env/environment.yaml
 # stops OpenFE's NumPy 1.x / RDKit pins from disturbing the ML stack.
 #
 # Create it, then link ChemFlow in editable (development) mode:
-#   mamba env create -f environment-alchemforge.yaml
+#   mamba env create -f env/environment-alchemforge.yaml
 #   mamba activate alchemforge
 #   python -m pip install -e . --no-deps --no-build-isolation     # chemflow + alchemforge
 #   python -m pip install ./pmx --no-deps --no-build-isolation    # PMX (GROMACS hybrids)
@@ -15,7 +15,7 @@ name: alchemforge
 # (`chemflow fe-env install`, used by the desktop Environments page, installs the
 # same package pins; tests/test_chemflow_fe_env_install.py keeps them in sync.)
 #
-# For NVIDIA GPU HPC nodes use environment-alchemforge-hpc.yaml instead.
+# For NVIDIA GPU HPC nodes use env/environment-alchemforge-hpc.yaml instead.
 channels:
   - conda-forge
 

@@ -1,0 +1,118 @@
+# ===================================================================
+# AlchemFold HPC run settings (single-ligand docking).
+#
+# Customize the SLURM walltime PRESETS, selectable GPU TYPES, and the default
+# SLURM resources here — no code changes needed. This file is read by
+# `alchemfold dock stage --target hpc ...` and by the desktop "Run on: HPC"
+# dropdown.
+#
+# Lookup order (first found wins):
+#   1. $CHEMFLOW_HPC_CONFIG
+#   2. <repo>/env/hpc.yaml          (this file)
+#   3. ~/.config/chemflow/hpc.yaml  (per-user override)
+#
+# NOTE: AI co-folding / docking (Boltz-2, Chai-1) is GPU-bound. These presets
+# all request one node + one GPU. Running on CPU (the "localhost" target on a
+# machine without a GPU) is only practical for tiny smoke tests, not real jobs.
+# ===================================================================
+
+# Default SLURM resources. Walltime is NOT set here — it comes from the chosen
+# preset below. Leave account "" to omit the #SBATCH --account line.
+defaults:
+  partition: gpu
+  account: ""
+  cpus_per_task: 8
+  mem: 32G
+  conda_env: alchemfold
+
+# Selectable GPU types for `--gres=gpu:<type>:1`. "" means no type constraint
+# (any available GPU). Add/remove to match your cluster's gres names.
+gpu_types:
+  - ""        # any GPU
+  - a100
+  - v100x
+  - p100
+  - v100
+  - l40
+
+# Which preset is selected by default.
+default_preset: singlenode-singlegpu-day
+
+# Named presets -> SLURM resources. A preset can be EITHER:
+#   * a walltime string  -> single-node, single-GPU (shorthand), or
+#   * a mapping          -> customize any of:
+#         time, nodes, ntasks_per_node, gpus_per_node,
+#         gpu_type, cpus_per_task, mem, partition, account, conda_env
+#     (missing keys fall back to the `defaults` above, then to 1 node / 1 GPU).
+# Add your own presets freely; the names appear in the desktop "Preset" dropdown.
+#
+# NOTE: AI co-folding / docking (Boltz-2, Chai-1) is single-GPU inference, so
+# multi-node presets do NOT speed up a single docking run — they exist for
+# cluster policies / deliberate use. Throughput over many ligands is the
+# screening path (already a SLURM array).
+presets:
+  singlenode-singlegpu-quick: "04:00:00"      # 4 hours
+  singlenode-singlegpu-day: "1-00:00:00"      # 1 day
+  singlenode-singlegpu-long: "4-00:00:00"     # 4 days
+  singlenode-singlegpu-week: "7-00:00:00"     # 7 days
+  singlenode-singlegpu-tendays: "10-00:00:00"  # 10 days
+
+  # Multi-GPU (lambda windows parallelized across GPUs via MPI; mpi auto-on when
+  # gpus_per_node > 1). Match gpu_type/counts to your cluster.
+  singlenode-2gpu-long:
+    time: "4-00:00:00"
+    nodes: 1
+    gpus_per_node: 2
+    gpu_type: a100
+    cpus_per_task: 8
+    mem: 64G
+    mpi: true
+  singlenode-4gpu-long:
+    time: "4-00:00:00"
+    nodes: 1
+    gpus_per_node: 4
+    gpu_type: a100
+    cpus_per_task: 8
+    mem: 128G
+    mpi: true
+
+# ------------------------------------------------------------------
+# OpenFE (RBFE / ABFE / SepTop) SLURM allocation.
+#
+# Per-job resources live in an inline `slurm:` block INSIDE each OpenFE config
+# (alchemfold screen.yaml style) — edit that block to change a specific job.
+# The OPTIONAL block below only sets the site-wide DEFAULTS that seed a newly
+# generated config's `slurm:` block; the inline block always wins. Delete this
+# section to use the built-in defaults.
+# ------------------------------------------------------------------
+openfe:
+  defaults:
+    partition: gpu
+    account: ""
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 16
+    gpus: 1
+    gpu_type: ""          # e.g. a100 -> --gres=gpu:a100:1
+    memory: 32G
+    walltime: "240:00:00"
+    replicates: 3          # array = N_transformation_json * replicates
+    conda_environment: alchemforge
+
+
+  # ---- Multi-node / multi-GPU examples (uncomment / edit to use) ----
+  # multinode-2x4-day:              # 2 nodes x 4 GPUs/node
+  #   time: "1-00:00:00"
+  #   nodes: 2
+  #   ntasks_per_node: 4
+  #   gpus_per_node: 4
+  #   gpu_type: a100
+  #   cpus_per_task: 8
+  #   mem: 128G
+  # singlenode-4gpu-long:           # 1 node x 4 GPUs
+  #   time: "4-00:00:00"
+  #   nodes: 1
+  #   ntasks_per_node: 4
+  #   gpus_per_node: 4
+  #   gpu_type: a100
+

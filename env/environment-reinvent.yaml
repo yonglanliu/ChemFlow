@@ -4,7 +4,7 @@ name: reinvent
 # into the `chemflow` env: it pins torch==2.13.0 and pulls numpy 2 / pandas 3 /
 # a much newer RDKit, which breaks other packages there).
 #
-#   conda env create -f environment-reinvent.yaml
+#   conda env create -f env/environment-reinvent.yaml
 #   conda activate reinvent
 #   git clone --depth 1 https://github.com/MolecularAI/REINVENT4.git
 #   cd REINVENT4

@@ -13,9 +13,9 @@ name: alchemfold
 #   * Boltz-2 requires Python >=3.10,<3.13.
 #
 # Create it:
-#     conda env create -f environment-alchemfold.yaml        # or mamba
+#     conda env create -f env/environment-alchemfold.yaml        # or mamba
 #     conda activate alchemfold
-#     pip install -e src --no-deps --no-build-isolation      # install alchemfold
+#     pip install -e . --no-deps --no-build-isolation      # install alchemfold (from repo root)
 #
 # HPC notes:
 #   * Build/activate the env in a project directory, and run `alchemfold dock run`
@@ -61,13 +61,27 @@ dependencies:
       # - torch
       - boltz            # Boltz-2  (engine: boltz)  — supports affinity + pocket
       - chai_lab         # Chai-1   (engine: chai)
+      # DiffDock (engine: diffdock) — blind docking, GitHub-only (no PyPI release).
+      # Uncomment the block below to install it into THIS env. It pulls the
+      # torch-geometric stack (torch_scatter/sparse/cluster), whose wheels MUST
+      # match the torch build boltz/chai install — set the find-links URL to that
+      # torch+CUDA tag (see `python -c "import torch;print(torch.__version__)"`).
+      # If pip reports a conflict with boltz/chai, use a separate env instead
+      # (see the note below) and point `diffdock_command` at it.
+      # - --find-links https://data.pyg.org/whl/torch-2.4.0+cu121.html
+      # - torch-scatter
+      # - torch-sparse
+      # - torch-cluster
+      # - torch-geometric
+      # - e3nn
+      # - fair-esm
+      # - spyrmsd
+      # - "DiffDock @ git+https://github.com/gcorso/DiffDock.git"
 
-# DiffDock (engine: diffdock) is NOT on PyPI — it is a GitHub repository with its
-# own conda environment. Install it separately and point `diffdock_command` at its
-# inference entry point, e.g.:
-#     git clone https://github.com/gcorso/DiffDock.git
-#     # create/activate DiffDock's own env per its README, then in docking.yaml:
-#     #   engine: diffdock
-#     #   diffdock_command: "python /path/to/DiffDock/inference.py"
-#     #   receptor_pdb: receptor.pdb
+# DiffDock alternative — its own environment (recommended; avoids torch-geometric
+# vs boltz/chai conflicts). Clone the repo, build its conda env per its README,
+# then in docking.yaml / screen.yaml:
+#     engine: diffdock
+#     diffdock_command: "python /path/to/DiffDock/inference.py"
+#     receptor_pdb: receptor.pdb
 # AlchemFold only builds DiffDock's input CSV + command; it does not vendor the model.

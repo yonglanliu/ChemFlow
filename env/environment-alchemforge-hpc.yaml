@@ -1,13 +1,13 @@
 name: alchemforge
 
 # Linux HPC environment (NVIDIA GPU compute nodes): same free-energy stack as
-# environment-alchemforge.yaml, headless (no Qt/GUI libraries) and with the CUDA
+# env/environment-alchemforge.yaml, headless (no Qt/GUI libraries) and with the CUDA
 # user-space toolkit. The cluster supplies the NVIDIA driver; conda does not.
 # CUDA 12.6 is the last line that still supports Pascal GPUs (e.g. Tesla P100);
 # newer GPUs (Blackwell) need a newer CUDA pin.
 #
 # Create it (any directory) and link ChemFlow:
-#   conda env create -n alchemforge -f environment-alchemforge-hpc.yaml
+#   conda env create -n alchemforge -f env/environment-alchemforge-hpc.yaml
 #   conda activate alchemforge
 #   python -m pip install -e /path/to/ChemFlow --no-deps --no-build-isolation
 #   python -m pip install /path/to/ChemFlow/pmx --no-deps --no-build-isolation
@@ -28,7 +28,7 @@ dependencies:
   - openfe=1.12
   - openmm=8.4.0
   - openff-toolkit
-  - gromacs
+  - gromacs=*=nompi_cuda*   # force the CUDA build; plain `gromacs` can resolve to the OpenCL build, which fails on NVIDIA nodes
   - ambertools
   - acpype
   - openbabel
@@ -48,7 +48,7 @@ dependencies:
   - "pandas>=2.1,<3"
   - "rdkit>=2024.03,<2026.03"
   - scipy
-  - matplotlib
+  - matplotlib-base   # -base: this is a headless env, avoid pulling conda's pyside6/Qt GUI stack
   - pyyaml
   - pillow
 

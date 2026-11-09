@@ -1,0 +1,29 @@
+# Rosetta environment for ChemFlow's PROTAC / PRosettaC pipeline.
+#
+# Installs BOTH the classic Rosetta C++ app suite (rosetta_scripts, docking_protocol,
+# molfile_to_params, ...) AND PyRosetta, from the RosettaCommons conda channel.
+# This is credential-free (no academic username/password, no license tarball) — the
+# `rosetta` and `pyrosetta` conda packages are distributed openly for academic use.
+#
+# Create it, then link ChemFlow (editable) so `chemflow protac ...` runs through it:
+#   conda env create -f env/environment-rosetta.yaml        # or mamba env create -f ...
+#   conda activate rosetta
+#   python -m pip install -e . --no-deps                # link chemflow into the env
+#
+# Equivalent one-liner (what the desktop "Rosetta" Environments card runs):
+#   chemflow rosetta-env install                        # installs rosetta + pyrosetta, links chemflow
+#
+# PyRosetta/Rosetta are free for academic / non-commercial use (request a license
+# from UW CoMotion); commercial use requires a paid license.
+
+name: rosetta
+
+channels:
+  - https://conda.rosettacommons.org
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - rosetta        # classic Rosetta C++ apps (serialization + cxx11thread builds)
+  - pyrosetta      # Python bindings
+  - pip
