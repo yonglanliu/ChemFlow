@@ -215,6 +215,14 @@ chemflow uncertainty bootstrap \
 
 ## Examples
 
+### PROTAC generation
+
+<p align="center">
+  <video src="https://github.com/yonglanliu/ChemFlow/raw/main/assets/movie/protac_generation_movie.mp4" controls muted width="900"></video>
+</p>
+
+<p align="center"><em>PROTAC generation walkthrough.</em> If the video does not play inline on GitHub, <a href="assets/movie/protac_generation_movie.mp4">download / watch it here</a>.</p>
+
 ### Molecular similarity
 
 - ECFP4, ECFP6, FCFP4, FCFP6
