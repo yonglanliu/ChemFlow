@@ -1,26 +1,23 @@
 # Installing ChemFlow
 
 ChemFlow requires Python 3.11. The supported installation uses Miniforge (or
-another Conda-compatible distribution) and Mamba. Install ChemFlow and
-AlchemForge in separate environments because their simulation and machine-
-learning dependency stacks have different constraints.
+another Conda-compatible distribution) and Mamba.
 
-This guide covers the ChemFlow (machine-learning) environment. The free-energy
-environment, `alchemforge` (OpenFE, OpenMM, GROMACS/PMX, Open Babel, ACPYPE), is
-created separately:
+**Install ChemFlow first.** ChemFlow is the base (machine-learning) environment and
+the entry point for everything else. Once it is installed you use ChemFlow itself —
+either the desktop **Environments** page or the `chemflow …-env install` commands — to
+build the heavier compute environments (AlchemForge, AlchemFold, Rosetta). Those live
+in separate conda environments because their simulation and ML dependency stacks have
+different constraints.
 
-```bash
-mamba env create -f env/environment-alchemforge.yaml            # workstation
-# or, on an NVIDIA GPU cluster:
-conda env create -n alchemforge -f env/environment-alchemforge-hpc.yaml
-mamba activate alchemforge
-python -m pip install -e . --no-deps --no-build-isolation   # link ChemFlow (editable)
-python -m pip install ./pmx --no-deps --no-build-isolation  # PMX
-```
+The order is:
 
-`scripts/dev_install.sh` does the linking steps for an existing `alchemforge` env,
-and the desktop **Environments** page (`chemflow fe-env install`) builds the same
-env. See `src/alchemforge/README.md` and `HPC_GUIDE.md` for details.
+1. [Prerequisites](#prerequisites) and [Download ChemFlow](#download-chemflow).
+2. Install the ChemFlow environment —
+   [local / CPU / Apple Silicon](#local-cpu-and-apple-silicon-installation) or
+   [NVIDIA GPU / HPC](#nvidia-gpu-installation-on-linux-or-hpc).
+3. [Install the compute environments with ChemFlow](#install-the-compute-environments-with-chemflow)
+   (AlchemForge / AlchemFold / Rosetta).
 
 ## Prerequisites
 
@@ -151,6 +148,76 @@ chemflow gpu-test --device 1
 chemflow gpu-test --matrix-size 2048 --iterations 5
 ```
 
+## Install the compute environments with ChemFlow
+
+With the base **ChemFlow** environment installed and activated, use ChemFlow to build
+the heavier compute environments. Each lives in its own conda env and is linked back
+to ChemFlow.
+
+### From the desktop (recommended)
+
+Launch the app and open the **Environments** page (*Install compute environments*).
+Each card installs one toolchain into its own conda env, links it to ChemFlow, and
+streams the log to the Activity console.
+
+```bash
+chemflow-desktop
+```
+
+<p align="center">
+  <img src="assets/images/chemflow-desktop-environments.png" alt="ChemFlow Desktop — Install compute environments" width="900">
+</p>
+
+- **AlchemForge — OpenFE + GROMACS** — binding free energy (OpenFE RBFE/ABFE/SepTop),
+  OpenMM MD, and the GROMACS/PMX RBFE pipeline (RDKit, Open Babel, ACPYPE, AmberTools,
+  GROMACS + PMX).
+- **AlchemFold — Boltz-2 + Chai-1** — co-folding / docking structure prediction
+  (pulls a Torch stack).
+- **Rosetta — PROTAC docking** — classic Rosetta C++ apps and PyRosetta from the
+  RosettaCommons conda channel (no license tarball).
+
+For each card: set **Env name** (defaults shown); on a laptop leave **GPU (CUDA)** off,
+and on an NVIDIA HPC/workstation tick **GPU (CUDA)** and set the **CUDA** version to
+match the GPU partition's driver (not the login node — see
+[Installing a CUDA environment from a CPU-only (login) node](#installing-a-cuda-environment-from-a-cpu-only-login-node)).
+Use **Preview commands** to see what will run, **Install** to build it, **Check** to
+validate an existing env, and **Recreate** to rebuild it from scratch.
+
+### From the command line
+
+The desktop buttons call these same commands — run them yourself if you prefer:
+
+```bash
+chemflow fe-env install                 # AlchemForge (OpenFE + GROMACS/PMX)
+chemflow alchemfold-env install         # AlchemFold (Boltz-2 + Chai-1)
+chemflow rosetta-env install            # Rosetta + PyRosetta
+
+# add --cuda <ver> for a GPU build (AlchemForge / AlchemFold), e.g.:
+chemflow fe-env install --cuda 12.6 --staged
+```
+
+Add `--dry-run` to print the commands without running them, and use the `status`
+subcommand (e.g. `chemflow fe-env status`) to check whether an env is present. See
+`src/alchemforge/README.md` and `tutorials/HPC_GUIDE.md` for details.
+
+### Manual environment creation (advanced)
+
+You can also create an environment directly from its yaml spec — for example
+AlchemForge:
+
+```bash
+mamba env create -f env/environment-alchemforge.yaml            # workstation
+# or, on an NVIDIA GPU cluster:
+conda env create -n alchemforge -f env/environment-alchemforge-hpc.yaml
+mamba activate alchemforge
+python -m pip install -e . --no-deps --no-build-isolation   # link ChemFlow (editable)
+python -m pip install ./pmx --no-deps --no-build-isolation  # PMX
+```
+
+`scripts/dev_install.sh` performs the linking steps for an existing `alchemforge` env.
+The AlchemFold and Rosetta specs are `env/environment-alchemfold.yaml` and
+`env/environment-rosetta.yaml` (with `-hpc` variants where provided).
+
 ## Installing a CUDA environment from a CPU-only (login) node
 
 You do **not** need a GPU to *install* a CUDA environment (the `alchemforge`
@@ -239,146 +306,3 @@ python -m pip install -e '.[data-curation]'
 The environment specifications already include the dependencies used by the
 standard bundled workflows. Extras are primarily useful for targeted or
 minimal installations.
-
-## Troubleshooting
-
-### The wrong Python or Conda environment is active
-
-```bash
-conda info --base
-conda env list
-mamba activate chemflow
-command -v python
-```
-
-The active Python must come from the `chemflow` environment. Environment names
-are more portable than embedding a machine-specific absolute prefix in the
-installation instructions.
-
-### `descriptastorus` cannot be resolved by libmamba
-
-Use the current `env/environment.yaml` or `env/environment-hpc.yaml`. In these files,
-Conda resolves the compiled packages and pip installs `descriptastorus`. Do not
-add `descriptastorus` to the Conda dependency list.
-
-### CUDA is unavailable
-
-Run `chemflow gpu-test` inside a scheduled GPU allocation. If it still fails,
-check:
-
-```bash
-nvidia-smi
-echo "${CUDA_VISIBLE_DEVICES:-not-set}"
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-```
-
-A CPU-only PyTorch build reports `torch.version.cuda` as `None`. Recreate or
-update the environment with `env/environment-hpc.yaml` in that case.
-
-### NumPy or PyTorch reports `GLIBCXX_3.4.29 not found`
-
-This means the dynamic loader selected the operating system's older
-`libstdc++.so.6` instead of the runtime installed in the active Conda
-environment. First update the HPC environment so `libgcc-ng` and
-`libstdcxx-ng` are present:
-
-```bash
-mamba env update \
-  --name chemflow \
-  --file env/environment-hpc.yaml \
-  --prune
-mamba activate chemflow
-```
-
-Confirm that the environment library provides the required symbol:
-
-```bash
-strings "$CONDA_PREFIX/lib/libstdc++.so.6" | grep GLIBCXX_3.4.29
-```
-
-Then test with the Conda library directory first in the loader search path:
-
-```bash
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-python -c "import numpy, torch; print(numpy.__version__, torch.__version__)"
-chemflow gpu-test
-```
-
-If this fixes the import, save the setting only for this environment rather
-than exporting it globally:
-
-```bash
-mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
-printf '%s\n' \
-  'export _CHEMFLOW_OLD_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"' \
-  'export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
-  > "$CONDA_PREFIX/etc/conda/activate.d/chemflow-runtime.sh"
-
-mkdir -p "$CONDA_PREFIX/etc/conda/deactivate.d"
-printf '%s\n' \
-  'export LD_LIBRARY_PATH="${_CHEMFLOW_OLD_LD_LIBRARY_PATH-}"' \
-  'unset _CHEMFLOW_OLD_LD_LIBRARY_PATH' \
-  > "$CONDA_PREFIX/etc/conda/deactivate.d/chemflow-runtime.sh"
-```
-
-Re-activate the environment after creating these scripts. Avoid replacing the
-system `/lib64/libstdc++.so.6`.
-
-### Remove and recreate only the ChemFlow environment
-
-```bash
-mamba deactivate
-mamba env remove --name chemflow
-mamba env create --file env/environment.yaml
-```
-
-Use `env/environment-hpc.yaml` in the final command for the NVIDIA HPC build. This
-removes the named environment only; it does not uninstall the base Conda
-installation or delete the ChemFlow repository.
-
-### The desktop (`chemflow-desktop`) GUI / PySide6
-
-ChemFlow Studio needs **PySide6 with QtWebEngine** (the RBFE/ABFE network graphs,
-the linker designer, and the 3D structure viewers all render through
-`QWebEngineView`). Two rules keep this working, and both are already encoded in
-`env/environment.yaml` / `env/environment-hpc.yaml`:
-
-- **Install PySide6 from PyPI, not conda.** The conda-forge `pyside6` package omits
-  QtWebEngine; the PyPI wheel bundles it. The yaml pins `PySide6==6.9.3` and
-  `shiboken6==6.9.3` in its `pip:` section.
-- **Let pip be the only owner of the Qt stack.** If conda also installs
-  `pyside6`/`shiboken6`, the two package managers fight. This is why the yaml uses
-  `matplotlib-base` instead of `matplotlib` — the plain conda `matplotlib` pulls in
-  its own `pyside6` as a GUI backend. Do not add `pyside6`, `shiboken6`, or plain
-  `matplotlib` to the Conda dependency list.
-
-Verify the desktop toolkit:
-
-```bash
-python -c "import PySide6, shiboken6; print(PySide6.__version__, shiboken6.__version__)"  # both 6.9.3
-python -c "from PySide6.QtWebEngineWidgets import QWebEngineView; print('WebEngine OK')"
-```
-
-Two failure modes you may see if an env was built or repaired by hand:
-
-- **`Cannot uninstall shiboken6 … no RECORD file` / `critical libmamba pip failed`**
-  during install. A conda-managed `pyside6`/`shiboken6` is present (usually dragged
-  in by conda `matplotlib`) and pip cannot replace it. Fix by removing the conda
-  copy so pip can own it, then recreating:
-
-  ```bash
-  conda remove -n chemflow --force pyside6 shiboken6
-  mamba env update --name chemflow --file env/environment.yaml --prune   # or env/environment-hpc.yaml
-  ```
-
-- **`Fatal Python error: could not initialize part 2`** (a `signature_bootstrap` /
-  `find_incarnated_files` traceback) at `import PySide6`. `PySide6` and `shiboken6`
-  are at **mismatched versions** — the binding ABI must match exactly. Purge every
-  Qt copy and reinstall the matched set:
-
-  ```bash
-  conda remove -n chemflow --force pyside6 pyside6-essentials pyside6-addons shiboken6 2>/dev/null
-  python -m pip uninstall -y PySide6 PySide6-Essentials PySide6-Addons shiboken6
-  python -m pip install "PySide6==6.9.3"
-  ```
-
