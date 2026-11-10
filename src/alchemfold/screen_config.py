@@ -164,8 +164,11 @@ def default_yaml_text(
     library: str = "zinc22",
     protein_id: str = "A",
     sequence: str = "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
+    proteins: list | None = None,
 ) -> str:
     """Return a commented example screening config."""
+    from alchemfold.dock_config import _format_proteins_block
+    proteins_block = _format_proteins_block(proteins or [(protein_id, sequence)])
     return (
         "# ===================================================================\n"
         "# AlchemFold virtual screening: dock a ligand library in parallel on HPC,\n"
@@ -182,10 +185,8 @@ def default_yaml_text(
         "diffusion_samples: 1\n"
         "seed: 1\n"
         "\n"
-        "proteins:\n"
-        f'  - id: "{protein_id}"\n'
-        f'    sequence: "{sequence}"\n'
-        "# receptor_pdb: receptor.pdb     # for engine: diffdock\n"
+        + proteins_block
+        + "# receptor_pdb: receptor.pdb     # for engine: diffdock\n"
         "\n"
         "ligand_files:                   # one or more libraries (CSV/.smi/.cxsmiles, .bz2/.gz)\n"
         '  - "library_part1.cxsmiles.bz2"\n'

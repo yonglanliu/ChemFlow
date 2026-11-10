@@ -23,6 +23,11 @@ from pathlib import Path
 
 _DEFAULT_ENV = "alchemfold"
 _PACKAGES = ("boltz", "chai_lab")
+# Boltz-2's optimized triangle kernels (cuequivariance/trifast) are intentionally
+# NOT installed here: the current cuequivariance-ops wheels pull a very new PyTorch
+# (2.11+/CUDA 13) that breaks chai_lab's torch<2.7 pin. AlchemFold defaults Boltz to
+# `no_kernels: true` (pure-PyTorch). For max Boltz speed use a separate boltz-only
+# env with `pip install "boltz[cuda]"` and set `no_kernels: false` there.
 # Conda deps that must match env/environment-alchemfold.yaml so the CLI/desktop
 # one-click build the SAME env as `conda env create -f env/environment-alchemfold.yaml`.
 _CONDA_EXTRAS = ("pyyaml", "rdkit>=2024.03", "setuptools>=80", "wheel")
@@ -93,6 +98,7 @@ def _install(args) -> int:
         return 1
     repo = str(Path(args.repo).expanduser().resolve()) if args.repo else str(_repo_root())
     torch_index = None
+    packages = list(_PACKAGES)
     if args.cuda:
         cu = "cu" + args.cuda.replace(".", "")
         torch_index = f"https://download.pytorch.org/whl/{cu}"
@@ -109,6 +115,7 @@ def _install(args) -> int:
     commands = preamble + install_commands(
         args.env, repo, tool=tool, channel=args.channel, python_version=args.python_version,
         conda_extras=_CONDA_EXTRAS + (_LINUX_RUNTIME if sys.platform == "linux" else ()),
+        packages=tuple(packages),
         torch_index=torch_index, exists=exists)
     for command in commands:
         print("$ " + " ".join(command))

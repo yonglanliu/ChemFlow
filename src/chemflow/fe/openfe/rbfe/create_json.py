@@ -222,14 +222,15 @@ def _load_ligand_network(graphml_path: pathlib.Path, workdir: pathlib.Path):
 
 
 def _create_alchemical_network(
-    ligand_network, protein, solvent, cofactors, complex_protocol, solvent_protocol
+    ligand_network, protein, solvent, cofactors, complex_protocol, solvent_protocol,
+    membrane=False,
 ):
     transformations = []
     for mapping in ligand_network.edges:
         for leg in ["solvent", "complex"]:
-            # use the solvent and protein created above
-            sysA_dict = {"ligand": mapping.componentA, "solvent": solvent}
-            sysB_dict = {"ligand": mapping.componentB, "solvent": solvent}
+            # Start with just the ligand; solvent is added per-leg below.
+            sysA_dict = {"ligand": mapping.componentA}
+            sysB_dict = {"ligand": mapping.componentB}
 
             if leg == "complex":
                 # If this is a complex transformation we use the complex protocol
@@ -239,13 +240,24 @@ def _create_alchemical_network(
                 protocol = complex_protocol
                 sysA_dict["protein"] = protein
                 sysB_dict["protein"] = protein
+                # Membrane systems are PRE-SOLVATED: the ProteinMembraneComponent
+                # already carries water + lipids + ions, so a separate
+                # SolventComponent must NOT be added (OpenFE rejects two solvent
+                # components: "Multiple BaseSolventComponents found"). Soluble
+                # complexes are solvated by OpenFE and still need the solvent.
+                if not membrane:
+                    sysA_dict["solvent"] = solvent
+                    sysB_dict["solvent"] = solvent
                 if cofactors is not None:
                     for idx, cofactor in enumerate(cofactors):
                         sysA_dict[f"cofactor_{idx}"] = cofactor
                         sysB_dict[f"cofactor_{idx}"] = cofactor
             else:
-                # If this is a solvent transformation we just use the solvent protocol
+                # The solvent leg is the ligand transformed in bulk water (never a
+                # membrane), so it always gets a SolventComponent.
                 protocol = solvent_protocol
+                sysA_dict["solvent"] = solvent
+                sysB_dict["solvent"] = solvent
 
             # we don't have to name objects, but it can make things (like filenames) more convenient
             sysA = openfe.ChemicalSystem(
@@ -641,7 +653,8 @@ def main() -> None:
         cofactors = None
 
     network = _create_alchemical_network(
-        ligand_network, prot, solv, cofactors, comp_protocol, sol_protocol
+        ligand_network, prot, solv, cofactors, comp_protocol, sol_protocol,
+        membrane=bool(getattr(conf, "membrane_system", False)),
     )
 
     for transformation in network.edges:

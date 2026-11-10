@@ -13,13 +13,18 @@ faulthandler.enable()
 
 
 def _configure_webengine_rendering() -> None:
-    """Fall back to software rendering for the embedded Chromium (QtWebEngine).
+    """Use software rendering (incl. software WebGL) for the embedded Chromium.
 
     On a remote/headless Linux session (HPC over SSH/X11 or VNC) WebEngine's GPU
     process cannot create a command buffer
     ("ContextResult::kTransientFailure: Failed to send GpuControl.CreateCommandBuffer"),
     which leaves the RBFE/ABFE network graphs, linker designer and 3D viewers blank.
-    Disabling GPU acceleration fixes it; the cost is negligible for these views.
+
+    We route all GL through ANGLE's **SwiftShader** (in-process software GL) and
+    enable the unsafe-SwiftShader fallback, because recent Chromium blocks WebGL in
+    software mode otherwise — 3Dmol.js then fails with "Cannot read properties of
+    null (reading 'getParameter')" when creating its WebGL viewer. SwiftShader
+    avoids the hardware command-buffer failure *and* provides WebGL.
 
     Applied on Linux unless the user opts into hardware GL (``CHEMFLOW_DESKTOP_GPU=1``)
     or has already set ``QTWEBENGINE_CHROMIUM_FLAGS`` themselves. Must run before any
@@ -32,7 +37,8 @@ def _configure_webengine_rendering() -> None:
         return
     os.environ.setdefault(
         "QTWEBENGINE_CHROMIUM_FLAGS",
-        "--disable-gpu --disable-gpu-compositing --no-sandbox",
+        "--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader "
+        "--disable-gpu-compositing --ignore-gpu-blocklist --no-sandbox",
     )
     os.environ.setdefault("QT_OPENGL", "software")
 

@@ -87,6 +87,11 @@ def build_command(conf, input_yaml: Path, out_dir: Path) -> list[str]:
     ]
     if bool(getattr(conf, "use_msa_server", True)):
         command.append("--use_msa_server")
+    if bool(getattr(conf, "no_kernels", False)) or os.environ.get("ALCHEMFOLD_BOLTZ_NO_KERNELS"):
+        # Disable Boltz-2's optimized triangle kernels (cuequivariance_torch /
+        # trifast). Use the pure-PyTorch path when those kernel packages are not
+        # installed (otherwise boltz raises ModuleNotFoundError at predict time).
+        command.append("--no_kernels")
     if bool(getattr(conf, "override", False)):
         command.append("--override")
     cache = (getattr(conf, "cache_dir", None)

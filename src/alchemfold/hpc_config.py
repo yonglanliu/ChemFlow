@@ -18,12 +18,15 @@ defaults below. Expected YAML shape::
       mem: 32G
       conda_env: alchemfold
     gpu_types: ["", a100, v100x, p100, v100, l40]
-    default_preset: singlenode-singlegpu-day
+    default_preset: docking-standard
     presets:         # name -> SLURM --time (all single-node single-GPU)
-      singlenode-singlegpu-quick:   "04:00:00"
-      singlenode-singlegpu-day:     "1-00:00:00"
-      singlenode-singlegpu-long:    "4-00:00:00"
-      singlenode-singlegpu-tendays: "10-00:00:00"
+      docking-quick:    "01:00:00"
+      docking-standard: "04:00:00"
+      docking-long:     "1-00:00:00"
+
+A dedicated ``docking:`` section (same keys: presets/defaults/gpu_types/
+default_preset) overrides the top-level values for the docking path, letting the
+shared top-level ``presets`` stay tuned for OpenFE while docking gets short ones.
 """
 
 from __future__ import annotations
@@ -49,13 +52,14 @@ _BUILTIN: dict[str, Any] = {
         "conda_env": "alchemfold",
     },
     "gpu_types": ["", "a100", "v100x", "p100", "v100", "l40"],
-    "default_preset": "singlenode-singlegpu-day",
+    "default_preset": "docking-standard",
     "presets": {
-        "singlenode-singlegpu-quick": "04:00:00",     # 4 hours
-        "singlenode-singlegpu-day": "1-00:00:00",     # 1 day
-        "singlenode-singlegpu-long": "4-00:00:00",    # 4 days
-        "singlenode-singlegpu-week": "7-00:00:00",    # 7 days
-        "singlenode-singlegpu-tendays": "10-00:00:00",  # 10 days
+        # Co-folding / docking is single-GPU inference and short per complex, so
+        # these walltimes are tuned for docking (not multi-day FE jobs).
+        "docking-quick": "01:00:00",      # 1 hour — small/medium complex, smoke test
+        "docking-standard": "04:00:00",   # 4 hours — typical single docking run (default)
+        "docking-long": "1-00:00:00",     # 1 day — large complex / many diffusion samples / MSA build
+        "docking-xlong": "2-00:00:00",    # 2 days — very large complex or a big ligand_file batch
     },
 }
 
@@ -101,6 +105,22 @@ def load_settings() -> dict[str, Any]:
         settings["gpu_types"] = ["" if g is None else str(g) for g in data["gpu_types"]]
     if data.get("default_preset"):
         settings["default_preset"] = str(data["default_preset"])
+    # A dedicated `docking:` section (mirrors the `openfe:` section) overrides the
+    # top-level values for the docking path, so docking can have short, tuned
+    # presets while the shared top-level `presets` stay available to OpenFE.
+    dock = data.get("docking")
+    if isinstance(dock, dict):
+        if isinstance(dock.get("defaults"), dict):
+            settings["defaults"].update(dock["defaults"])
+        if isinstance(dock.get("presets"), dict) and dock["presets"]:
+            settings["presets"] = {
+                str(k): (v if isinstance(v, dict) else str(v))
+                for k, v in dock["presets"].items()
+            }
+        if isinstance(dock.get("gpu_types"), list):
+            settings["gpu_types"] = ["" if g is None else str(g) for g in dock["gpu_types"]]
+        if dock.get("default_preset"):
+            settings["default_preset"] = str(dock["default_preset"])
     return settings
 
 

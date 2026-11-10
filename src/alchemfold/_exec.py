@@ -16,13 +16,41 @@ import shutil
 import sys
 
 
+def _sibling_env_executables(name: str):
+    """Yield ``bin/<name>`` paths in sibling conda envs of the running interpreter.
+
+    The desktop runs in the ``chemflow`` env, but the docking engines (``boltz`` /
+    ``chai-lab``) live in the ``alchemfold`` env. When ``sys.executable`` is inside
+    a conda ``envs/<x>/bin`` tree, search every sibling env's ``bin/`` for ``name``,
+    trying an env literally called ``alchemfold`` first.
+    """
+    exe = os.path.abspath(sys.executable)
+    parts = exe.split(os.sep)
+    if "envs" not in parts:
+        return
+    envs_root = os.sep.join(parts[: len(parts) - 1 - parts[::-1].index("envs") + 1])
+    try:
+        env_names = sorted(os.listdir(envs_root))
+    except OSError:
+        return
+    # Prefer an env named 'alchemfold', then the rest alphabetically.
+    env_names.sort(key=lambda n: (n != "alchemfold", n))
+    for env_name in env_names:
+        candidate = os.path.join(envs_root, env_name, "bin", name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            yield candidate
+
+
 def resolve_command(command: list[str]) -> list[str]:
     """Return ``command`` with its first token resolved to a real executable.
 
     If the first token already contains a path separator it is left untouched.
     Otherwise we look for it (1) next to ``sys.executable`` (the active env's
-    ``bin/``), then (2) on ``PATH``. If neither is found the token is returned
-    unchanged so the original ``FileNotFoundError`` still surfaces clearly.
+    ``bin/``), then (2) on ``PATH``, then (3) in a sibling conda env (preferring
+    ``alchemfold``) — so a desktop run from the ``chemflow`` env still finds
+    ``boltz`` / ``chai-lab`` in the ``alchemfold`` env. If nothing matches the
+    token is returned unchanged so the original ``FileNotFoundError`` still
+    surfaces clearly.
     """
     if not command:
         return command
@@ -38,6 +66,11 @@ def resolve_command(command: list[str]) -> list[str]:
     found = shutil.which(first)
     if found:
         return [found, *command[1:]]
+
+    # A sibling conda env (e.g. alchemfold) may hold the engine executable even
+    # though the running interpreter (e.g. chemflow) does not.
+    for sibling in _sibling_env_executables(first):
+        return [sibling, *command[1:]]
 
     # Also try the env bin without the executable bit check (rare), else keep as-is.
     if os.path.exists(candidate):

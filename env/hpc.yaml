@@ -46,10 +46,9 @@ default_preset: singlenode-singlegpu-day
 #     (missing keys fall back to the `defaults` above, then to 1 node / 1 GPU).
 # Add your own presets freely; the names appear in the desktop "Preset" dropdown.
 #
-# NOTE: AI co-folding / docking (Boltz-2, Chai-1) is single-GPU inference, so
-# multi-node presets do NOT speed up a single docking run — they exist for
-# cluster policies / deliberate use. Throughput over many ligands is the
-# screening path (already a SLURM array).
+# NOTE: these top-level presets are SHARED with the OpenFE (RBFE/ABFE/SepTop) Job
+# Settings preset dropdown, so they keep the long FE-style walltimes. The AlchemFold
+# docking page uses the short, docking-tuned presets in the `docking:` section below.
 presets:
   singlenode-singlegpu-quick: "04:00:00"      # 4 hours
   singlenode-singlegpu-day: "1-00:00:00"      # 1 day
@@ -57,24 +56,35 @@ presets:
   singlenode-singlegpu-week: "7-00:00:00"     # 7 days
   singlenode-singlegpu-tendays: "10-00:00:00"  # 10 days
 
-  # Multi-GPU (lambda windows parallelized across GPUs via MPI; mpi auto-on when
-  # gpus_per_node > 1). Match gpu_type/counts to your cluster.
-  singlenode-2gpu-long:
-    time: "4-00:00:00"
-    nodes: 1
-    gpus_per_node: 2
-    gpu_type: a100
-    cpus_per_task: 8
-    mem: 64G
-    mpi: true
-  singlenode-4gpu-long:
-    time: "4-00:00:00"
-    nodes: 1
-    gpus_per_node: 4
-    gpu_type: a100
-    cpus_per_task: 8
-    mem: 128G
-    mpi: true
+# ------------------------------------------------------------------
+# AlchemFold DOCKING presets (single-ligand co-folding / docking).
+#
+# This section is read ONLY by the AlchemFold docking page / `alchemfold dock
+# stage` and overrides the top-level presets/defaults/gpu_types/default_preset
+# for docking. Co-folding is single-GPU inference and short per complex, so these
+# walltimes are much shorter than the FE presets above. (Throughput over many
+# ligands is the screening path, which is already a SLURM array.)
+# ------------------------------------------------------------------
+docking:
+  default_preset: docking-standard
+  # defaults:            # optional — override partition/cpus_per_task/mem/conda_env for docking
+  #   cpus_per_task: 8
+  #   mem: 32G
+  presets:
+    docking-quick: "01:00:00"       # 1 hour  — small/medium complex, smoke test
+    docking-standard: "04:00:00"    # 4 hours — typical single docking run (default)
+    docking-long: "1-00:00:00"      # 1 day   — large complex / many diffusion samples / MSA build
+    docking-xlong: "2-00:00:00"     # 2 days  — very large complex or a big ligand_file batch
+
+    # Multi-GPU example (rarely needed — a single docking run is single-GPU; use
+    # the screening array for throughput). Match gpu_type/counts to your cluster.
+    docking-2gpu:
+      time: "1-00:00:00"
+      nodes: 1
+      gpus_per_node: 2
+      gpu_type: a100
+      cpus_per_task: 8
+      mem: 64G
 
 # ------------------------------------------------------------------
 # OpenFE (RBFE / ABFE / SepTop) SLURM allocation.

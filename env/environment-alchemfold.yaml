@@ -61,6 +61,15 @@ dependencies:
       # - torch
       - boltz            # Boltz-2  (engine: boltz)  — supports affinity + pocket
       - chai_lab         # Chai-1   (engine: chai)
+      # NOTE on Boltz-2 GPU kernels: Boltz can use optimized triangle kernels
+      # (cuequivariance / trifast). They are NOT installed here on purpose — the
+      # current cuequivariance-ops wheels are built against a very new PyTorch
+      # (2.11+/CUDA 13), which upgrades torch and breaks chai_lab's torch<2.7 pin.
+      # By default AlchemFold runs Boltz with `no_kernels: true` (pure-PyTorch,
+      # works everywhere, a bit slower). For maximum Boltz speed, use a SEPARATE
+      # boltz-only env and install the matching kernels there, e.g.:
+      #     pip install "boltz[cuda]"     # pins compatible cuequivariance/trifast
+      # then set `no_kernels: false` in the docking config for that env.
       # DiffDock (engine: diffdock) — blind docking, GitHub-only (no PyPI release).
       # Uncomment the block below to install it into THIS env. It pulls the
       # torch-geometric stack (torch_scatter/sparse/cluster), whose wheels MUST

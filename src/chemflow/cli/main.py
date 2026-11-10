@@ -41,6 +41,7 @@ _SUBCOMMANDS = [
     ("chemflow.cli.gmx_env", "add_gmx_env_parser"),
     ("chemflow.cli.rosetta_env", "add_rosetta_env_parser"),
     ("chemflow.cli.reinvent_env", "add_reinvent_env_parser"),
+    ("chemflow.cli.vendor_3dmol", "add_vendor_3dmol_parser"),
 ]
 
 

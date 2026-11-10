@@ -34,6 +34,10 @@ DEFAULTS: dict[str, Any] = {
     "diffusion_samples": 1,       # boltz --diffusion_samples / chai --num-diffn-samples
     "recycling_steps": 3,         # boltz --recycling_steps / chai --num-trunk-recycles
     "sampling_steps": 200,        # boltz only
+    "no_kernels": True,           # boltz only: default on — pure-PyTorch path works
+                                  # without the cuequivariance/trifast kernels (which
+                                  # conflict with chai's torch<2.7). Set false in a
+                                  # boltz-only env that has the kernels installed.
     "output_format": "pdb",       # boltz pdb|mmcif (chai writes mmCIF)
     "override": False,
     # Where the engines download model weights / CCD data. Default (None) uses
@@ -514,21 +518,104 @@ def stage_slurm(
     return script, config_path
 
 
+def _parse_pocket_contacts(contacts, default_chain: str = "A"):
+    """Normalise pocket contacts into ``[(chain, residue:int), ...]``.
+
+    Accepts a list/tuple of ``(chain, residue)`` pairs, or strings in the forms
+    ``"A:123"``, ``"A 123"``, or just ``"123"`` (uses ``default_chain``). A single
+    comma/space/semicolon-separated string (e.g. ``"A:123, A:145"``) is also accepted.
+    Returns ``[]`` when nothing usable is given.
+    """
+    if not contacts:
+        return []
+    if isinstance(contacts, str):
+        contacts = [tok for tok in contacts.replace(";", ",").split(",") if tok.strip()]
+    out = []
+    for item in contacts:
+        if isinstance(item, (tuple, list)):
+            chain, residue = item[0], item[1]
+        else:
+            s = str(item).strip()
+            if not s:
+                continue
+            if ":" in s:
+                chain, residue = s.split(":", 1)
+            elif " " in s:
+                chain, residue = s.split(None, 1)
+            else:
+                chain, residue = default_chain, s
+        chain = str(chain).strip() or default_chain
+        try:
+            residue_i = int(str(residue).strip())
+        except (TypeError, ValueError):
+            continue
+        out.append((chain, residue_i))
+    return out
+
+
+def parse_fasta(path, *, first_id: str = "A"):
+    """Parse a FASTA/.fa file into ``[(chain_id, sequence), ...]``.
+
+    Each ``>`` record becomes one protein chain; chain ids are assigned
+    sequentially from ``first_id`` (A, B, C, …), ignoring the header text. A file
+    with no ``>`` header is treated as a single raw sequence. Sequences are
+    uppercased with whitespace and any trailing ``*`` stop codon removed.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    records: list[str] = []
+    current: list[str] = []
+
+    def _flush():
+        seq = "".join(current).replace(" ", "").replace("\t", "").replace("*", "").strip().upper()
+        if seq:
+            records.append(seq)
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            _flush()
+            current.clear()
+            continue
+        current.append(line)
+    _flush()
+    if not records:
+        raise ValueError(f"No sequence found in FASTA file: {path}")
+    base = ord(first_id[:1].upper()) if first_id else ord("A")
+    return [(chr(base + i), seq) for i, seq in enumerate(records)]
+
+
+def _format_proteins_block(proteins) -> str:
+    lines = ["proteins:\n"]
+    for chain_id, seq in proteins:
+        lines.append(f'  - id: "{chain_id}"\n')
+        lines.append(f'    sequence: "{seq}"\n')
+    return "".join(lines)
+
+
 def default_yaml_text(
     *,
     engine: str = "boltz",
     protein_id: str = "A",
     ligand_id: str = "L",
     sequence: str = "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
+    proteins: list | None = None,
     smiles: str = "CCO",
     with_pocket: bool = False,
+    pocket_binder: str | None = None,
+    pocket_max_distance: float = 6.0,
+    pocket_contacts: list | None = None,
     ligand_file: str | None = None,
     ligand_file_format: str = "auto",
     cache_dir: str | None = None,
     diffusion_samples: int = 1,
     recycling_steps: int = 3,
     sampling_steps: int = 200,
+    no_kernels: bool = True,
     use_msa_server: bool = True,
+    predict_affinity: bool = False,
+    affinity_binder: str | None = None,
 ) -> str:
     """Return a commented example docking config for the chosen engine.
 
@@ -536,26 +623,47 @@ def default_yaml_text(
     (SMILES / .smi / .cxsmiles / CSV / .sdf) and the inline ligand is commented
     out; otherwise a single inline ligand with ``smiles`` is used.
     """
-    affinity_block = (
-        "predict_affinity: false         # Boltz-2 only; binding-affinity prediction\n"
-        '# affinity_binder: "L"          # ligand id to score when predict_affinity: true\n'
-    )
-    pocket_block = (
-        "pocket:                         # optional binding-site constraint\n"
-        f'  binder: "{ligand_id}"                  # which ligand binds the pocket\n'
-        "  max_distance: 6.0             # Angstrom (Boltz pocket constraint)\n"
-        "  contacts:                     # residues lining the pocket\n"
-        f"    - {{chain: {protein_id}, residue: 123}}\n"
-        f"    - {{chain: {protein_id}, residue: 145}}\n"
-        if with_pocket
-        else (
+    if predict_affinity:
+        binder = str(affinity_binder or ligand_id)
+        affinity_block = (
+            "predict_affinity: true          # Boltz-2 only; binding-affinity prediction\n"
+            f'affinity_binder: "{binder}"            # ligand id to score (pIC50 = 6 - affinity_pred_value)\n'
+        )
+    else:
+        affinity_block = (
+            "predict_affinity: false         # Boltz-2 only; binding-affinity prediction\n"
+            '# affinity_binder: "L"          # ligand id to score when predict_affinity: true\n'
+        )
+    parsed_contacts = _parse_pocket_contacts(pocket_contacts, protein_id)
+    if parsed_contacts:
+        # Real pocket constraint built from caller-supplied residues.
+        binder = str(pocket_binder or ligand_id).strip() or ligand_id
+        lines = [
+            "pocket:                         # binding-site constraint\n",
+            f'  binder: "{binder}"                  # which ligand binds the pocket\n',
+            f"  max_distance: {float(pocket_max_distance):g}             "
+            "# Angstrom (Boltz pocket constraint)\n",
+            "  contacts:                     # residues lining the pocket\n",
+        ]
+        lines += [f"    - {{chain: {ch}, residue: {res}}}\n" for ch, res in parsed_contacts]
+        pocket_block = "".join(lines)
+    elif with_pocket:
+        pocket_block = (
+            "pocket:                         # optional binding-site constraint\n"
+            f'  binder: "{ligand_id}"                  # which ligand binds the pocket\n'
+            "  max_distance: 6.0             # Angstrom (Boltz pocket constraint)\n"
+            "  contacts:                     # residues lining the pocket\n"
+            f"    - {{chain: {protein_id}, residue: 123}}\n"
+            f"    - {{chain: {protein_id}, residue: 145}}\n"
+        )
+    else:
+        pocket_block = (
             "# pocket:                       # optional binding-site constraint\n"
             f'#   binder: "{ligand_id}"\n'
             "#   max_distance: 6.0\n"
             "#   contacts:\n"
             f"#     - {{chain: {protein_id}, residue: 123}}\n"
         )
-    )
     if ligand_file:
         ligand_block = (
             "# Dock the ligand(s) from an uploaded file (one run per entry, output\n"
@@ -602,6 +710,8 @@ def default_yaml_text(
         f"diffusion_samples: {int(diffusion_samples)}            # predicted poses (chai: --num-diffn-samples)\n"
         f"recycling_steps: {int(recycling_steps)}               # chai: --num-trunk-recycles\n"
         f"sampling_steps: {int(sampling_steps)}             # Boltz only\n"
+        f"no_kernels: {'true' if no_kernels else 'false'}                # Boltz only: true = pure-PyTorch "
+        "(default; works without cuequivariance/trifast). false only in a boltz-only env with kernels\n"
         "override: false\n"
         + (f'cache_dir: "{cache_dir}"' + " " * max(1, 10 - len(str(cache_dir)))
            + "# model/CCD weights cache (boltz --cache / chai downloads); avoid HOME quota\n"
@@ -617,10 +727,8 @@ def default_yaml_text(
         "# diffdock_inference_steps: 20\n"
         '# diffdock_model_dir: "/path/to/DiffDock/workdir"\n'
         "\n"
-        "proteins:\n"
-        f'  - id: "{protein_id}"\n'
-        f'    sequence: "{sequence}"\n'
-        "\n"
+        + _format_proteins_block(proteins or [(protein_id, sequence)])
+        + "\n"
         f"{ligand_block}"
         "\n"
         f"{pocket_block}"

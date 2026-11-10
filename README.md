@@ -23,6 +23,7 @@ Step-by-step guides live in <a href="https://github.com/yonglanliu/ChemFlow/blob
 
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/HPC_GUIDE.md">Running on HPC</a> — free-energy, PyRosetta and REINVENT4 workflows on a SLURM GPU cluster.
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/MEMBRANE_PREP.md">Membrane system prep for OpenFE</a> — fix a Maestro/Desmond membrane PDB for `ProteinMembraneComponent`.
+- <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/3D_VIEWER.md">Configuring the 3D viewer</a> — vendor 3Dmol.js for offline use, enable WebGL on headless HPC nodes, and read the affinity/pIC50 scores.
 
 ---
 
@@ -61,6 +62,15 @@ chemflow-desktop
 - OpenFE module for binding free energy calculation and molecular dynamics (MD) simulations
 - Ligand-based virtual screening via similarity search
 - Model training (Chemprop v2, Graphormer, KERMET, CheMeleon, ChemBERTa, GPT, and LSMT)
+
+### AI docking & virtual screening (Boltz-2 / Chai-1)
+
+Co-fold a receptor with a ligand (or screen a library on a SLURM array), then view
+the predicted binding pose and its affinity / confidence scores in the desktop.
+
+<p align="center">
+  <img src="assets/images/alchemfold-docking.png" alt="AlchemFold docking — predicted complex with binding-pose viewer and confidence scores" width="900">
+</p>
 
 ---
 

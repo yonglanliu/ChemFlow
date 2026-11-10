@@ -116,8 +116,13 @@ class Molecule3DView(QWidget):
                 return "<script>\n" + local.read_text(encoding="utf-8") + "\n</script>"
             except OSError:
                 pass
-        # Workstation fallback: load from the CDN (needs internet).
-        return f'<script src="{_CDN_URL}"></script>'
+        # No local bundle. Only try the CDN when explicitly allowed — on an offline
+        # HPC node a <script src> to the CDN hangs the page load and the viewer is
+        # left showing the stale placeholder. By default we skip it so the page
+        # loads instantly and renderModel() can show an actionable message.
+        if os.environ.get("CHEMFLOW_3DMOL_ALLOW_CDN", "").strip() not in ("", "0", "false", "False"):
+            return f'<script src="{_CDN_URL}"></script>'
+        return ""
 
     def _page_html(self) -> str:
         return (
@@ -144,8 +149,8 @@ class Molecule3DView(QWidget):
             "window.clearModel=function(){var v=_ensure();if(v){v.clear();v.render();}};"
             "window.renderModel=function(data,fmt){"
             "  var v=_ensure();"
-            "  if(!v){window.showMessage('3Dmol.js is unavailable (offline and no "
-            "bundled copy). Set CHEMFLOW_3DMOL_PATH or vendor 3Dmol-min.js.');return;}"
+            "  if(!v){window.showMessage('3Dmol.js not found. Run  chemflow vendor-3dmol  "
+            "on a node with internet (or set CHEMFLOW_3DMOL_PATH), then reopen this page.');return;}"
             "  var m=document.getElementById('msg');if(m){m.style.display='none';}"
             "  v.clear();"
             "  try{v.addModel(data,fmt);}catch(e){window.showMessage('Parse error: '+e);return;}"

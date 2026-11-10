@@ -19,10 +19,13 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -45,43 +48,75 @@ _MODE_DOCK = "Docking (single ligand)"
 _MODE_SCREEN = "Virtual screening (library)"
 
 _BUILTIN_PRESETS = {
-    "singlenode-singlegpu-quick": "04:00:00",
-    "singlenode-singlegpu-day": "1-00:00:00",
-    "singlenode-singlegpu-long": "4-00:00:00",
-    "singlenode-singlegpu-week": "7-00:00:00",
-    "singlenode-singlegpu-tendays": "10-00:00:00",
+    "docking-quick": "01:00:00",
+    "docking-standard": "04:00:00",
+    "docking-long": "1-00:00:00",
+    "docking-xlong": "2-00:00:00",
 }
 _BUILTIN_GPUS = ["", "a100", "v100x", "p100", "v100", "l40"]
-_BUILTIN_DEFAULT_PRESET = "singlenode-singlegpu-day"
+_BUILTIN_DEFAULT_PRESET = "docking-standard"
+
+
+# Human-readable labels for the binding/confidence scores Boltz-2 (and Chai-1)
+# write next to each predicted complex.
+_POSE_SCORE_LABELS = {
+    "affinity_pred_value": "Predicted affinity (Boltz-2; lower = stronger binder)",
+    "affinity_probability_binary": "Binder probability (0-1)",
+    "confidence_score": "Confidence score (0-1)",
+    "ptm": "pTM",
+    "iptm": "ipTM (interface)",
+    "plddt": "pLDDT",
+    "complex_plddt": "Complex pLDDT",
+    "aggregate_score": "Aggregate score (Chai-1)",
+}
+
+
+def _scrape_pose_scores(structure_path) -> dict[str, float]:
+    """Collect numeric binding/confidence scores from JSONs beside a pose file.
+
+    Boltz-2 writes affinity_*.json and confidence_*.json into the same
+    predictions/<id>/ folder as the structure; Chai writes score files too. Scan
+    that folder (and its parent) for the known numeric keys.
+    """
+    import json
+    from pathlib import Path as _P
+
+    start = _P(structure_path).expanduser()
+    scores: dict[str, float] = {}
+    seen: set = set()
+    for d in (start.parent, start.parent.parent):
+        if not d or d in seen or not d.is_dir():
+            continue
+        seen.add(d)
+        for jf in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(jf.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            for key, value in data.items():
+                k = str(key).lower()
+                if k in _POSE_SCORE_LABELS and isinstance(value, (int, float)) and k not in scores:
+                    scores[k] = float(value)
+    return scores
 
 
 def _hpc_settings() -> tuple[list[str], list[str], str]:
-    """Return (preset_names, gpu_types, default_preset) from env/hpc.yaml.
+    """Return (preset_names, gpu_types, default_preset) for AlchemFold docking.
 
-    Reads the same customizable file the alchemfold CLI uses, so the desktop
-    dropdowns stay in sync with cluster customizations. Falls back to built-ins.
+    Uses ``alchemfold.hpc_config`` so the desktop dropdowns match the CLI exactly,
+    including the docking-tuned presets from the ``docking:`` section of
+    env/hpc.yaml. Falls back to the built-ins if alchemfold isn't importable.
     """
-    import os
-    from pathlib import Path
-
     try:
-        import yaml
-        from chemflow.config import PROJECT_ROOT
+        from alchemfold import hpc_config
 
-        env = os.environ.get("CHEMFLOW_HPC_CONFIG", "").strip()
-        candidates = [
-            Path(env).expanduser() if env else None,
-            PROJECT_ROOT / "env" / "hpc.yaml",
-            Path.home() / ".config" / "chemflow" / "hpc.yaml",
-        ]
-        for candidate in candidates:
-            if candidate and candidate.is_file():
-                data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-                presets = {str(k): str(v) for k, v in (data.get("presets") or _BUILTIN_PRESETS).items()}
-                gpus = ["" if g is None else str(g) for g in (data.get("gpu_types") or _BUILTIN_GPUS)]
-                dp = str(data.get("default_preset") or _BUILTIN_DEFAULT_PRESET)
-                names = list(presets.keys())
-                return names, gpus, (dp if dp in presets else (names[0] if names else _BUILTIN_DEFAULT_PRESET))
+        names = list(hpc_config.presets().keys())
+        gpus = list(hpc_config.gpu_types())
+        default = hpc_config.default_preset()
+        if names:
+            return names, gpus, default
     except Exception:
         pass
     return list(_BUILTIN_PRESETS.keys()), list(_BUILTIN_GPUS), _BUILTIN_DEFAULT_PRESET
@@ -114,7 +149,17 @@ class CofoldScreeningPage(QWidget):
     def __init__(self, console=None, parent=None):
         super().__init__(parent)
         self._console = console
-        layout = QVBoxLayout(self)
+        # Put all content inside a scroll area so a short window scrolls instead of
+        # squeezing every row (the page is tall: inputs + params + run + viewer).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(34, 28, 34, 34)
         layout.setSpacing(14)
         layout.addWidget(PageHeader(
@@ -123,6 +168,24 @@ class CofoldScreeningPage(QWidget):
             "AI structure-prediction engine; view the predicted binding pose below. "
             "Runs through the 'alchemfold' environment (install it from the Working "
             "environment page)."))
+
+        # Two columns: form controls on the left, binding-pose viewer on the right,
+        # so the page uses the width instead of growing very tall.
+        cols = QHBoxLayout()
+        cols.setSpacing(24)
+        left_w = QWidget()
+        left = QVBoxLayout(left_w)
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(12)
+        left_w.setMinimumWidth(480)
+        right_w = QWidget()
+        right = QVBoxLayout(right_w)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(10)
+        right_w.setMinimumWidth(420)
+        cols.addWidget(left_w, 3)
+        cols.addWidget(right_w, 4)
+        layout.addLayout(cols, 1)
 
         # --- Mode + engine + config -------------------------------------
         row = QHBoxLayout()
@@ -141,14 +204,24 @@ class CofoldScreeningPage(QWidget):
                                 mode="save", save_filter="YAML (*.yaml *.yml)")
         self.config.setText("docking.yaml")
         row.addWidget(self.config, 1)
-        layout.addLayout(row)
+        left.addLayout(row)
 
         # --- Receptor sequence (shared) ---------------------------------
-        layout.addWidget(QLabel("Receptor sequence (pre-filled into the generated config):"))
+        left.addWidget(QLabel("Receptor sequence (pre-filled into the generated config):"))
         self.sequence = QPlainTextEdit()
         self.sequence.setPlaceholderText("MKT… (one-letter protein sequence)")
         self.sequence.setFixedHeight(70)
-        layout.addWidget(self.sequence)
+        left.addWidget(self.sequence)
+        seqfile_row = QHBoxLayout()
+        seqfile_row.addWidget(QLabel("…or sequence file:"))
+        self.sequence_file = PathField(
+            "FASTA / .fa / .fasta (optional; overrides the box — each record is a chain A, B, …)",
+            mode="file")
+        self.sequence_file.setToolTip(
+            "Read the receptor sequence(s) from a FASTA file. Multiple records become "
+            "separate protein chains (A, B, C, …) for multi-chain / complex prediction.")
+        seqfile_row.addWidget(self.sequence_file, 1)
+        left.addLayout(seqfile_row)
 
         # --- Docking-only inputs ----------------------------------------
         self._dock_box = QWidget()
@@ -172,6 +245,37 @@ class CofoldScreeningPage(QWidget):
         hint.setWordWrap(True)
         dock_layout.addWidget(hint)
 
+        # --- Optional binding-site pocket constraint (Boltz-2 / Chai-1) ---
+        self.use_pocket = QCheckBox("Constrain binding pocket (steer the ligand to a known site)")
+        self.use_pocket.setToolTip(
+            "Bias the model to dock the ligand against specific receptor residues "
+            "(Boltz pocket constraint / Chai contact restraints). Leave off to let the "
+            "model place the ligand freely.")
+        dock_layout.addWidget(self.use_pocket)
+        self._pocket_box = QWidget()
+        pk_row = QHBoxLayout(self._pocket_box)
+        pk_row.setContentsMargins(18, 0, 0, 0)
+        pk_row.addWidget(QLabel("Binder:"))
+        self.pocket_binder = QLineEdit("L")
+        self.pocket_binder.setFixedWidth(48)
+        self.pocket_binder.setToolTip("Ligand id (chain) that binds the pocket.")
+        pk_row.addWidget(self.pocket_binder)
+        pk_row.addWidget(QLabel("Contacts:"))
+        self.pocket_contacts = QLineEdit()
+        self.pocket_contacts.setPlaceholderText("pocket residues, e.g. A:123, A:145")
+        self.pocket_contacts.setToolTip(
+            "Receptor residues lining the pocket as CHAIN:RES, comma-separated "
+            "(bare numbers use the first protein chain). Numbering must match the sequence.")
+        pk_row.addWidget(self.pocket_contacts, 1)
+        pk_row.addWidget(QLabel("Max dist (Å):"))
+        self.pocket_max_distance = QLineEdit("6.0")
+        self.pocket_max_distance.setFixedWidth(52)
+        self.pocket_max_distance.setToolTip("Pocket contact max distance in Angstrom (Boltz).")
+        pk_row.addWidget(self.pocket_max_distance)
+        dock_layout.addWidget(self._pocket_box)
+        self._pocket_box.setVisible(False)
+        self.use_pocket.toggled.connect(self._pocket_box.setVisible)
+
         # Engine parameters (Boltz-2 / Chai-1).
         param_row = QHBoxLayout()
         param_row.addWidget(QLabel("Poses:"))
@@ -179,24 +283,40 @@ class CofoldScreeningPage(QWidget):
         self.diffusion_samples.setRange(1, 100)
         self.diffusion_samples.setValue(1)
         self.diffusion_samples.setToolTip("diffusion_samples (Chai: --num-diffn-samples)")
+        self.diffusion_samples.setMinimumWidth(70)
         param_row.addWidget(self.diffusion_samples)
         param_row.addWidget(QLabel("Recycles:"))
         self.recycling_steps = NoScrollSpinBox()
         self.recycling_steps.setRange(1, 50)
         self.recycling_steps.setValue(3)
         self.recycling_steps.setToolTip("recycling_steps (Chai: --num-trunk-recycles)")
+        self.recycling_steps.setMinimumWidth(70)
         param_row.addWidget(self.recycling_steps)
         param_row.addWidget(QLabel("Sampling:"))
         self.sampling_steps = NoScrollSpinBox()
         self.sampling_steps.setRange(1, 2000)
         self.sampling_steps.setValue(200)
         self.sampling_steps.setToolTip("sampling_steps (Boltz only)")
+        self.sampling_steps.setMinimumWidth(80)
         param_row.addWidget(self.sampling_steps)
         self.use_msa_server = QCheckBox("Use MSA server")
         self.use_msa_server.setChecked(True)
         self.use_msa_server.setToolTip("Compute MSAs via the model's server (needs internet; "
                                        "uncheck on offline compute nodes).")
         param_row.addWidget(self.use_msa_server)
+        self.use_kernels = QCheckBox("Use Boltz GPU kernels")
+        self.use_kernels.setChecked(False)
+        self.use_kernels.setToolTip(
+            "Boltz-2 only: use the optimized cuequivariance/trifast triangle kernels. "
+            "OFF by default (pure-PyTorch path — works everywhere). Only turn on in a "
+            "boltz-only env that has the kernels installed; they conflict with chai's "
+            "torch<2.7 pin, so they are not installed in the default AlchemFold env.")
+        param_row.addWidget(self.use_kernels)
+        self.predict_affinity = QCheckBox("Predict affinity")
+        self.predict_affinity.setToolTip(
+            "Boltz-2 only: predict binding affinity. The pose panel then shows "
+            "affinity_pred_value plus pIC50 (= 6 - value) and IC50. Chai-1 has no affinity head.")
+        param_row.addWidget(self.predict_affinity)
         param_row.addStretch()
         dock_layout.addLayout(param_row)
 
@@ -218,18 +338,21 @@ class CofoldScreeningPage(QWidget):
         self.run_on.addItems(["localhost", "HPC (SLURM)"])
         self.run_on.setToolTip("localhost: run now in the alchemfold env. "
                                "HPC: write a SLURM submit script and sbatch it.")
+        self.run_on.setMinimumWidth(130)
         rt_row.addWidget(self.run_on)
         rt_row.addWidget(QLabel("Preset:"))
         self.hpc_preset = NoScrollComboBox()
         self.hpc_preset.addItems(preset_names)
         if default_preset in preset_names:
             self.hpc_preset.setCurrentIndex(preset_names.index(default_preset))
-        self.hpc_preset.setToolTip("Single-node single-GPU walltime preset (edit env/hpc.yaml to customize).")
-        rt_row.addWidget(self.hpc_preset)
+        self.hpc_preset.setToolTip("Docking walltime preset (edit the docking section of env/hpc.yaml to customize).")
+        self.hpc_preset.setMinimumWidth(180)
+        rt_row.addWidget(self.hpc_preset, 1)
         rt_row.addWidget(QLabel("GPU:"))
         self.gpu_type = NoScrollComboBox()
         self.gpu_type.addItems([(g or "any") for g in gpu_values])
         self.gpu_type.setToolTip("GPU type for --gres (any = no type constraint).")
+        self.gpu_type.setMinimumWidth(90)
         rt_row.addWidget(self.gpu_type)
         rt_row.addStretch()
         dock_layout.addLayout(rt_row)
@@ -241,7 +364,7 @@ class CofoldScreeningPage(QWidget):
         self._cpu_warn.setWordWrap(True)
         dock_layout.addWidget(self._cpu_warn)
 
-        layout.addWidget(self._dock_box)
+        left.addWidget(self._dock_box)
 
         # --- Screening-only inputs --------------------------------------
         self._screen_box = QWidget()
@@ -256,7 +379,7 @@ class CofoldScreeningPage(QWidget):
         screen_note.setObjectName("Muted")
         screen_note.setWordWrap(True)
         screen_layout.addWidget(screen_note, 1)
-        layout.addWidget(self._screen_box)
+        left.addWidget(self._screen_box)
 
         # --- Action buttons ---------------------------------------------
         buttons = QHBoxLayout()
@@ -271,12 +394,13 @@ class CofoldScreeningPage(QWidget):
             btn.clicked.connect(slot)
             buttons.addWidget(btn)
         buttons.addStretch()
-        layout.addLayout(buttons)
+        left.addLayout(buttons)
 
         self.status = QLabel()
         self.status.setObjectName("Muted")
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        left.addWidget(self.status)
+        left.addStretch()
 
         # --- Binding-pose viewer ----------------------------------------
         pose_row = QHBoxLayout()
@@ -287,20 +411,32 @@ class CofoldScreeningPage(QWidget):
         self._btn_pose = action_button("Show binding pose")
         self._btn_pose.clicked.connect(self._show_pose)
         pose_row.addWidget(self._btn_pose)
-        layout.addLayout(pose_row)
+        right.addLayout(pose_row)
 
         if Molecule3DView is not None:
             self.viewer = Molecule3DView(min_height=340)
-            layout.addWidget(self.viewer, 1)
+            right.addWidget(self.viewer, 1)
         else:
             self.viewer = None
             missing = QLabel("3D viewer unavailable (QtWebEngine not installed).")
             missing.setObjectName("Muted")
-            layout.addWidget(missing)
+            right.addWidget(missing)
+            right.addStretch()
 
-        layout.addStretch()
+        # Binding data (Boltz-2 affinity / confidence) scraped from the pose's
+        # sibling JSON files when a complex is loaded.
+        right.addWidget(QLabel("Binding data:"))
+        self.pose_info = QTextEdit()
+        self.pose_info.setReadOnly(True)
+        self.pose_info.setFixedHeight(120)
+        self.pose_info.setPlaceholderText(
+            "Load a predicted complex to show its Boltz-2 affinity / confidence scores.")
+        right.addWidget(self.pose_info)
+
         self.mode.currentTextChanged.connect(self._on_mode_changed)
         self.run_on.currentTextChanged.connect(self._on_run_target_changed)
+        self.engine.currentTextChanged.connect(self._on_engine_changed)
+        self._on_engine_changed(self.engine.currentText())
         self._on_mode_changed(self.mode.currentText())
 
     # -- mode handling ----------------------------------------------------
@@ -315,6 +451,13 @@ class CofoldScreeningPage(QWidget):
         if 0 <= idx < len(self._gpu_values):
             return self._gpu_values[idx]
         return ""
+
+    def _on_engine_changed(self, _text: str) -> None:
+        # Affinity prediction is a Boltz-2-only head; disable it for Chai-1.
+        is_boltz = self.engine.currentText() == "boltz"
+        self.predict_affinity.setEnabled(is_boltz)
+        if not is_boltz:
+            self.predict_affinity.setChecked(False)
 
     def _on_mode_changed(self, _text: str) -> None:
         dock = self._is_dock()
@@ -374,6 +517,7 @@ class CofoldScreeningPage(QWidget):
     def _generate(self) -> None:
         cfg = self._cfg()
         seq = self.sequence.toPlainText().strip()
+        seq_file = self.sequence_file.text().strip()
         if self._is_dock():
             argv = ["dock", "generate", "--engine", self.engine.currentText(), "-o", cfg]
             lig_file = self.ligand_file.text().strip()
@@ -382,13 +526,31 @@ class CofoldScreeningPage(QWidget):
                 argv += ["--ligand-file", lig_file]
             elif smiles:
                 argv += ["--smiles", smiles]
-            if seq:
+            if seq_file:
+                argv += ["--sequence-file", seq_file]
+            elif seq:
                 argv += ["--sequence", seq]
             argv += ["--diffusion-samples", str(self.diffusion_samples.value()),
                      "--recycling-steps", str(self.recycling_steps.value()),
                      "--sampling-steps", str(self.sampling_steps.value())]
             argv.append("--use-msa-server" if self.use_msa_server.isChecked()
                         else "--no-use-msa-server")
+            argv.append("--kernels" if self.use_kernels.isChecked() else "--no-kernels")
+            if self.predict_affinity.isChecked() and self.engine.currentText() == "boltz":
+                argv.append("--predict-affinity")
+            if self.use_pocket.isChecked():
+                contacts = self.pocket_contacts.text().strip()
+                if contacts:
+                    argv += ["--pocket-contacts", contacts]
+                    binder = self.pocket_binder.text().strip()
+                    if binder:
+                        argv += ["--pocket-binder", binder]
+                    md = self.pocket_max_distance.text().strip()
+                    if md:
+                        argv += ["--pocket-max-distance", md]
+                else:
+                    # No residues given yet — emit a placeholder block to edit by hand.
+                    argv.append("--pocket")
             cache = self.cache_dir.text().strip()
             if cache:
                 argv += ["--cache-dir", cache]
@@ -399,7 +561,9 @@ class CofoldScreeningPage(QWidget):
         else:
             argv = ["screen", "generate", "--engine", self.engine.currentText(),
                     "--library", self.library.currentText(), "-o", cfg]
-            if seq:
+            if seq_file:
+                argv += ["--sequence-file", seq_file]
+            elif seq:
                 argv += ["--sequence", seq]
             self._run(argv)
             self.status.setText(f"Writing {cfg} (engine: {self.engine.currentText()}, "
@@ -450,3 +614,34 @@ class CofoldScreeningPage(QWidget):
         if self.viewer is not None:
             self.viewer.load_structure(path)
             self.status.setText(f"Showing {Path(path).name} — receptor cartoon + ligand sticks.")
+        self._show_pose_data(path)
+
+    def _show_pose_data(self, path: str) -> None:
+        """Scrape and display the Boltz-2 affinity / confidence scores for a pose."""
+        if not hasattr(self, "pose_info"):
+            return
+        try:
+            scores = _scrape_pose_scores(path)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.pose_info.setPlainText(f"Could not read binding data: {exc}")
+            return
+        if not scores:
+            self.pose_info.setPlainText(
+                "No binding/confidence JSON found next to this structure "
+                "(expected affinity_*.json / confidence_*.json in the same folder).")
+            return
+        # Show affinity first, then confidence metrics, each on its own line.
+        lines = []
+        for k in _POSE_SCORE_LABELS:
+            if k not in scores:
+                continue
+            v = scores[k]
+            lines.append(f"{_POSE_SCORE_LABELS[k]}: {v:.4g}")
+            if k == "affinity_pred_value":
+                # Boltz-2: affinity_pred_value = log10(IC50 in µM).
+                #   pIC50 = 6 - value ;  IC50(µM) = 10**value
+                pic50 = 6.0 - v
+                ic50_uM = 10.0 ** v
+                ic50_str = (f"{ic50_uM * 1000:.3g} nM" if ic50_uM < 1 else f"{ic50_uM:.3g} µM")
+                lines.append(f"   → pIC50: {pic50:.2f}   (IC50 ≈ {ic50_str})")
+        self.pose_info.setPlainText("\n".join(lines))

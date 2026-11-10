@@ -151,22 +151,35 @@ def _dock_run(args: argparse.Namespace) -> int:
 
 
 def _dock_generate(args: argparse.Namespace) -> int:
-    from alchemfold.dock_config import default_cache_dir, default_yaml_text
+    from alchemfold.dock_config import default_cache_dir, default_yaml_text, parse_fasta
+
+    proteins = None
+    if getattr(args, "sequence_file", None):
+        proteins = parse_fasta(Path(args.sequence_file).expanduser(), first_id=args.protein_id)
+        print(f"Read {len(proteins)} sequence(s) from {args.sequence_file}: "
+              f"chains {', '.join(c for c, _ in proteins)}")
 
     text = default_yaml_text(
         engine=args.engine,
         protein_id=args.protein_id,
         ligand_id=args.ligand_id,
         sequence=args.sequence or "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
+        proteins=proteins,
         smiles=args.smiles or "CCO",
         with_pocket=args.pocket,
+        pocket_binder=args.pocket_binder,
+        pocket_max_distance=args.pocket_max_distance,
+        pocket_contacts=args.pocket_contacts,
         ligand_file=args.ligand_file,
         ligand_file_format=args.ligand_file_format,
         cache_dir=args.cache_dir or default_cache_dir(),
         diffusion_samples=args.diffusion_samples,
         recycling_steps=args.recycling_steps,
         sampling_steps=args.sampling_steps,
+        no_kernels=not args.kernels,
         use_msa_server=args.use_msa_server,
+        predict_affinity=args.predict_affinity,
+        affinity_binder=args.affinity_binder,
     )
     output = Path(args.output) if args.output else Path("docking.yaml")
     output = output.expanduser()
@@ -181,12 +194,20 @@ def _dock_generate(args: argparse.Namespace) -> int:
 
 
 def _screen_generate(args: argparse.Namespace) -> int:
+    from alchemfold.dock_config import parse_fasta
     from alchemfold.screen_config import default_yaml_text
+
+    proteins = None
+    if getattr(args, "sequence_file", None):
+        proteins = parse_fasta(Path(args.sequence_file).expanduser())
+        print(f"Read {len(proteins)} sequence(s) from {args.sequence_file}: "
+              f"chains {', '.join(c for c, _ in proteins)}")
 
     text = default_yaml_text(
         engine=args.engine,
         library=args.library,
         sequence=args.sequence or "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
+        proteins=proteins,
     )
     output = Path(args.output) if args.output else Path("screen.yaml")
     output = output.expanduser()
@@ -277,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
     dgen.add_argument("--protein-id", default="A", help="Protein chain id")
     dgen.add_argument("--ligand-id", default="L", help="Ligand chain id")
     dgen.add_argument("--sequence", default=None, help="Protein sequence to pre-fill")
+    dgen.add_argument("--sequence-file", default=None,
+                      help="FASTA/.fa file to read the protein sequence(s) from "
+                           "(each record becomes a chain A, B, C, …; overrides --sequence)")
     dgen.add_argument("--smiles", default=None, help="Ligand SMILES to pre-fill")
     dgen.add_argument("--ligand-file", default=None,
                       help="Dock ligand(s) from a file instead of --smiles "
@@ -285,7 +309,16 @@ def build_parser() -> argparse.ArgumentParser:
                       choices=["auto", "csv", "smiles", "cxsmiles", "sdf"],
                       help="Format of --ligand-file (default: auto-detect by extension)")
     dgen.add_argument("--pocket", action="store_true",
-                      help="Include a binding-site pocket constraint block")
+                      help="Include a binding-site pocket constraint block (placeholder "
+                           "residues unless --pocket-contacts is given)")
+    dgen.add_argument("--pocket-contacts", default=None,
+                      help="Binding-site pocket residues as 'CHAIN:RES' list, e.g. "
+                           "'A:123,A:145' (bare numbers use the first protein chain). "
+                           "Writes a real pocket constraint.")
+    dgen.add_argument("--pocket-binder", default=None,
+                      help="Ligand id that binds the pocket (default: the ligand id)")
+    dgen.add_argument("--pocket-max-distance", type=float, default=6.0,
+                      help="Pocket contact max distance in Angstrom (default: 6.0)")
     dgen.add_argument("--cache-dir", default=None,
                       help="Model/CCD weights cache (boltz --cache / chai CHAI_DOWNLOADS_DIR). "
                            "Point at /data or scratch to avoid the HOME disk quota.")
@@ -294,6 +327,14 @@ def build_parser() -> argparse.ArgumentParser:
     dgen.add_argument("--recycling-steps", type=int, default=3,
                       help="boltz --recycling_steps / chai --num-trunk-recycles")
     dgen.add_argument("--sampling-steps", type=int, default=200, help="boltz only")
+    dgen.add_argument("--kernels", action=argparse.BooleanOptionalAction, default=False,
+                      help="Enable Boltz-2's cuequivariance/trifast GPU kernels (default: off "
+                           "→ pure-PyTorch; only turn on in a boltz-only env that has the "
+                           "kernels installed, since they conflict with chai's torch<2.7)")
+    dgen.add_argument("--predict-affinity", action="store_true",
+                      help="Boltz-2 only: predict binding affinity (pIC50 = 6 - affinity_pred_value)")
+    dgen.add_argument("--affinity-binder", default=None,
+                      help="Ligand id to score when --predict-affinity (default: the ligand id)")
     dgen.add_argument("--use-msa-server", action=argparse.BooleanOptionalAction, default=True,
                       help="Compute MSAs via the model's server (needs internet; "
                            "use --no-use-msa-server on offline compute nodes)")
@@ -347,6 +388,9 @@ def build_parser() -> argparse.ArgumentParser:
     sgen.add_argument("-o", "--output", type=Path,
                       help="Output YAML path (default: screen.yaml)")
     sgen.add_argument("--sequence", default=None, help="Receptor sequence to pre-fill")
+    sgen.add_argument("--sequence-file", default=None,
+                      help="FASTA/.fa file to read the receptor sequence(s) from "
+                           "(each record becomes a chain A, B, C, …; overrides --sequence)")
     sgen.add_argument("--force", action="store_true", help="Overwrite an existing file")
     sgen.set_defaults(func=_screen_generate)
 
