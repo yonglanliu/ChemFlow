@@ -561,29 +561,72 @@ def parse_fasta(path, *, first_id: str = "A"):
     with no ``>`` header is treated as a single raw sequence. Sequences are
     uppercased with whitespace and any trailing ``*`` stop codon removed.
     """
-    text = Path(path).read_text(encoding="utf-8")
-    records: list[str] = []
-    current: list[str] = []
-
-    def _flush():
-        seq = "".join(current).replace(" ", "").replace("\t", "").replace("*", "").strip().upper()
-        if seq:
-            records.append(seq)
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith(">"):
-            _flush()
-            current.clear()
-            continue
-        current.append(line)
-    _flush()
+    records = _split_sequences(Path(path).read_text(encoding="utf-8"))
     if not records:
         raise ValueError(f"No sequence found in FASTA file: {path}")
     base = ord(first_id[:1].upper()) if first_id else ord("A")
     return [(chr(base + i), seq) for i, seq in enumerate(records)]
+
+
+def parse_sequences_text(text, *, first_id: str = "A"):
+    """Parse free-text sequence input into ``[(chain_id, sequence), ...]``.
+
+    Accepts: FASTA text (``>`` headers → one chain each), several sequences
+    separated by a blank line, or a single sequence (possibly line-wrapped).
+    Chain ids are assigned A, B, C, … from ``first_id``. Returns ``[]`` for empty
+    input.
+    """
+    records = _split_sequences(text)
+    base = ord(first_id[:1].upper()) if first_id else ord("A")
+    return [(chr(base + i), seq) for i, seq in enumerate(records)]
+
+
+def _split_sequences(text: str) -> list[str]:
+    """Split FASTA or blank-line-separated text into cleaned sequence strings.
+
+    If any ``>`` header is present the text is parsed as FASTA (one record per
+    header). Otherwise blocks separated by a blank line are treated as separate
+    sequences, and lines within a block are joined (handles line-wrapped input).
+    Each sequence is uppercased with whitespace and trailing ``*`` removed.
+    """
+    def _clean(parts: list[str]) -> str:
+        return "".join(parts).replace(" ", "").replace("\t", "").replace("*", "").strip().upper()
+
+    lines = (text or "").splitlines()
+    has_header = any(ln.lstrip().startswith(">") for ln in lines)
+    records: list[str] = []
+    current: list[str] = []
+
+    if has_header:
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                seq = _clean(current)
+                if seq:
+                    records.append(seq)
+                current = []
+                continue
+            current.append(line)
+        seq = _clean(current)
+        if seq:
+            records.append(seq)
+    else:
+        # Blank line separates sequences; join wrapped lines within a block.
+        for line in lines:
+            if line.strip() == "":
+                seq = _clean(current)
+                if seq:
+                    records.append(seq)
+                current = []
+            else:
+                current.append(line.strip())
+        seq = _clean(current)
+        if seq:
+            records.append(seq)
+    return records
+
 
 
 def _format_proteins_block(proteins) -> str:
@@ -599,6 +642,7 @@ def default_yaml_text(
     engine: str = "boltz",
     protein_id: str = "A",
     ligand_id: str = "L",
+    out_dir: str = "docking_output",
     sequence: str = "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
     proteins: list | None = None,
     smiles: str = "CCO",
@@ -700,7 +744,8 @@ def default_yaml_text(
         "# ===================================================================\n"
         "\n"
         f'engine: "{engine}"              # boltz | chai\n'
-        'out_dir: "docking_output"\n'
+        'workdir: "."                    # working directory ("." = the current directory you run from)\n'
+        f'out_dir: "{out_dir}"            # job folder: all predictions go to <workdir>/<out_dir>/\n'
         'output_format: "pdb"            # pdb | mmcif (Chai writes mmCIF)\n'
         f"use_msa_server: {'true' if use_msa_server else 'false'}            "
         "# compute MSAs via the model's server (needs internet; false on offline nodes)\n"

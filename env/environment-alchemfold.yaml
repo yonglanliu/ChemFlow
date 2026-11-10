@@ -61,6 +61,7 @@ dependencies:
       # - torch
       - boltz            # Boltz-2  (engine: boltz)  — supports affinity + pocket
       - chai_lab         # Chai-1   (engine: chai)
+      - pyarrow          # Chai-1 caches its MSAs as Parquet (chai_lab doesn't pin this)
       # NOTE on Boltz-2 GPU kernels: Boltz can use optimized triangle kernels
       # (cuequivariance / trifast). They are NOT installed here on purpose — the
       # current cuequivariance-ops wheels are built against a very new PyTorch

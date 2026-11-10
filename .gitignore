@@ -106,3 +106,4 @@ lstm_training/
 train/gpt_train.sh
 
 pmx/
+screen_db

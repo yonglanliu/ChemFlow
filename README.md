@@ -23,7 +23,9 @@ Step-by-step guides live in <a href="https://github.com/yonglanliu/ChemFlow/blob
 
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/HPC_GUIDE.md">Running on HPC</a> — free-energy, PyRosetta and REINVENT4 workflows on a SLURM GPU cluster.
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/MEMBRANE_PREP.md">Membrane system prep for OpenFE</a> — fix a Maestro/Desmond membrane PDB for `ProteinMembraneComponent`.
+- <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/OPENFE_MEMBRANE_INPUT.md">Membrane input (sol.cif) for OpenFE RBFE</a> — save an equilibrated membrane as a wrapped mmCIF; fixes the step-0 NaN crash.
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/3D_VIEWER.md">Configuring the 3D viewer</a> — vendor 3Dmol.js for offline use, enable WebGL on headless HPC nodes, and read the affinity/pIC50 scores.
+- <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/ACTIVE_LEARNING_SCREENING.md">Active learning virtual screening</a> — screen an ultra-large library with a Chemprop surrogate + Glide/VSW/Vina oracle (`chemflow active-learn`).
 
 ---
 

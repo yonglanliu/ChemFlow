@@ -1147,7 +1147,14 @@ def build_from_config(config_path):
     out_pdb = workdir / conf.output_pdb
     with open(out_pdb, "w") as handle:
         PDBFile.writeFile(modeller.topology, modeller.positions, handle)
-    print(f"Wrote membrane complex: {out_pdb}")
+    # Also write mmCIF (OpenFE-ready; avoids the PDB >99,999-atom serial overflow
+    # that large membrane systems hit).
+    from openmm.app import PDBxFile
+
+    out_cif = out_pdb.with_suffix(".cif")
+    with open(out_cif, "w") as handle:
+        PDBxFile.writeFile(modeller.topology, modeller.positions, handle, keepIds=True)
+    print(f"Wrote membrane complex: {out_pdb}  and  {out_cif}")
     print("Feed this into: chemflow openmm modeling relax-membrane")
     return out_pdb
 

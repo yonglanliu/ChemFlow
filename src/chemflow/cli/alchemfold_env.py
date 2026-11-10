@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 _DEFAULT_ENV = "alchemfold"
-_PACKAGES = ("boltz", "chai_lab")
+_PACKAGES = ("boltz", "chai_lab", "pyarrow")
 # Boltz-2's optimized triangle kernels (cuequivariance/trifast) are intentionally
 # NOT installed here: the current cuequivariance-ops wheels pull a very new PyTorch
 # (2.11+/CUDA 13) that breaks chai_lab's torch<2.7 pin. AlchemFold defaults Boltz to

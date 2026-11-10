@@ -151,18 +151,34 @@ def _dock_run(args: argparse.Namespace) -> int:
 
 
 def _dock_generate(args: argparse.Namespace) -> int:
-    from alchemfold.dock_config import default_cache_dir, default_yaml_text, parse_fasta
+    from alchemfold.dock_config import (
+        default_cache_dir,
+        default_yaml_text,
+        parse_fasta,
+        parse_sequences_text,
+    )
 
     proteins = None
     if getattr(args, "sequence_file", None):
         proteins = parse_fasta(Path(args.sequence_file).expanduser(), first_id=args.protein_id)
         print(f"Read {len(proteins)} sequence(s) from {args.sequence_file}: "
               f"chains {', '.join(c for c, _ in proteins)}")
+    elif args.sequence:
+        # --sequence may hold one sequence, several (blank-line separated), or FASTA
+        # text → one protein chain each.
+        parsed = parse_sequences_text(args.sequence, first_id=args.protein_id)
+        if len(parsed) > 1:
+            proteins = parsed
+            print(f"Parsed {len(parsed)} sequences → chains "
+                  f"{', '.join(c for c, _ in parsed)}")
+        elif len(parsed) == 1:
+            args.sequence = parsed[0][1]  # cleaned single sequence (drop header/wrapping)
 
     text = default_yaml_text(
         engine=args.engine,
         protein_id=args.protein_id,
         ligand_id=args.ligand_id,
+        out_dir=(args.jobname or "docking_output"),
         sequence=args.sequence or "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
         proteins=proteins,
         smiles=args.smiles or "CCO",
@@ -194,7 +210,7 @@ def _dock_generate(args: argparse.Namespace) -> int:
 
 
 def _screen_generate(args: argparse.Namespace) -> int:
-    from alchemfold.dock_config import parse_fasta
+    from alchemfold.dock_config import parse_fasta, parse_sequences_text
     from alchemfold.screen_config import default_yaml_text
 
     proteins = None
@@ -202,6 +218,14 @@ def _screen_generate(args: argparse.Namespace) -> int:
         proteins = parse_fasta(Path(args.sequence_file).expanduser())
         print(f"Read {len(proteins)} sequence(s) from {args.sequence_file}: "
               f"chains {', '.join(c for c, _ in proteins)}")
+    elif args.sequence:
+        parsed = parse_sequences_text(args.sequence)
+        if len(parsed) > 1:
+            proteins = parsed
+            print(f"Parsed {len(parsed)} sequences → chains "
+                  f"{', '.join(c for c, _ in parsed)}")
+        elif len(parsed) == 1:
+            args.sequence = parsed[0][1]
 
     text = default_yaml_text(
         engine=args.engine,
@@ -296,6 +320,9 @@ def build_parser() -> argparse.ArgumentParser:
     dgen.add_argument("-o", "--output", type=Path,
                       help="Output YAML path (default: docking.yaml)")
     dgen.add_argument("--protein-id", default="A", help="Protein chain id")
+    dgen.add_argument("--jobname", default=None,
+                      help="Job/output directory name (config out_dir); all predictions go "
+                           "under <workdir>/<jobname>/ (default: docking_output)")
     dgen.add_argument("--ligand-id", default="L", help="Ligand chain id")
     dgen.add_argument("--sequence", default=None, help="Protein sequence to pre-fill")
     dgen.add_argument("--sequence-file", default=None,
@@ -383,8 +410,8 @@ def build_parser() -> argparse.ArgumentParser:
         "generate", help="Write a commented screening config for a chosen engine"
     )
     sgen.add_argument("--engine", choices=["boltz", "chai", "diffdock"], default="boltz")
-    sgen.add_argument("--library", choices=["zinc22", "enamine_real"], default="zinc22",
-                      help="Source ligand catalog to screen (default: zinc22)")
+    sgen.add_argument("--library", choices=["zinc20", "enamine_real"], default="zinc20",
+                      help="Source ligand catalog to screen (default: zinc20)")
     sgen.add_argument("-o", "--output", type=Path,
                       help="Output YAML path (default: screen.yaml)")
     sgen.add_argument("--sequence", default=None, help="Receptor sequence to pre-fill")

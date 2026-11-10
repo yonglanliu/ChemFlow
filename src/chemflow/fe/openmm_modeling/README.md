@@ -110,6 +110,26 @@ chemflow openmm modeling generate md -o md.yaml \
 chemflow openmm modeling md run md.yaml
 ```
 
+### One-shot assembly
+
+Run the whole membrane pipeline with a single command — it chains each step's
+output into the next (and writes **both PDB and mmCIF**, the latter OpenFE-ready):
+
+```bash
+# generate the per-step configs, then assemble end-to-end
+chemflow openmm modeling generate membrane -o membrane.yaml --input-pdb protein.pdb
+chemflow openmm modeling generate relax    -o relax.yaml
+chemflow openmm modeling generate md       -o md.yaml --system-type membrane   # optional
+
+chemflow openmm modeling assemble run --build membrane.yaml --relax relax.yaml [--md md.yaml]
+#   build-membrane → relax-membrane (→ md), input_pdb auto-chained between steps.
+# Validate first:  chemflow openmm modeling assemble validate --build membrane.yaml --relax relax.yaml
+```
+
+(The same command is available as `alchemforge openmm modeling assemble ...`.)
+The relax/md `input_pdb` fields are overridden automatically, so you don't need
+to set them. Feed the resulting `relaxed_production.cif` straight to OpenFE.
+
 Add `--ligand ligand.sdf` to `generate` for any step whose input PDB contains a
 bound ligand; the config will include a ligand block and the ligand atoms are
 parameterized with GAFF2 (or an OpenFF SMIRNOFF line) at run time.

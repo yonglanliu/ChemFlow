@@ -22,6 +22,7 @@ _SUBCOMMANDS = [
     ("chemflow.cli.predict", "add_predict_parser"),
     ("chemflow.cli.search", "add_search_parser"),
     ("chemflow.cli.uncertainty", "add_uncertainty_parser"),
+    ("chemflow.cli.active_learn", "add_active_learn_parser"),
     # Physics-based free energy (OpenFE / GROMACS / OpenMM)
     ("chemflow.cli.free_energy", "add_free_energy_parser"),
     ("chemflow.cli.openfe", "add_openfe_parser"),

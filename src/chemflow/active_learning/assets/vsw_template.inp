@@ -1,0 +1,103 @@
+########## Virtual Screening Workflow Input File ###############
+# Run via vsw_dock.sh, which substitutes @LIGANDS@ (the round's batch.smi) and
+# @GRID@ each round. VSW reads a .smi as ORIGINAL_LIGANDS; the 2nd column (id)
+# becomes the structure title -> s_vsw_compound_code, which we key scores on.
+
+[SET:ORIGINAL_LIGANDS]
+    VARCLASS   Structures
+    FILES   @LIGANDS@
+
+[SET:GRID_1]
+    VARCLASS   Grid
+    FILE   @GRID@
+
+[STAGE:MERGE_DUPLICATES]
+    STAGECLASS   filtering.MergeDuplicatesStage
+    INPUTS   ORIGINAL_LIGANDS,
+    OUTPUTS   NODUPLICATES,
+    NEUTRALIZE   YES
+    DESALT   YES
+    MERGE_PROPS   NO
+    OUTFORMAT   sdf
+    # For a .smi input there is no VendorSMILES property; dedup uses the structure.
+    # Leave as-is, or set SMILES_FIELD to None if it warns.
+    SMILES_FIELD   None
+    CODE_FIELD   None
+    CODE_PREFIX   None
+    REQUIRE_PROPS   NO
+
+[STAGE:LIGPREP]
+    STAGECLASS   ligprep.LigPrepStage
+    INPUTS   NODUPLICATES,
+    OUTPUTS   LIGPREP_OUT,
+    RECOMBINE   YES
+    RETITLE   YES
+    MIXLIGS   YES
+    SKIP_BAD_LIGANDS   YES
+    UNIQUEFIELD   NONE
+    OUTCOMPOUNDFIELD   s_vsw_compound_code
+    USE_EPIK   YES
+    METAL_BINDING   NO
+    PH   7.0
+    PHT   2.0
+    NRINGCONFS   1
+    COMBINEOUTS   NO
+    STEREO_SOURCE   parities
+    NUM_STEREOISOMERS   32
+    MAX_STEREOISOMERS   1
+    REGULARIZE   NO
+
+[STAGE:SAMPLERINGS]
+    STAGECLASS   macromodel.SampleRingsStage
+    INPUTS   LIGPREP_OUT,
+    OUTPUTS   SAMPLERINGS_OUT,
+    OUTCONFS_PER_SEARCH   10
+
+[STAGE:POSTLIGPREP]
+    STAGECLASS   ligprep.PostLigPrepStage
+    INPUTS   SAMPLERINGS_OUT,
+    OUTPUTS   POSTLIGPREP_OUT,
+    UNIQUEFIELD   s_vsw_compound_code
+    OUTVARIANTFIELD   s_vsw_variant
+    PRESERVE_NJOBS   YES
+    REMOVE_PENALIZED_STATES   YES
+
+[STAGE:PRE_DOCK_SP_1]
+    STAGECLASS   gencodes.RecombineStage
+    INPUTS   POSTLIGPREP_OUT,
+    OUTPUTS   DOCK_SP_1_INPUT,
+    NUMOUT   njobs
+    OUTFORMAT   maegz
+    MIN_SUBJOB_STS   300
+    MAX_SUBJOB_STS   3000
+    GENCODES   NO
+    UNIQUEFIELD   s_vsw_compound_code
+
+[STAGE:DOCK_SP_1]
+    STAGECLASS   glide.DockingStage
+    INPUTS   DOCK_SP_1_INPUT, GRID_1
+    OUTPUTS   SP_OUT_1,
+    RECOMBINE   NO
+    PRECISION   SP
+    UNIQUEFIELD   s_vsw_compound_code
+    PERCENT_TO_KEEP   100.0
+    DOCKING_METHOD   confgen
+    POSES_PER_LIG   1
+    WRITE_XP_DESC   NO
+    NENHANCED_SAMPLING   1
+    BEST_BY_TITLE   NO
+    LIG_VSCALE   0.8
+    LIG_CCUT   0.15
+    MAXATOMS   300
+    MAXROTBONDS   50
+    AMIDE_MODE   penal
+    POSE_OUTTYPE   PV
+    POSTDOCK   YES
+    POSTDOCKSTRAIN   NO
+    COMPRESS_POSES   YES
+    EPIK_PENALTIES   YES
+    FORCEPLANAR   NO
+
+[USEROUTS]
+    USEROUTS   SP_OUT_1
+    STRUCTOUT   SP_OUT_1

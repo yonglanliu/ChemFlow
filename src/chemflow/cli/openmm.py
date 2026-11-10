@@ -195,6 +195,40 @@ def _md_run_handler(args: argparse.Namespace) -> int:
     return _run_cmd(_md_cmd(conf_path), dry_run=args.dry_run)
 
 
+# ---------------------------------------------------------------------------
+# One-shot assembly: build-membrane -> relax-membrane (-> md), chained
+# ---------------------------------------------------------------------------
+
+
+def _assemble_validate(args: argparse.Namespace) -> int:
+    from chemflow.fe.openmm_modeling.assemble import validate_configs
+    validate_configs(args.build, args.relax, args.md)
+    print("Valid assembly configs: build + relax" + (" + md" if args.md else ""))
+    return 0
+
+
+def _assemble_run(args: argparse.Namespace) -> int:
+    from chemflow.fe.openmm_modeling.assemble import assemble
+    assemble(args.build, args.relax, md_cfg=args.md, dry_run=args.dry_run)
+    return 0
+
+
+def _add_assemble_commands(commands: argparse._SubParsersAction) -> None:
+    """build/relax(/md) config trio, validated or run end-to-end."""
+    val = commands.add_parser("validate", help="Validate the build + relax (+ md) configs")
+    val.add_argument("--build", required=True, help="membrane-build YAML config")
+    val.add_argument("--relax", required=True, help="membrane-relax YAML config")
+    val.add_argument("--md", default=None, help="optional MD YAML config")
+    val.set_defaults(func=_assemble_validate)
+
+    run = commands.add_parser("run", help="Build → relax (→ md) end-to-end (requires OpenMM)")
+    run.add_argument("--build", required=True, help="membrane-build YAML config")
+    run.add_argument("--relax", required=True, help="membrane-relax YAML config")
+    run.add_argument("--md", default=None, help="optional MD YAML config")
+    run.add_argument("--dry-run", action="store_true", help="Print each step's command only")
+    run.set_defaults(func=_assemble_run)
+
+
 def _add_vsr_commands(
     commands: argparse._SubParsersAction,
     *,
@@ -379,4 +413,17 @@ def add_openmm_parser(
         stage_func=_md_stage,
         run_func=_md_run_handler,
     )
+
+    assemble = steps.add_parser(
+        "assemble",
+        help="One-shot: build-membrane → relax-membrane (→ md), chained (writes PDB + mmCIF)",
+        description=(
+            "Assemble a membrane system end-to-end from the per-step configs: build "
+            "+ trim the lipid patch, pre-equilibrate, and optionally run MD, wiring "
+            "each step's output into the next. Generate the configs first with "
+            "`... modeling generate {membrane,relax,md}`. Outputs are written as both "
+            "PDB and mmCIF (mmCIF is OpenFE-ready)."
+        ),
+    )
+    _add_assemble_commands(assemble.add_subparsers(dest="openmm_command", required=True))
     return parser

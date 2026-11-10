@@ -152,6 +152,42 @@ def box_vectors_matrix(box: Any) -> np.ndarray:
 
 
 
+def _is_mmcif(path: Any) -> bool:
+    return str(path).lower().endswith((".cif", ".pdbx", ".mmcif"))
+
+
+def load_protein_component(protein_path, *, membrane: bool = False, box_vectors=None):
+    """Load a ProteinComponent / ProteinMembraneComponent from PDB **or mmCIF**.
+
+    mmCIF (``.cif``/``.pdbx``/``.mmcif``) is preferred for large/membrane systems:
+    PDB's atom-serial column overflows past 99,999 atoms (Hybrid36), which OpenMM
+    cannot parse. The reader is chosen from the file extension; ``box_vectors`` is
+    passed through for the membrane component exactly as ``from_pdb_file`` expects.
+    """
+    import openfe
+
+    path = str(protein_path)
+    cls = openfe.ProteinMembraneComponent if membrane else openfe.ProteinComponent
+    kw = {"box_vectors": box_vectors} if membrane else {}
+
+    if not _is_mmcif(path):
+        return cls.from_pdb_file(path, **kw)
+
+    if hasattr(cls, "from_pdbx_file"):
+        return cls.from_pdbx_file(path, **kw)
+    # Fallback for openfe builds without a pdbx loader: parse with OpenMM.
+    from openmm.app import PDBxFile
+
+    pdbx = PDBxFile(path)
+    if hasattr(cls, "from_openmm_topology"):
+        return cls.from_openmm_topology(pdbx.topology, pdbx.positions, **kw)
+    raise ValueError(
+        f"{cls.__name__} cannot read mmCIF in this openfe build "
+        "(no from_pdbx_file / from_openmm_topology); upgrade openfe/gufe, or supply "
+        "a PDB with <=99,999 atoms."
+    )
+
+
 def _value(item: Any) -> Any:
     if isinstance(item, dict) and "val" in item:
         return item["val"]

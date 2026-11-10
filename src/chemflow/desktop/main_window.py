@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QDockWidget,
     QFileDialog,
@@ -46,7 +47,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.setWindowTitle("ChemFlow Studio")
-        self.resize(1380, 1040)
+        # Open large by default, scaled to the available screen (capped), so the
+        # two-column pages have room without overflowing a small display.
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            width = min(1760, int(avail.width() * 0.92))
+            height = min(1160, int(avail.height() * 0.92))
+            self.resize(max(width, 1200), max(height, 820))
+        else:
+            self.resize(1600, 1080)
         self.working_directory = str(Path.cwd())
         self.setMinimumSize(1050, 820)
         # Note: mouse-wheel-over-value-field is blocked per-widget via the
@@ -71,6 +81,7 @@ class MainWindow(QMainWindow):
             {"index": 5, "title": "PROTAC design", "detail": "Ternary search, linker design, screening"},
             {"index": 3, "title": "LBVS", "detail": "Ligand-based virtual screening (chemical similarity)"},
             {"index": 9, "title": "AI docking & screening", "detail": "Dock or screen with Boltz-2 / Chai-1 + 3D pose"},
+            {"index": 10, "title": "Active learning virtual screening", "detail": "Deep-Docking loop: Chemprop surrogate + Vina/Glide oracle"},
             {"index": 2, "title": "Predict", "detail": "Run a saved model on a molecule set"},
             {"index": 4, "title": "Generate", "detail": "Sample novel SMILES"},
             {"index": 6, "title": "Binding Free Energy · GROMACS", "detail": "RBFE, ABFE, SepTop, resFEP, alanine scan, MM-GBSA"},
@@ -108,6 +119,10 @@ class MainWindow(QMainWindow):
             from chemflow.desktop.cofold_screening_page import CofoldScreeningPage
             return CofoldScreeningPage(console=self.console)
 
+        def _make_active_learning():
+            from chemflow.desktop.active_learning_page import ActiveLearningPage
+            return ActiveLearningPage(console=self.console)
+
         self._page_factories = {
             1: _make_property,
             2: lambda: PredictPage(runner),
@@ -119,6 +134,7 @@ class MainWindow(QMainWindow):
             # Not a dashboard card — reached via the top-right "Working environment" button.
             8: _make_environments,
             9: _make_cofold_screening,
+            10: _make_active_learning,
         }
         self._environments_index = 8
         self._page_built: set[int] = set()

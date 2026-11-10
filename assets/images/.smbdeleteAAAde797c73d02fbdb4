@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 620" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrowT" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2bb79a"/>
+    </marker>
+    <marker id="arrowO" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#c2791f"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1180" height="620" fill="#ffffff"/>
+  <text x="590" y="36" text-anchor="middle" font-size="24" font-weight="700" fill="#0f172a">Active learning virtual screening (Vina / Glide oracle) in ChemFlow</text>
+  <text x="590" y="60" text-anchor="middle" font-size="14" fill="#64748b">Cheap ML surrogate scores the whole library; the docking oracle (Vina or Glide) only sees the batches active learning selects.</text>
+
+  <!-- Library cylinder -->
+  <g>
+    <path d="M40 150 a95 20 0 0 1 190 0 v120 a95 20 0 0 1 -190 0 Z" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2"/>
+    <ellipse cx="135" cy="150" rx="95" ry="20" fill="#e2e8f0" stroke="#94a3b8" stroke-width="2"/>
+    <text x="135" y="200" text-anchor="middle" font-size="15" font-weight="700" fill="#334155">Chemical library</text>
+    <text x="135" y="222" text-anchor="middle" font-size="13" fill="#475569">Enamine REAL / ZINC20</text>
+    <text x="135" y="242" text-anchor="middle" font-size="13" fill="#475569">10⁶ – 10⁹ compounds</text>
+  </g>
+
+  <!-- Loop label -->
+  <text x="615" y="258" text-anchor="middle" font-size="13" font-weight="700" fill="#2bb79a" letter-spacing="1">ACTIVE-LEARNING LOOP</text>
+
+  <!-- A: Acquire -->
+  <g>
+    <rect x="330" y="120" width="250" height="90" rx="12" fill="#e9fbf6" stroke="#2bb79a" stroke-width="2"/>
+    <text x="455" y="147" text-anchor="middle" font-size="15" font-weight="700" fill="#0f766e">① Acquire next batch</text>
+    <text x="455" y="169" text-anchor="middle" font-size="12.5" fill="#334155">UCB / Thompson (ŷ + κσ)</text>
+    <text x="455" y="187" text-anchor="middle" font-size="12.5" fill="#334155">+ diversity + applicability domain</text>
+  </g>
+
+  <!-- B: Glide dock (oracle) -->
+  <g>
+    <rect x="640" y="120" width="250" height="90" rx="12" fill="#fff3e0" stroke="#c2791f" stroke-width="2.5"/>
+    <text x="765" y="147" text-anchor="middle" font-size="15" font-weight="700" fill="#9a5b12">② Dock the batch  (oracle)</text>
+    <text x="765" y="169" text-anchor="middle" font-size="12.5" fill="#334155">Vina  or  Glide (SP → XP)</text>
+    <text x="765" y="187" text-anchor="middle" font-size="12.5" fill="#334155">true scores for ~1–5k / round · module load</text>
+  </g>
+
+  <!-- C: Train surrogate -->
+  <g>
+    <rect x="640" y="300" width="250" height="90" rx="12" fill="#e9fbf6" stroke="#2bb79a" stroke-width="2"/>
+    <text x="765" y="327" text-anchor="middle" font-size="15" font-weight="700" fill="#0f766e">③ Train surrogate</text>
+    <text x="765" y="349" text-anchor="middle" font-size="12.5" fill="#334155">chemflow train chemprop / graphormer</text>
+    <text x="765" y="367" text-anchor="middle" font-size="12.5" fill="#334155">+ uncertainty (bootstrap σ)</text>
+  </g>
+
+  <!-- D: Predict over library -->
+  <g>
+    <rect x="330" y="300" width="250" height="90" rx="12" fill="#e9fbf6" stroke="#2bb79a" stroke-width="2"/>
+    <text x="455" y="327" text-anchor="middle" font-size="15" font-weight="700" fill="#0f766e">④ Predict over full library</text>
+    <text x="455" y="349" text-anchor="middle" font-size="12.5" fill="#334155">chemflow predict + uncertainty</text>
+    <text x="455" y="367" text-anchor="middle" font-size="12.5" fill="#334155">ŷ ± σ for every compound (fast)</text>
+  </g>
+
+  <!-- cycle arrows (clockwise) -->
+  <line x1="580" y1="165" x2="634" y2="165" stroke="#2bb79a" stroke-width="2.5" marker-end="url(#arrowT)"/>
+  <line x1="765" y1="210" x2="765" y2="294" stroke="#2bb79a" stroke-width="2.5" marker-end="url(#arrowT)"/>
+  <line x1="640" y1="345" x2="586" y2="345" stroke="#2bb79a" stroke-width="2.5" marker-end="url(#arrowT)"/>
+  <line x1="455" y1="300" x2="455" y2="216" stroke="#2bb79a" stroke-width="2.5" marker-end="url(#arrowT)"/>
+
+  <!-- library -> A (seed) -->
+  <path d="M230 185 C280 170 300 168 324 166" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="270" y="150" text-anchor="middle" font-size="11.5" fill="#64748b">round 0: diverse seed</text>
+
+  <!-- library -> D (score all, dashed) -->
+  <path d="M190 270 C250 320 290 340 324 345" fill="none" stroke="#94a3b8" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <text x="235" y="332" text-anchor="middle" font-size="11.5" fill="#94a3b8">score all</text>
+
+  <!-- exit to escalation -->
+  <path d="M455 390 C455 430 320 440 250 468" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#arrow)"/>
+  <text x="300" y="440" text-anchor="middle" font-size="11.5" fill="#64748b">converged / budget spent</text>
+
+  <!-- Escalation row -->
+  <g>
+    <rect x="120" y="470" width="190" height="80" rx="12" fill="#eef3ff" stroke="#6da8ff" stroke-width="2"/>
+    <text x="215" y="500" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">Top-ranked hits</text>
+    <text x="215" y="521" text-anchor="middle" font-size="12" fill="#334155">best docking + surrogate</text>
+    <text x="215" y="538" text-anchor="middle" font-size="12" fill="#334155">(hundreds)</text>
+  </g>
+  <g>
+    <rect x="360" y="470" width="250" height="80" rx="12" fill="#eef3ff" stroke="#6da8ff" stroke-width="2"/>
+    <text x="485" y="500" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">Boltz-2 co-fold</text>
+    <text x="485" y="521" text-anchor="middle" font-size="12" fill="#334155">pose + pIC50 re-score</text>
+    <text x="485" y="538" text-anchor="middle" font-size="12" fill="#334155">(AlchemFold, focused set)</text>
+  </g>
+  <g>
+    <rect x="660" y="470" width="230" height="80" rx="12" fill="#eef3ff" stroke="#6da8ff" stroke-width="2"/>
+    <text x="775" y="500" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">FEP — ΔG</text>
+    <text x="775" y="521" text-anchor="middle" font-size="12" fill="#334155">AlchemForge (OpenFE/GROMACS)</text>
+    <text x="775" y="538" text-anchor="middle" font-size="12" fill="#334155">gold-standard, top tens</text>
+  </g>
+  <g>
+    <rect x="940" y="470" width="190" height="80" rx="12" fill="#dcfce7" stroke="#22a06b" stroke-width="2.5"/>
+    <text x="1035" y="505" text-anchor="middle" font-size="14" font-weight="700" fill="#166534">Final candidates</text>
+    <text x="1035" y="526" text-anchor="middle" font-size="12" fill="#334155">buy / synthesize / assay</text>
+  </g>
+  <line x1="310" y1="510" x2="354" y2="510" stroke="#475569" stroke-width="2.2" marker-end="url(#arrow)"/>
+  <line x1="610" y1="510" x2="654" y2="510" stroke="#475569" stroke-width="2.2" marker-end="url(#arrow)"/>
+  <line x1="890" y1="510" x2="934" y2="510" stroke="#475569" stroke-width="2.2" marker-end="url(#arrow)"/>
+
+  <text x="590" y="590" text-anchor="middle" font-size="12.5" fill="#64748b">Multi-fidelity: cheap docking (Vina / Glide) drives the loop over the full space → promising hits escalate to co-folding, then FEP for quantitative ΔG.</text>
+</svg>

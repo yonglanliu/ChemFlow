@@ -885,10 +885,18 @@ def relax(modeller, forcefield, conf, debug_first_step=False):
 
     production_pdb = workdir / stage.out_pdb
     write_pdb(simulation.topology, final_state.getPositions(), production_pdb)
+    # Also write the final relaxed system as mmCIF (OpenFE-ready; no PDB
+    # >99,999-atom serial overflow for large membrane systems).
+    from openmm.app import PDBxFile
+
+    production_cif = production_pdb.with_suffix(".cif")
+    with open(production_cif, "w") as handle:
+        PDBxFile.writeFile(simulation.topology, final_state.getPositions(), handle, keepIds=True)
     simulation.saveState(str(workdir / stage.out_state))
     simulation.saveCheckpoint(str(workdir / stage.chk))
 
     logger.info("Saved final relaxed PDB: %s", production_pdb)
+    logger.info("Saved final relaxed mmCIF: %s", production_cif)
     logger.info("Saved final state: %s", workdir / stage.out_state)
     logger.info("Saved final checkpoint: %s", workdir / stage.chk)
     logger.info("Membrane relaxation protocol completed successfully.")

@@ -6,7 +6,7 @@ Two modes on one page:
   SMILES string, or upload a file (SDF / .smi / CSV / .cxsmiles). Drives
   ``alchemfold dock {generate,validate,stage,run}``.
 * **Virtual screening** — a ligand library sharded across a SLURM array, then
-  ranked. Pick the source catalog (ZINC22 / Enamine REAL). Drives
+  ranked. Pick the source catalog (ZINC20 / Enamine REAL). Drives
   ``alchemfold screen {generate,validate,stage,rank}``.
 
 A 3Dmol.js panel renders the predicted complex / binding pose. Everything runs
@@ -206,10 +206,23 @@ class CofoldScreeningPage(QWidget):
         row.addWidget(self.config, 1)
         left.addLayout(row)
 
+        # Job name → output directory: predictions land in <workdir>/<jobname>/.
+        job_row = QHBoxLayout()
+        job_row.addWidget(QLabel("Job name:"))
+        self.jobname = QLineEdit("docking_output")
+        self.jobname.setPlaceholderText("output directory name, e.g. trpv1_cap1")
+        self.jobname.setToolTip(
+            "All predictions for this run are written to <working dir>/<job name>/. "
+            "Use a distinct name per target/ligand so runs don't overwrite each other.")
+        job_row.addWidget(self.jobname, 1)
+        left.addLayout(job_row)
+
         # --- Receptor sequence (shared) ---------------------------------
         left.addWidget(QLabel("Receptor sequence (pre-filled into the generated config):"))
         self.sequence = QPlainTextEdit()
-        self.sequence.setPlaceholderText("MKT… (one-letter protein sequence)")
+        self.sequence.setPlaceholderText(
+            "MKT… (one-letter sequence). For multiple chains, paste FASTA (>chainA … "
+            ">chainB …) or separate sequences with a blank line.")
         self.sequence.setFixedHeight(70)
         left.addWidget(self.sequence)
         seqfile_row = QHBoxLayout()
@@ -299,11 +312,16 @@ class CofoldScreeningPage(QWidget):
         self.sampling_steps.setToolTip("sampling_steps (Boltz only)")
         self.sampling_steps.setMinimumWidth(80)
         param_row.addWidget(self.sampling_steps)
+        param_row.addStretch()
+        dock_layout.addLayout(param_row)
+
+        # Toggles on their own row so they don't get clipped in a narrow column.
+        opts_row = QHBoxLayout()
         self.use_msa_server = QCheckBox("Use MSA server")
         self.use_msa_server.setChecked(True)
         self.use_msa_server.setToolTip("Compute MSAs via the model's server (needs internet; "
                                        "uncheck on offline compute nodes).")
-        param_row.addWidget(self.use_msa_server)
+        opts_row.addWidget(self.use_msa_server)
         self.use_kernels = QCheckBox("Use Boltz GPU kernels")
         self.use_kernels.setChecked(False)
         self.use_kernels.setToolTip(
@@ -311,14 +329,14 @@ class CofoldScreeningPage(QWidget):
             "OFF by default (pure-PyTorch path — works everywhere). Only turn on in a "
             "boltz-only env that has the kernels installed; they conflict with chai's "
             "torch<2.7 pin, so they are not installed in the default AlchemFold env.")
-        param_row.addWidget(self.use_kernels)
+        opts_row.addWidget(self.use_kernels)
         self.predict_affinity = QCheckBox("Predict affinity")
         self.predict_affinity.setToolTip(
             "Boltz-2 only: predict binding affinity. The pose panel then shows "
             "affinity_pred_value plus pIC50 (= 6 - value) and IC50. Chai-1 has no affinity head.")
-        param_row.addWidget(self.predict_affinity)
-        param_row.addStretch()
-        dock_layout.addLayout(param_row)
+        opts_row.addWidget(self.predict_affinity)
+        opts_row.addStretch()
+        dock_layout.addLayout(opts_row)
 
         # Model/CCD weights cache (avoids the HOME disk quota on HPC).
         cache_row = QHBoxLayout()
@@ -372,8 +390,8 @@ class CofoldScreeningPage(QWidget):
         screen_layout.setContentsMargins(0, 0, 0, 0)
         screen_layout.addWidget(QLabel("Library:"))
         self.library = NoScrollComboBox()
-        self.library.addItems(["zinc22", "enamine_real"])
-        self.library.setToolTip("Source ligand catalog to screen: ZINC22 or Enamine REAL.")
+        self.library.addItems(["zinc20", "enamine_real"])
+        self.library.setToolTip("Source ligand catalog to screen: ZINC20 or Enamine REAL.")
         screen_layout.addWidget(self.library)
         screen_note = QLabel("Add the library's ligand_files to the generated config, then Validate.")
         screen_note.setObjectName("Muted")
@@ -519,7 +537,10 @@ class CofoldScreeningPage(QWidget):
         seq = self.sequence.toPlainText().strip()
         seq_file = self.sequence_file.text().strip()
         if self._is_dock():
-            argv = ["dock", "generate", "--engine", self.engine.currentText(), "-o", cfg]
+            argv = ["dock", "generate", "--engine", self.engine.currentText(), "-o", cfg, "--force"]
+            jobname = self.jobname.text().strip()
+            if jobname:
+                argv += ["--jobname", jobname]
             lig_file = self.ligand_file.text().strip()
             smiles = self.smiles.text().strip()
             if lig_file:
@@ -560,7 +581,7 @@ class CofoldScreeningPage(QWidget):
                                 f"ligand: {src}). Review it, then Validate.")
         else:
             argv = ["screen", "generate", "--engine", self.engine.currentText(),
-                    "--library", self.library.currentText(), "-o", cfg]
+                    "--library", self.library.currentText(), "-o", cfg, "--force"]
             if seq_file:
                 argv += ["--sequence-file", seq_file]
             elif seq:

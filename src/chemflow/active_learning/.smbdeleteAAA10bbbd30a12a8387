@@ -1,0 +1,303 @@
+"""Active-learning screening loop (orchestrator).
+
+Deep-Docking-style loop for ultra-large libraries: a cheap surrogate (Chemprop)
+scores the whole sharded library each round; Glide (the oracle) only docks the
+batch that acquisition selects. The oracle / train / predict steps are **pluggable
+command templates** in the config, so the Glide wrapper and the ChemFlow
+train/predict CLI slot in without hard-coding either.
+
+Only stdlib + PyYAML are imported here; the heavy work happens in the subprocess
+commands you configure. Use ``--dry-run`` to print the plan without executing.
+"""
+
+from __future__ import annotations
+
+import csv
+import random
+import shlex
+import subprocess
+from pathlib import Path
+
+from chemflow.active_learning.acquisition import Candidate, select_batch, top_hits
+
+_DEFAULTS = {
+    "workdir": "al_run",
+    "library_shards": "shards/*.smi",   # id<TAB>smiles per line (gz ok via your cmds)
+    "rounds": 5,
+    "seed_size": 2000,
+    "batch_size": 2000,
+    "strategy": "ucb",                  # greedy | ucb | thompson | random
+    "kappa": 1.0,
+    "lower_is_better": True,            # docking score: more negative = better
+    "top_n": 500,                       # how many hits to emit at the end
+    "seed": 0,
+    # Library file columns. Enamine REAL .cxsmiles = SMILES in col 0, ID in col 1
+    # (whitespace/tab separated). A header line (first field 'smiles') is skipped.
+    "smiles_column": 0,
+    "id_column": 1,
+    # --- Oracle (docking) ---
+    "oracle": "glide",                  # glide | vina | custom
+    "receptor": "",                     # Glide grid .zip, or Vina receptor .pdbqt
+    "modules": [],                      # `module load` these before the oracle (HPC lmod)
+    # Command templates. Placeholders in {braces} are filled each round:
+    #   oracle:  {batch} .smi, {receptor}, {out} csv the wrapper must write (id,score)
+    #   train:   {labels} cumulative id,score csv, {model} output model dir
+    #   predict: {model}, {library} shard glob, {out} csv (id,pred[,sigma])
+    "oracle_command": "",               # empty → use the built-in template for `oracle`
+    "train_command": "chemflow train chemprop --data {labels} --out {model}",
+    "predict_command": "chemflow predict --model {model} --library {library} --out {out} --uncertainty",
+}
+
+# Built-in oracle wrapper contracts (you provide the wrapper scripts): each reads
+# the batch .smi (SMILES<TAB>id), runs **ligand preparation then docking**, and
+# writes {out} as CSV 'id,score'. Enamine REAL is raw SMILES, so prep is required.
+#   - glide : LigPrep -> Glide SP/XP
+#   - vina  : Meeko/OpenBabel -> pdbqt -> AutoDock Vina
+#   - vsw   : Schrodinger Virtual Screening Workflow (LigPrep + HTVS->SP->XP in one)
+_BUILTIN_ORACLE = {
+    "glide": "glide_dock.sh {batch} {receptor} {out}",
+    "vina": "vina_dock.sh {batch} {receptor} {out}",
+    "vsw": "vsw_dock.sh {batch} {receptor} {out}",
+}
+
+
+def load_config(path) -> dict:
+    import yaml
+
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    conf = dict(_DEFAULTS)
+    conf.update({k: v for k, v in data.items() if v is not None})
+    return conf
+
+
+def _shard_paths(pattern: str, base: Path) -> list[Path]:
+    p = Path(pattern)
+    if p.is_absolute():
+        return sorted(Path(p.parent).glob(p.name))
+    return sorted(base.glob(pattern))
+
+
+def _parse_record(line: str, smiles_col: int, id_col: int):
+    """Parse one library line into (id, smiles), or None for header/blank lines."""
+    line = line.strip()
+    if not line:
+        return None
+    fields = line.split("\t") if "\t" in line else line.split()
+    if max(smiles_col, id_col) >= len(fields):
+        return None
+    smiles = fields[smiles_col].strip()
+    cid = fields[id_col].strip()
+    if not smiles or not cid or smiles.lower() == "smiles":  # skip header
+        return None
+    return cid, smiles
+
+
+def _random_offset_sample(shards, n: int, smiles_col: int, id_col: int, rng: random.Random):
+    """Fast ~uniform sample of ``n`` (id, smiles) records from huge shards.
+
+    Seeks to random byte offsets and reads the NEXT complete line, so it does not
+    read the whole (10^9+) library — ideal for seeding. Slight length bias is
+    irrelevant for a bootstrap seed. Falls back across shards sized by bytes.
+    """
+    import os
+
+    sizes = [(s, os.path.getsize(s)) for s in shards]
+    total = sum(sz for _, sz in sizes)
+    if total == 0:
+        return []
+    out: dict[str, str] = {}
+    attempts = 0
+    max_attempts = n * 20
+    while len(out) < n and attempts < max_attempts:
+        attempts += 1
+        r = rng.randint(0, total - 1)
+        # pick the shard this global offset lands in
+        shard, off = sizes[0][0], r
+        for s, sz in sizes:
+            if off < sz:
+                shard, off = s, off
+                break
+            off -= sz
+        with open(shard, "rb") as fh:
+            fh.seek(off)
+            fh.readline()                 # discard partial line
+            raw = fh.readline()           # next full line
+        if not raw:
+            continue
+        rec = _parse_record(raw.decode("utf-8", "replace"), smiles_col, id_col)
+        if rec:
+            out[rec[0]] = rec[1]          # dedupe by id
+    return list(out.items())
+
+
+def _fetch_smiles(shards, wanted: set[str], smiles_col: int, id_col: int) -> dict[str, str]:
+    """One-pass scan to recover SMILES for a set of ids (fallback; slow on huge libs)."""
+    found: dict[str, str] = {}
+    for shard in shards:
+        with open(shard, encoding="utf-8") as fh:
+            for line in fh:
+                rec = _parse_record(line, smiles_col, id_col)
+                if rec and rec[0] in wanted and rec[0] not in found:
+                    found[rec[0]] = rec[1]
+                    if len(found) == len(wanted):
+                        return found
+    return found
+
+
+def _write_batch(path: Path, records) -> None:
+    """Write a dock-ready .smi: 'SMILES<TAB>id' per line."""
+    path.write_text("".join(f"{smi}\t{cid}\n" for cid, smi in records), encoding="utf-8")
+
+
+def _read_preds(path: Path):
+    """Return (candidates, {id: smiles}) from a surrogate preds.csv.
+
+    The predict step reads the library anyway, so if it carries a 'smiles' column
+    we reuse it to build the next batch without re-scanning the whole library.
+    """
+    cands: list[Candidate] = []
+    smiles: dict[str, str] = {}
+    with open(path, encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            cid = row.get("id") or row.get("ID") or row.get("name")
+            if cid is None:
+                continue
+            pred = float(row.get("pred") or row.get("prediction") or row.get("score"))
+            sigma = float(row.get("sigma") or row.get("std") or row.get("uncertainty") or 0.0)
+            cands.append(Candidate(cid=str(cid), pred=pred, sigma=sigma))
+            smi = row.get("smiles") or row.get("SMILES")
+            if smi:
+                smiles[str(cid)] = smi
+    return cands, smiles
+
+
+def _read_scores(path: Path) -> dict[str, float]:
+    out: dict[str, float] = {}
+    with open(path, encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            cid = row.get("id") or row.get("ID") or row.get("name")
+            sc = row.get("score") or row.get("glide_score") or row.get("r_i_docking_score")
+            if cid is not None and sc not in (None, ""):
+                out[str(cid)] = float(sc)
+    return out
+
+
+def _run(cmd: str, *, dry_run: bool, modules: list | None = None) -> None:
+    """Run a command. If ``modules`` is given, run it in a login shell after
+    ``module load``-ing them (HPC lmod), since `module` is a shell function."""
+    modules = modules or []
+    if modules:
+        full = " && ".join([f"module load {m}" for m in modules] + [cmd])
+        print("$ " + full)
+        if dry_run:
+            return
+        rc = subprocess.run(["bash", "-lc", full], check=False).returncode
+    else:
+        print("$ " + cmd)
+        if dry_run:
+            return
+        rc = subprocess.run(shlex.split(cmd), check=False).returncode
+    if rc != 0:
+        raise RuntimeError(f"command failed (exit {rc}): {cmd}")
+
+
+def _oracle_template(conf: dict) -> str:
+    tmpl = (conf.get("oracle_command") or "").strip()
+    if tmpl:
+        return tmpl
+    oracle = str(conf.get("oracle", "glide")).lower()
+    if oracle not in _BUILTIN_ORACLE:
+        raise ValueError(
+            f"oracle must be one of {sorted(_BUILTIN_ORACLE)} (or set oracle_command); got {oracle!r}")
+    return _BUILTIN_ORACLE[oracle]
+
+
+def run_loop(config_path, *, dry_run: bool = False) -> int:
+    conf = load_config(config_path)
+    base = Path(config_path).expanduser().resolve().parent
+    workdir = (base / conf["workdir"]).resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+    rng = random.Random(int(conf["seed"]))
+
+    shards = _shard_paths(conf["library_shards"], base)
+    if not shards and not dry_run:
+        raise FileNotFoundError(f"no library shards matched {conf['library_shards']!r}")
+    print(f"Library shards: {len(shards)}")
+
+    labels_csv = workdir / "labels.csv"
+    scored: dict[str, float] = _read_scores(labels_csv) if labels_csv.exists() else {}
+    smiles_col = int(conf.get("smiles_column", 0))
+    id_col = int(conf.get("id_column", 1))
+
+    for rnd in range(int(conf["rounds"])):
+        rdir = workdir / f"round_{rnd:02d}"
+        rdir.mkdir(exist_ok=True)
+        print(f"\n=== Round {rnd} ===")
+
+        # 1. Select this round's batch as (id, smiles) records.
+        if rnd == 0 and not scored:
+            if dry_run:
+                records = [(f"seed_{i}", "CCO") for i in range(int(conf["seed_size"]))]
+            else:
+                records = _random_offset_sample(
+                    shards, int(conf["seed_size"]), smiles_col, id_col, rng)
+            print(f"Seed batch: {len(records)} random compounds (offset sample)")
+        else:
+            preds_csv = workdir / f"round_{rnd-1:02d}" / "preds.csv"
+            cands, pred_smiles = _read_preds(preds_csv) if preds_csv.exists() else ([], {})
+            batch_ids = select_batch(
+                cands, k=int(conf["batch_size"]), strategy=conf["strategy"],
+                kappa=float(conf["kappa"]), lower_is_better=bool(conf["lower_is_better"]),
+                exclude=set(scored), seed=int(conf["seed"]) + rnd,
+            )
+            # Build dock-ready records: prefer SMILES carried in preds.csv, else
+            # scan the library once for the selected ids.
+            missing = [cid for cid in batch_ids if cid not in pred_smiles]
+            if missing and not dry_run:
+                print(f"  fetching SMILES for {len(missing)} ids from the library …")
+                pred_smiles.update(_fetch_smiles(shards, set(missing), smiles_col, id_col))
+            records = [(cid, pred_smiles.get(cid, "CCO" if dry_run else "")) for cid in batch_ids]
+            records = [(cid, smi) for cid, smi in records if smi]
+            print(f"Acquired batch: {len(records)} compounds ({conf['strategy']})")
+
+        batch_smi = rdir / "batch.smi"   # 'SMILES<TAB>id' — oracle does ligand prep + dock
+        if not dry_run:
+            _write_batch(batch_smi, records)
+
+        # 2. Oracle (Glide / Vina) on the batch — with `module load` if configured.
+        scores_csv = rdir / "oracle_scores.csv"
+        oracle_cmd = _oracle_template(conf).format(
+            batch=batch_smi, receptor=conf.get("receptor", ""), out=scores_csv)
+        _run(oracle_cmd, dry_run=dry_run, modules=conf.get("modules") or [])
+        if not dry_run and scores_csv.exists():
+            scored.update(_read_scores(scores_csv))
+            _write_labels(labels_csv, scored)
+        print(f"Total scored so far: {len(scored)}")
+
+        # 3. Train surrogate on all labels; 4. predict over the whole library.
+        model_dir = rdir / "model"
+        _run(conf["train_command"].format(labels=labels_csv, model=model_dir), dry_run=dry_run)
+        preds_csv = rdir / "preds.csv"
+        _run(conf["predict_command"].format(
+            model=model_dir, library=conf["library_shards"], out=preds_csv), dry_run=dry_run)
+
+    # Final: emit top hits by oracle score.
+    hits = top_hits(scored, n=int(conf["top_n"]), lower_is_better=bool(conf["lower_is_better"]))
+    hits_csv = workdir / "top_hits.csv"
+    if not dry_run:
+        with open(hits_csv, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["id", "score"])
+            w.writerows(hits)
+    print(f"\nDone. {len(scored)} compounds docked; top {len(hits)} -> {hits_csv}")
+    print("Escalate the top hits to Boltz-2 co-fold (alchemfold) then FEP (alchemforge).")
+    return 0
+
+
+def _write_labels(path: Path, scored: dict[str, float]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["id", "score"])
+        w.writerows(sorted(scored.items()))

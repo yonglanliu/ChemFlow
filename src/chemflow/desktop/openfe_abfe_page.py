@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
@@ -159,9 +160,12 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         self.ligand_table = QTableWidget(0, 3)
         self.ligand_table.setHorizontalHeaderLabels(["Ligand", "Charge (before)", "Charge (after)"])
         self.ligand_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.ligand_table.setMinimumWidth(360)
+        self.ligand_table.setMinimumWidth(460)
+        _hdr = self.ligand_table.horizontalHeader()
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        _hdr.setMinimumSectionSize(120)
         self.ligand_table.itemSelectionChanged.connect(self._on_ligand_selected)
-        self.ligand_sdf.edit.textChanged.connect(lambda _=None: self._refresh_ligand_table())
+        self.ligand_sdf.edit.textChanged.connect(self._on_ligand_sdf_changed)
 
         self.structure_view = _web_view()
         self.structure_view.setMinimumWidth(360)
@@ -189,6 +193,14 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         layout.addWidget(self.charge_status)
         self._refresh_ligand_table()
         return page
+
+    def _on_ligand_sdf_changed(self, _text=None) -> None:
+        """New ligand SDF → auto-set charged output to ``<stem>_charged.sdf``
+        (always overwrite) and refresh the ligand table."""
+        src = self.ligand_sdf.text().strip()
+        if src:
+            self.charged_out.setText(str(Path(src).with_name(Path(src).stem + "_charged.sdf")))
+        self._refresh_ligand_table()
 
     def _on_ligand_selected(self) -> None:
         rows = self.ligand_table.selectionModel().selectedRows()

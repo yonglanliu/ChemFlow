@@ -14,6 +14,7 @@ from openff.units import unit as offunit
 from openmm import Platform, System, VerletIntegrator
 from openmm.app import Simulation, Topology
 from rdkit import Chem
+from pydantic import ValidationError
 
 from chemflow.fe.openfe.partial_charges import (
     ensure_partial_charges,
@@ -21,6 +22,7 @@ from chemflow.fe.openfe.partial_charges import (
 )
 from chemflow.fe.openfe.workflow_defaults import (
     box_vectors_matrix,
+    load_protein_component,
     load_workflow_config,
     prepare_project,
 )
@@ -550,12 +552,11 @@ def main() -> None:
     if conf.membrane_system:
         box_vectors = box_vectors_matrix(conf.complex_box_vectors) * offunit.nanometer
 
-        prot = openfe.ProteinMembraneComponent.from_pdb_file(
-            protein_pdb_path,
-            box_vectors=box_vectors,
+        prot = load_protein_component(
+            protein_pdb_path, membrane=True, box_vectors=box_vectors,
         )
     else:
-        prot = openfe.ProteinComponent.from_pdb_file(protein_pdb_path)
+        prot = load_protein_component(protein_pdb_path)
 
     if template_cofactors is not None:
         cofactors = template_cofactors

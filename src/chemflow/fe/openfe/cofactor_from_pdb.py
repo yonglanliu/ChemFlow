@@ -124,7 +124,7 @@ def _load_template_rdkit(template_sdf, charge_settings=None):
             toolkit_backend=charge_settings.off_toolkit_backend,
             generate_n_conformers=charge_settings.number_of_conformers,
             nagl_model=charge_settings.nagl_model,
-            processors=1,
+            processors=4,
         )[0]
     return smc.to_rdkit()
 
