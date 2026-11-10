@@ -1,126 +1,163 @@
-# Preparing a membrane system (`sol.cif`) for OpenFE RBFE
+# Preparing a Desmond/Maestro membrane system for OpenFE RBFE
 
-How to turn an equilibrated Maestro/Desmond membrane system into a structure that
-OpenFE RBFE can actually run — i.e. a **wrapped, box‑consistent mmCIF**. Getting
-this wrong is the #1 cause of a complex‑leg crash that looks like:
+How to turn an equilibrated Desmond/Maestro membrane system into a structure OpenFE
+RBFE can actually run — a **wrapped, box‑consistent mmCIF with the protein whole and
+embedded in the bilayer**. Getting this wrong is the #1 cause of a complex‑leg crash:
 
 ```
 Potential energy is NaN after 0 attempts of integration ...
 Propagating replica 0 at state 0 resulted in a NaN!
 ```
 
-That NaN is almost always the *input structure*, not the alchemy: at state 0 (the
-physical endpoint) OpenMM images the atoms into the periodic box, and if the
-coordinates don't fit the box, atoms land on top of each other → infinite energy →
-NaN before step 1.
+That NaN is the *input structure*, not the alchemy, GPU, temperature, charge, or
+surface tension. At state 0 (the physical endpoint) OpenMM images every atom into
+the periodic box; if the frame isn't wrapped, atoms land on top of their periodic
+images (two ions at ~0.5 Å → infinite Coulomb energy) and it NaNs before step 1.
+A quick way to confirm this is the cause: count atoms outside the box in the saved
+`nan-error-logs` state (see the last section) — a healthy system is ~0%, a broken
+one is 12–90%.
 
 ---
 
-## The three rules
+## The rules
 
-1. **Use the raw equilibrated MD frame — do NOT `trj_align` or `trj_unwrap` it.**
-   Both are analysis operations that move atoms relative to the box:
-   - `trj_unwrap` (`-glue -temporal`) makes molecules continuous across frames →
-     coordinates drift far outside the box.
-   - `trj_align` rigidly **rotates** the system, but the box vectors stay
-     axis‑aligned, so the rotated slab no longer fits its (unrotated) cell and
-     OpenMM's minimum‑image uses the wrong lattice vectors.
-   The raw MD frame is already consistent with its box — that's the state your
-   simulation was stable in. For RBFE the orientation is irrelevant (OpenFE builds
-   each edge in its own box), so there is no reason to align the FEP input.
+1. **Never `trj_align` or `trj_unwrap` the FEP input.** Both move atoms relative to
+   the box and are the usual cause of this NaN:
+   - `trj_unwrap` makes molecules continuous across frames → coordinates drift far
+     outside the box (we saw 91% of atoms outside).
+   - `trj_align` rigidly **rotates** the system while the box vectors stay
+     axis‑aligned → the tilted slab no longer fits its cell.
+   For RBFE the orientation is irrelevant (OpenFE builds each edge in its own box),
+   so there is never a reason to align the FEP input.
 
-2. **Export mmCIF, not PDB.** A solvated membrane is typically >99,999 atoms. PDB's
-   atom‑serial column can't hold that, so Maestro writes Hybrid36 (`A000G`), which
-   OpenMM/pdbfixer can't read (`ValueError: invalid literal for int() ... 'A000G'`).
-   mmCIF has no such limit.
+2. **Center on the PROTEIN, then wrap whole molecules.** Centering on the *membrane*
+   pushes the protein into a neighboring periodic image — it ends up as a separate
+   blob beside the box instead of embedded in the bilayer. Centering on the protein
+   keeps it whole and in the middle; the bilayer and water tile around it.
 
-3. **Wrap molecules into the box** (whole molecules, imaged into the cell) and make
-   sure the box vectors travel with the file. Verify `span ≤ box` before using it.
+3. **Keep every molecule whole.** Wrapping per‑atom (or per‑residue for a
+   multi‑residue protein) splits the protein across a face → a stretched peptide
+   bond → NaN. Desmond's wrap keeps molecules whole; use it.
 
-Also: **do not run `pdbfixer`** on a pre‑equilibrated membrane — it's meant for
-adding missing atoms/H to raw structures, it's unnecessary here, and it chokes on
-the serial overflow.
+4. **Export mmCIF, not PDB.** A solvated membrane is usually >99,999 atoms; PDB's
+   serial column overflows and Maestro writes Hybrid36 (`A000G`) that OpenMM can't
+   read. mmCIF has no such limit, and `create_json` accepts it.
+
+Also: **don't run `pdbfixer`** on a pre‑equilibrated membrane — unnecessary, and it
+chokes on the serial overflow.
+
+> It is **normal** for the bilayer to span the whole X/Y box and touch the faces —
+> the membrane is periodic and tiles across the boundary. That is not "out of the
+> box." The only thing that must not happen is a single molecule cut across a face.
 
 ---
 
-## Step 1 — get the raw frame + box out of Desmond
+## Step 1 — center on the protein and wrap
 
-From the `-out.cms` (System Builder output is already wrapped) or the trajectory
-frame you equilibrated, **without aligning or unwrapping**:
+Operate on the Desmond `-out.cms` + trajectory (`_trj`). Centering is a
+lattice‑preserving shift (unlike alignment), so it's safe:
 
 ```bash
-# convert the Desmond system to mmCIF directly
-$SCHRODINGER/utilities/structconvert sol.cms sol.cif
+$SCHRODINGER/run trj_center.py jobname-out.cms jobname_trj centered -asl "protein"
 ```
 
-or in Maestro: **File → Export Structures → PDBx/mmCIF (`.cif`)**.
+This writes `centered-out.cms` + `centered_trj` with the protein centered and whole
+and everything wrapped around it. (Maestro GUI equivalent: Trajectory panel →
+settings → Center on ASL `protein`, enable Wrap.)
 
-If you need to pull a specific trajectory frame and re‑center on the protein
-(centering is fine; it's a lattice‑preserving shift, unlike rotation):
-
-```bash
-$SCHRODINGER/run trj_center.py sol.cms sol_trj centered -asl "protein"   # check -h for wrap options
-```
-
-The Desmond box lives in the `.cms` (`chorus_box_*`). Confirm it survived the
-export — the `.cif` must carry the cell (e.g. 122.46 × 124.17 × 139.13 Å).
+If the protein happens to straddle the Z boundary after centering, that still means
+center on `protein` — not on the membrane.
 
 ---
 
-## Step 2 — wrap into the box + verify
+## Step 2 — extract the frame you want
 
-Wrap whole molecules into the cell and assert the system fits, using ParmEd
-(tolerant reader; handles large systems):
+`trj2mae.py` selects frames by a 0‑based slice. **Set `-align-asl ""`** so it does
+**not** rotate, and `-extract-asl "all"` to keep the whole system:
 
-```python
-import parmed as pmd, numpy as np
+```bash
+# frame 68 (0-based) of the centered trajectory, no alignment, whole system
+$SCHRODINGER/run trj2mae.py centered-out.cms centered_trj frame68 \
+    -s 68:69:1 -extract-asl "all" -align-asl ""
+#   (GUI player is 1-based: GUI frame 68 == index 67 -> use -s 67:68:1)
 
-s   = pmd.load_file("sol.cif")
-L   = np.array(s.box[:3])              # box lengths (Angstrom)
-xyz = s.coordinates.copy()
-
-for res in s.residues:                 # make each residue whole, then image it in
-    idx = [a.idx for a in res.atoms]
-    d = xyz[idx] - xyz[idx[0]]
-    d -= L * np.round(d / L)           # minimum image -> reassemble molecule
-    xyz[idx] = xyz[idx[0]] + d
-    xyz[idx] -= np.floor(xyz[idx].mean(0) / L) * L   # wrap COM into [0, L)
-
-s.coordinates = xyz
-span = xyz.max(0) - xyz.min(0)
-assert (span <= L + 1e-3).all(), f"still not contained: span={span} box={L}"
-s.save("sol_wrapped.cif", overwrite=True)
-print("OK  span =", span, " box =", L)
+# convert to mmCIF for OpenFE
+$SCHRODINGER/utilities/structconvert frame68*.mae* frame68.cif
 ```
 
-Sanity‑check in VMD if you like — every atom must be inside the box:
+`-align-asl ""` is essential — the default aligns each frame onto the input CMS (a
+rotation), which reintroduces the tilt/NaN problem.
+
+---
+
+## Step 3 — verify in VMD before you run
+
+Load `frame68.cif`, then in **Extensions → Tk Console**:
 
 ```tcl
-pbc get                               ;# the real cell
-measure minmax [atomselect top all]   ;# span must be <= box, nothing poking out
+package require pbctools
+pbc set {122.46 124.17 139.13 90 90 90} -all   ;# your box in ANGSTROM (= complex_box_vectors * 10)
+pbc box -center bb -width 3 -color blue         ;# draw the box centered on the system
+measure minmax [atomselect top all]             ;# system extent (Angstrom)
 ```
 
-If `span > box` on any axis, the file is still aligned/unwrapped — go back to the
-raw frame.
+What you should see:
+- The protein is **embedded in the cyan bilayer**, inside the box — not a separate
+  blob off to one side.
+- The extent is ≈ the box (a little larger is fine — whole molecules straddle the
+  faces). `pbc box -center bb` matters: the default draws the cell at the origin, so
+  a centered system looks offset even when it's correct.
+
+Numeric check (the real validity test is **no clashes**, not span ≤ box):
+
+```bash
+# writes nothing (checker mode): look only at the clash count
+python scripts/membrane_prep/wrap_cif_for_openfe.py frame68.cif /dev/null --box-nm 12.246,12.417,13.913
+#   atoms outside box: ~0-1%  (straddling molecules, fine)
+#   minimum-image clashes (<0.9 A): 0   <-- must be 0
+```
+
+(`scripts/membrane_prep/` also has `wrap_pdb_for_openfe.py` for PDB inputs, and
+`wrap_cif_for_openfe.py` can wrap directly too: `… in.cif out.cif --box-nm …`.)
+
+If clashes > 0, a molecule is still split or the packing is off — re‑do Step 1 with
+`-asl "protein"`, or minimize briefly before running.
 
 ---
 
-## Step 3 — point OpenFE at it
+## Step 4 — point OpenFE at it and regenerate the JSON
 
-Feed `sol_wrapped.cif` to `create_json`:
+```yaml
+# rbfe.yaml
+protein_pdb: frame68.cif        # create_json accepts mmCIF (ProteinComponent.from_pdbx_file)
+membrane_system: true
+complex_box_vectors: [12.246, 12.417, 13.913]   # nm; matches the cif's cell
+```
 
-- Read it as PDBx/mmCIF (`ProteinComponent.from_pdbx_file`), not PDB.
-- The membrane is **pre‑solvated**, so the complex leg takes **no `SolventComponent`**
-  (adding one re‑solvates and double‑counts water).
-- Use the **`MonteCarloMembraneBarostat`** for the membrane leg.
-- You may set the integrator temperature to match your equilibration (e.g. 300 K),
-  but a 300 K → 310 K difference is harmless and does **not** cause NaNs.
+```bash
+chemflow openfe rbfe validate  rbfe.yaml
+chemflow openfe rbfe generate  rbfe.yaml   # REBUILDS json/ with the wrapped coordinates
+# then resubmit quickrun
+```
+
+**Regenerating the JSON is mandatory** — `quickrun` reads the JSON, not the yaml, and
+the JSON has the coordinates baked in. Editing `protein_pdb` without re‑running
+`generate` changes nothing.
+
+Protocol notes for the membrane complex leg:
+- It is **pre‑solvated**, so the complex leg takes **no `SolventComponent`** (adding
+  one double‑counts water).
+- Use the **`MonteCarloMembraneBarostat`**; `surface_tension = 0` (tensionless) is
+  the standard, correct setting — it is *not* a cause of NaNs.
+- Matching the integrator temperature to your equilibration (e.g. 300 K) is fine but
+  optional; a 300 K → 310 K gap is harmless.
 
 ---
 
-## Quick triage if it still NaNs
+## Triage if it still NaNs
 
-Load the saved state from the run's `nan-error-logs/` and check the geometry:
+Point this at the run's `nan-error-logs/` state — it settles whether the input is
+the problem (it almost always is):
 
 ```python
 import xml.etree.ElementTree as ET, numpy as np
@@ -133,10 +170,13 @@ for ev,el in ET.iterparse("iteration0-replica0-state0-state.xml", events=("start
         if el.tag=="PeriodicBoxVectors": cur=None
         el.clear()
 pos=np.array(pos); L=np.diag(np.array(box))
-out=((pos<0)|(pos>L)).any(1).sum()
-print("atoms outside box: %d/%d (%.1f%%)"%(out,len(pos),100*out/len(pos)))
-print("span:", pos.max(0)-pos.min(0), " box:", L)
+print("atoms outside box: %.1f%%" % (100*((pos<0)|(pos>L)).any(1).mean()))
 ```
 
-Any significant fraction outside the box (a healthy system is ~0%) means the input
-still isn't wrapped/box‑consistent — i.e. an align/unwrap slipped back in.
+- **~0%** → the input is fine; look elsewhere (bad ligand parameters, a genuine clash
+  — decompose the energy by force group; `NonbondedForce` NaN = overlap).
+- **>a few %** → still unwrapped/aligned; an `align`/`unwrap` slipped back in, or you
+  edited `protein_pdb` without regenerating the JSON. Redo Steps 1–4.
+
+Ruled out by this single number: GPU/CUDA, temperature, net charge, and surface
+tension never produce a step‑0 NaN — a frame that doesn't fit its box does.

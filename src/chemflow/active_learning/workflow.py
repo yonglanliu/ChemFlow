@@ -64,6 +64,9 @@ _BUILTIN_ORACLE = {
     "glide": "glide_dock.sh {batch} {receptor} {out}",
     "vina": "vina_dock.sh {batch} {receptor} {out}",
     "vsw": "vsw_dock.sh {batch} {receptor} {out}",
+    # ML co-folding affinity (AlchemFold / Boltz-2): {receptor} is the protein
+    # sequence/FASTA; the wrapper co-folds each ligand and writes id,score (pIC50).
+    "boltz2": "boltz2_screen.sh {batch} {receptor} {out}",
 }
 
 # Library presets: pick a vendor to get its default shard glob + column layout, or
@@ -213,6 +216,86 @@ def _read_scores(path: Path) -> dict[str, float]:
     return out
 
 
+def _parse_oracles(conf: dict) -> list[dict]:
+    """Normalize the config's oracle(s) into a list of spec dicts.
+
+    Accepts structured ``oracles: [{name, receptor, metric, lower_is_better,
+    modules, command}]``, a plain ``oracles: [name, ...]``, or the single-oracle
+    top-level fields (oracle/receptor/modules/oracle_command/lower_is_better).
+    """
+    raw = conf.get("oracles")
+    specs: list[dict] = []
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        for o in raw:
+            specs.append({
+                "name": str(o.get("name", "")).lower(),
+                "receptor": o.get("receptor", conf.get("receptor", "")),
+                "metric": o.get("metric") or "score",
+                "lower_is_better": bool(o.get("lower_is_better", conf.get("lower_is_better", True))),
+                "modules": list(o.get("modules") or []),
+                "command": (o.get("command") or "").strip(),
+            })
+    elif isinstance(raw, list) and raw:
+        for name in raw:
+            specs.append({"name": str(name).lower(), "receptor": conf.get("receptor", ""),
+                          "metric": "score", "lower_is_better": bool(conf.get("lower_is_better", True)),
+                          "modules": list(conf.get("modules") or []), "command": ""})
+    if not specs:
+        specs.append({"name": str(conf.get("oracle", "glide")).lower(),
+                      "receptor": conf.get("receptor", ""), "metric": "score",
+                      "lower_is_better": bool(conf.get("lower_is_better", True)),
+                      "modules": list(conf.get("modules") or []),
+                      "command": (conf.get("oracle_command") or "").strip()})
+    return specs
+
+
+def _oracle_command_for(spec: dict) -> str:
+    tmpl = (spec.get("command") or "").strip()
+    if tmpl:
+        return tmpl
+    name = spec["name"]
+    if name not in _BUILTIN_ORACLE:
+        raise ValueError(
+            f"oracle must be one of {sorted(_BUILTIN_ORACLE)} (or set a command); got {name!r}")
+    return _BUILTIN_ORACLE[name]
+
+
+def _write_labels_multi(path: Path, rows: dict[str, dict], metrics: list[str]) -> None:
+    """Write a multi-metric labels table: id + one column per oracle metric."""
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["id"] + metrics)
+        for cid in sorted(rows):
+            r = rows[cid]
+            w.writerow([cid] + [r.get(m, "") for m in metrics])
+
+
+def _read_labels_multi(path: Path, metrics: list[str]) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    with open(path, encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            cid = row.get("id") or row.get("ID") or row.get("name")
+            if not cid:
+                continue
+            d: dict[str, float] = {}
+            for m in metrics:
+                v = row.get(m)
+                if v not in (None, ""):
+                    try:
+                        d[m] = float(v)
+                    except ValueError:
+                        pass
+            if not d and row.get("score") not in (None, "") and metrics:
+                try:
+                    d[metrics[0]] = float(row["score"])
+                except ValueError:
+                    pass
+            if d:
+                rows[str(cid)] = d
+    return rows
+
+
 def _run(cmd: str, *, dry_run: bool, modules: list | None = None) -> None:
     """Run a command. If ``modules`` is given, run it in a login shell after
     ``module load``-ing them (HPC lmod), since `module` is a shell function."""
@@ -260,8 +343,22 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
         raise FileNotFoundError(f"no library shards matched {conf['library_shards']!r}")
     print(f"Library shards: {len(shards)}")
 
+    # Oracle(s): each has its own input + output metric (a training target). The
+    # PRIMARY metric drives acquisition; the rest are auxiliary multitask targets.
+    oracle_specs = _parse_oracles(conf)
+    metrics: list[str] = list(dict.fromkeys(o["metric"] for o in oracle_specs))
+    primary_metric = str(conf.get("primary_metric") or metrics[0])
+    if primary_metric not in metrics:
+        primary_metric = metrics[0]
+    primary_lower = next((o["lower_is_better"] for o in oracle_specs
+                          if o["metric"] == primary_metric), bool(conf.get("lower_is_better", True)))
+    print(f"Oracles: {', '.join(o['name']+'→'+o['metric'] for o in oracle_specs)} "
+          f"(primary: {primary_metric}, lower_is_better={primary_lower})")
+
     labels_csv = outdir / "labels.csv"
-    scored: dict[str, float] = _read_scores(labels_csv) if labels_csv.exists() else {}
+    labels_rows: dict[str, dict] = _read_labels_multi(labels_csv, metrics) if labels_csv.exists() else {}
+    scored: dict[str, float] = {cid: r[primary_metric] for cid, r in labels_rows.items()
+                                if primary_metric in r}
     smiles_col = int(conf.get("smiles_column", 0))
     id_col = int(conf.get("id_column", 1))
 
@@ -291,7 +388,7 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
             cands, pred_smiles = _read_preds(preds_csv) if preds_csv.exists() else ([], {})
             batch_ids = select_batch(
                 cands, k=int(conf["batch_size"]), strategy=conf["strategy"],
-                kappa=float(conf["kappa"]), lower_is_better=bool(conf["lower_is_better"]),
+                kappa=float(conf["kappa"]), lower_is_better=primary_lower,
                 exclude=set(scored), seed=int(conf["seed"]) + rnd,
             )
             # Build dock-ready records: prefer SMILES carried in preds.csv, else
@@ -308,21 +405,28 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
         if not dry_run:
             _write_batch(batch_smi, records)
 
-        # 2. Oracle (Glide / Vina / VSW) on the batch — with `module load` if configured.
-        #    Resumable: if this round was already docked (oracle_scores.csv exists),
-        #    reuse it instead of re-running — lets a campaign span multiple <=10-day
-        #    HPC jobs (just re-run `active-learn run`; finished rounds are skipped).
-        scores_csv = rdir / "oracle_scores.csv"
-        if not dry_run and scores_csv.exists() and scores_csv.stat().st_size > 0:
-            print(f"  round {rnd} already docked — reusing {scores_csv.name}")
-        else:
-            oracle_cmd = _oracle_template(conf).format(
-                batch=batch_smi, receptor=conf.get("receptor", ""), out=scores_csv)
-            _run(oracle_cmd, dry_run=dry_run, modules=conf.get("modules") or [])
-        if not dry_run and scores_csv.exists():
-            scored.update(_read_scores(scores_csv))
-            _write_labels(labels_csv, scored)
-        print(f"Total scored so far: {len(scored)}")
+        # 2. Oracle(s) on the batch. Each selected oracle docks/scores the SAME batch
+        #    with its own input + command and writes its metric column; all metrics are
+        #    merged into labels.csv (the multitask training targets). Resumable per
+        #    oracle: a finished oracle_scores_<name>.csv is reused across <=10-day jobs.
+        single = len(oracle_specs) == 1
+        for spec in oracle_specs:
+            out_name = "oracle_scores.csv" if single else f"oracle_scores_{spec['name']}.csv"
+            scores_csv = rdir / out_name
+            if not dry_run and scores_csv.exists() and scores_csv.stat().st_size > 0:
+                print(f"  round {rnd} {spec['name']} already scored — reusing {scores_csv.name}")
+            else:
+                cmd = _oracle_command_for(spec).format(
+                    batch=batch_smi, receptor=spec.get("receptor", ""), out=scores_csv)
+                _run(cmd, dry_run=dry_run, modules=spec.get("modules") or [])
+            if not dry_run and scores_csv.exists():
+                for cid, val in _read_scores(scores_csv).items():
+                    labels_rows.setdefault(cid, {})[spec["metric"]] = val
+        if not dry_run:
+            _write_labels_multi(labels_csv, labels_rows, metrics)
+            scored = {cid: r[primary_metric] for cid, r in labels_rows.items()
+                      if primary_metric in r}
+        print(f"Total scored (primary metric {primary_metric}): {len(scored)}")
 
         # 3. Train surrogate on all labels; 4. predict over the whole library.
         #    Resumable: skip if this round's predictions already exist.
@@ -336,7 +440,7 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
                 model=model_dir, library=conf["library_shards"], out=preds_csv), dry_run=dry_run)
 
     # Final: emit top hits by oracle score.
-    hits = top_hits(scored, n=int(conf["top_n"]), lower_is_better=bool(conf["lower_is_better"]))
+    hits = top_hits(scored, n=int(conf["top_n"]), lower_is_better=primary_lower)
     hits_csv = outdir / "top_hits.csv"
     if not dry_run:
         with open(hits_csv, "w", newline="", encoding="utf-8") as fh:

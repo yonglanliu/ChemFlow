@@ -63,6 +63,27 @@ modules: []                     # `module load` these before the oracle, e.g.
 # Override with a full custom command here (leave empty to use the built-in):
 oracle_command: ""
 
+# --- Multi-oracle (multi-fidelity) — OPTIONAL ------------------------------
+# Instead of the single oracle above, list several oracles, each with its OWN
+# input + output metric. Every metric becomes a training target for the
+# surrogate (multitask); the `primary_metric` drives which compounds are docked
+# next. Each oracle docks the SAME batch and writes {out} as CSV 'id,score'.
+# (If `oracles:` is set it takes precedence over the single `oracle:` above.)
+#   boltz2 -> ML co-fold affinity (AlchemFold); its `receptor` is a protein FASTA.
+# oracles:
+#   - name: glide
+#     receptor: grid.zip
+#     metric: glide_score
+#     lower_is_better: true
+#     modules: [schrodinger]
+#     command: ""                 # empty -> glide_dock.sh {batch} {receptor} {out}
+#   - name: boltz2
+#     receptor: target.fasta
+#     metric: pIC50
+#     lower_is_better: false
+#     command: "boltz2_screen.sh {batch} {receptor} {out}"
+# primary_metric: glide_score     # which metric drives acquisition / top hits
+
 # --- Surrogate: train + predict (ChemFlow) ---------------------------------
 # train: fit on cumulative {labels} (id,score) -> {model}
 train_command: "chemflow train chemprop --data {labels} --out {model}"
