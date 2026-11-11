@@ -85,8 +85,12 @@ oracle_command: ""
 # primary_metric: glide_score     # which metric drives acquisition / top hits
 
 # --- Surrogate: train + predict (ChemFlow) ---------------------------------
-# train: fit on cumulative {labels} (id,score) -> {model}
-train_command: "chemflow train chemprop --data {labels} --out {model}"
+# train: ChemFlow's chemprop trainer takes a config.toml positionally:
+#        `chemflow train chemprop config.toml`. {config} = train_config below.
+#        The loop writes cumulative labels to <job>/labels.csv each round — point
+#        the TOML's dataset at that file (target = the oracle metric column).
+train_config: ""                 # path to chemprop config.toml; fills {config}
+train_command: "chemflow train chemprop {config}"
 # predict over the whole library -> {out} CSV with 'id,pred' (+ 'sigma' for UCB/Thompson)
 predict_command: "chemflow predict --model {model} --library {library} --out {out} --uncertainty"
 
@@ -124,7 +128,7 @@ def _seed(args: argparse.Namespace) -> int:
     import glob
 
     from chemflow.active_learning.seed import select_seed
-    from chemflow.active_learning.workflow import _LIBRARY_PRESETS
+    from chemflow.active_learning.workflow import _LIBRARY_PRESETS, _chemflow_root
 
     preset = _LIBRARY_PRESETS.get(args.library, {})
     db = args.db or preset.get("library_shards")
@@ -135,7 +139,14 @@ def _seed(args: argparse.Namespace) -> int:
     smiles_col = args.smiles_col if args.smiles_col is not None else preset.get("smiles_column", 0)
     id_col = args.id_col if args.id_col is not None else preset.get("id_column", 1)
 
-    shards = sorted(glob.glob(str(Path(db).expanduser())))
+    db_expanded = str(Path(db).expanduser())
+    shards = sorted(glob.glob(db_expanded))
+    if not shards and not Path(db).is_absolute():
+        # Fall back to the ChemFlow install root (screen_db lives there), so this
+        # works no matter which directory you run from.
+        root = _chemflow_root()
+        if root is not None:
+            shards = sorted(glob.glob(str(root / db)))
     if not shards:
         print(f"No library shards matched {db!r}", file=sys.stderr)
         return 1

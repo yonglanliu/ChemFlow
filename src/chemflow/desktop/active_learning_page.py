@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -192,17 +193,21 @@ class ActiveLearningPage(QWidget):
 
         # --- Global run settings ---------------------------------------------
         layout.addWidget(self._section("Run settings"))
-        s1 = QHBoxLayout()
-        s1.addWidget(QLabel("Workdir:"))
-        self.workdir = QLineEdit(".")
-        self.workdir.setMaximumWidth(110)
-        self.workdir.setToolTip("Run from here (default: the current directory).")
-        s1.addWidget(self.workdir)
-        s1.addWidget(QLabel("Job name:"))
+        s0 = QHBoxLayout()
+        s0.addWidget(QLabel("Output dir:"))
+        self.workdir = PathField("output directory (Browse to choose where outputs go)",
+                                 mode="directory")
+        self.workdir.setText(str(Path.cwd()))
+        self.workdir.edit.setToolTip("All prepared files and results go into <Output dir>/<Job name>/. "
+                                     "Defaults to where the app launched — Browse to change it.")
+        s0.addWidget(self.workdir, 1)
+        s0.addWidget(QLabel("Job name:"))
         self.job_name = QLineEdit("al_run")
         self.job_name.setMaximumWidth(150)
-        self.job_name.setToolTip("All outputs are written into <workdir>/<job_name>/.")
-        s1.addWidget(self.job_name)
+        self.job_name.setToolTip("Folder created under the Output dir; all files for this job go there.")
+        s0.addWidget(self.job_name)
+        layout.addLayout(s0)
+        s1 = QHBoxLayout()
         s1.addWidget(QLabel("Batch size:"))
         self.batch_size = self._spin(10000, 1, 10_000_000)
         s1.addWidget(self.batch_size)
@@ -339,8 +344,10 @@ class ActiveLearningPage(QWidget):
             "train the surrogate as auxiliary (multitask) targets.")
 
     def _build_train_widgets(self) -> None:
-        self.train_command = QLineEdit("chemflow train chemprop --data {labels} --out {model}")
-        self.train_command.setToolTip("Surrogate training command. Placeholders: {labels} {model}.")
+        self.train_config = PathField("chemprop config.toml (positional arg to the train command)", mode="file")
+        self.train_command = QLineEdit("chemflow train chemprop {config}")
+        self.train_command.setToolTip("Surrogate training command. Placeholders: "
+                                      "{config} (your conf.toml), {labels}, {model}.")
 
     def _build_predict_widgets(self) -> None:
         self.predict_command = QLineEdit(
@@ -348,10 +355,46 @@ class ActiveLearningPage(QWidget):
         self.predict_command.setToolTip("Library-wide prediction. Placeholders: {model} {library} {out}.")
 
     def _build_escalate_widgets(self) -> None:
+        # 1) Hard constraints — choosable pass/fail factors applied FIRST to top hits.
+        #    (key, label, default operator, default value)
+        self._HARD_FACTORS = [
+            ("MW",     "Molecular weight",        "<=", "500"),
+            ("cLogP",  "cLogP",                   "<=", "5"),
+            ("HBD",    "H-bond donors",           "<=", "5"),
+            ("HBA",    "H-bond acceptors",        "<=", "10"),
+            ("TPSA",   "TPSA",                    "<=", "140"),
+            ("RotB",   "Rotatable bonds",         "<=", "10"),
+            ("QED",    "QED",                     ">=", "0.5"),
+            ("PAINS",  "PAINS alerts",            "==", "0"),
+            ("score",  "Predicted / docking score", "<=", "0"),
+        ]
+        self.hard_factor_rows: dict = {}
+        for key, label, op, val in self._HARD_FACTORS:
+            cb = QCheckBox(label)
+            opc = NoScrollComboBox()
+            opc.addItems(["<=", ">=", "=="])
+            opc.setCurrentText(op)
+            opc.setMaximumWidth(56)
+            ve = QLineEdit(val)
+            ve.setMaximumWidth(72)
+            self.hard_factor_rows[key] = {"check": cb, "op": opc, "value": ve}
+        # 2) MPO — optional multi-parameter desirability ranking of survivors.
+        self.mpo_enabled = QCheckBox("Apply MPO ranking")
+        self.mpo_enabled.setToolTip("Optional: rank the survivors by a multi-parameter desirability "
+                                    "score. Leave off to rank by the primary oracle metric only.")
+        self.mpo_spec = QLineEdit()
+        self.mpo_spec.setPlaceholderText(
+            "MPO desirability, e.g. 0.4*pIC50 + 0.3*QED + 0.3*(1-SAscore)")
+        self.mpo_spec.setEnabled(False)
+        self.mpo_enabled.toggled.connect(self.mpo_spec.setEnabled)
         self.escalate_note = QLabel(
-            "Top-ranked hits branch out: order purchasable compounds directly (Buy), "
-            "and/or escalate the best to MM-GBSA → Boltz-2 co-fold → FEP (AlchemForge) "
-            "for quantitative ΔG. 'Top hits' count = Run settings · Top hits.")
+            "Pick the final compounds to act on. First the HARD CONSTRAINTS filter the top hits — "
+            "check the factors to enforce and set each operator/value; a candidate must pass ALL "
+            "checked ones. 'Predicted / docking score' uses the primary oracle metric (more factors, "
+            "e.g. solubility/ADMET, can be added later). Then, optionally, MPO re-ranks the survivors "
+            "by a desirability score; otherwise they're ranked by the primary metric. Survivors "
+            "branch out: Buy purchasable ones, and/or escalate the best to MM-GBSA → Boltz-2 co-fold "
+            "→ FEP (AlchemForge). Captured in the config as a post-run selection step.")
         self.escalate_note.setWordWrap(True)
         self.escalate_note.setObjectName("Muted")
 
@@ -415,9 +458,20 @@ class ActiveLearningPage(QWidget):
         r3 = QHBoxLayout()
         r3.addWidget(make)
         r3.addStretch()
-        note = QLabel("Round 0 has no model yet, so pick a diverse seed (MaxMin) for coverage; "
-                      "random = fast, scaffold = Butina clusters. Known actives are force-included "
-                      "to warm-start the surrogate. 'Create seed' samples the library into seed.smi.")
+        note = QLabel(
+            "Round 0 has no model yet, so the seed is chosen for COVERAGE, not score. Methods:\n"
+            "  • diverse  (default) — MaxMin on Morgan fingerprints: picks the N most mutually "
+            "dissimilar molecules, so the seed spans chemical space as widely as possible. Best "
+            "for training a useful first surrogate. (Needs RDKit; oversamples a random pool first.)\n"
+            "  • scaffold — Butina clustering of fingerprints, then one representative per cluster: "
+            "coverage organized by scaffold/cluster rather than pure MaxMin spread. (Needs RDKit.)\n"
+            "  • random  — fast uniform sample over the shards (byte-offset for plain text, streaming "
+            "reservoir for .bz2/.gz). No RDKit, unbiased but not diversity-optimized; good for a quick "
+            "start or a sanity run.\n"
+            "Seed pool = how many compounds the diverse/scaffold pick draws from (0 = ~20× seed size); "
+            "bigger pool = more diverse pick, slower. Known actives (a SMILES file) are force-included "
+            "to warm-start the model with real binders. 'Create seed' writes the result to "
+            "<job_name>/seed.smi.")
         note.setObjectName("Muted"); note.setWordWrap(True)
         return self._node_page(key, optional, "Seed (round 0 selection)", [r1, r2, r3, note])
 
@@ -496,19 +550,21 @@ class ActiveLearningPage(QWidget):
         self.primary_oracle.blockSignals(False)
 
     def _train_page(self, key, optional) -> QWidget:
+        rc = self._labeled("Config:", self.train_config)
         r = self._labeled("Train cmd:", self.train_command)
         note = QLabel(
-            "Command run once per round to (re)fit the ML surrogate on every compound docked "
-            "so far. Placeholders filled in each round:\n"
-            "  • {labels} — cumulative CSV of id,score (all oracle-docked compounds to date)\n"
-            "  • {model}  — output path the trained model/checkpoint is written to\n"
-            "Train on ALL labels (good and bad scores), not just the top hits, and emit an "
-            "uncertainty (σ) so UCB/Thompson acquisition can explore — e.g. Chemprop with "
-            "MC-dropout or an ensemble. Example: "
-            "chemflow train chemprop --data {labels} --out {model}\n"
+            "Command run once per round to (re)fit the ML surrogate on the compounds docked so far.\n"
+            "  • {config} — your Chemprop config.toml (Browse above). ChemFlow's trainer takes it as a "
+            "positional arg: `chemflow train chemprop config.toml`. The TOML carries the data path, "
+            "SMILES/target columns, split, model, and output dir.\n"
+            "  • {labels}/{model} — also available if you prefer flags over the TOML.\n"
+            "The loop writes the cumulative labels to <job folder>/labels.csv each round (id + one "
+            "column per oracle metric). Point your TOML's dataset at that file and set its target "
+            "column to the metric; train on ALL rows and emit uncertainty (MC-dropout / ensemble) so "
+            "UCB/Thompson can explore. Example: chemflow train chemprop {config}\n"
             "Uncheck 'Include this step' to plan a brute-force dock with no ML surrogate.")
         note.setObjectName("Muted"); note.setWordWrap(True)
-        return self._node_page(key, optional, "③ Train surrogate", [r, note])
+        return self._node_page(key, optional, "③ Train surrogate", [rc, r, note])
 
     def _predict_page(self, key, optional) -> QWidget:
         r = self._labeled("Predict cmd:", self.predict_command)
@@ -517,7 +573,24 @@ class ActiveLearningPage(QWidget):
         return self._node_page(key, optional, "④ Predict over full library", [r, note])
 
     def _escalate_page(self, key, optional) -> QWidget:
-        return self._node_page(key, optional, "Escalate / Buy", [self.escalate_note])
+        grid_w = QWidget()
+        grid = QGridLayout(grid_w)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(3)
+        hdr = QLabel("Hard constraints — candidate must pass every checked factor:")
+        hdr.setStyleSheet("font-weight:600;")
+        grid.addWidget(hdr, 0, 0, 1, 3)
+        for i, (fkey, _label, _op, _val) in enumerate(self._HARD_FACTORS, start=1):
+            row = self.hard_factor_rows[fkey]
+            grid.addWidget(row["check"], i, 0)
+            grid.addWidget(row["op"], i, 1)
+            grid.addWidget(row["value"], i, 2)
+        grid.setColumnStretch(3, 1)
+        r2 = QHBoxLayout()
+        r2.addWidget(self.mpo_enabled)
+        r2.addWidget(self.mpo_spec, 1)
+        return self._node_page(key, optional, "Escalate / Buy", [grid_w, r2, self.escalate_note])
 
     # ======================================================================
     # Helpers (library autodetect / browse / config / run) — unchanged logic
@@ -565,7 +638,26 @@ class ActiveLearningPage(QWidget):
         bases: list[Path] = []
         for b in (cfg_dir, Path.cwd()):
             bases.extend([b, b / "screen_db", b / "screen_db" / preset])
+        # Also the ChemFlow install tree (screen_db lives at the repo root), so the
+        # preset resolves no matter which directory the desktop was launched from.
+        sdb = self._chemflow_screen_db()
+        if sdb is not None:
+            bases.extend([sdb.parent, sdb, sdb / preset])
         return bases
+
+    @staticmethod
+    def _chemflow_screen_db():
+        """Find a `screen_db/` dir by walking up from the installed chemflow package."""
+        try:
+            import chemflow
+            p = Path(chemflow.__file__).resolve()
+        except Exception:
+            return None
+        for parent in p.parents:
+            cand = parent / "screen_db"
+            if cand.is_dir():
+                return cand
+        return None
 
     def _autodetect_library(self, preset: str) -> str:
         exts = self._PRESET_EXTS.get(preset, [])
@@ -670,23 +762,52 @@ class ActiveLearningPage(QWidget):
             "oracle_command": prim["command"],
             "lower_is_better": prim["lower_is_better"],
             "train_command": self.train_command.text().strip(),
+            "train_config": self.train_config.text().strip(),
             "predict_command": self.predict_command.text().strip(),
+            "escalate": {
+                "hard_constraints": [
+                    {"property": k, "op": r["op"].currentText(), "value": r["value"].text().strip()}
+                    for k, r in self.hard_factor_rows.items() if r["check"].isChecked()
+                ],
+                "mpo_enabled": self.mpo_enabled.isChecked(),
+                "mpo": self.mpo_spec.text().strip(),
+            },
             "nodes_enabled": {k: cb.isChecked() for k, cb in self._node_enabled.items()},
         }
 
     def _write_config(self) -> str | None:
         import yaml
 
-        cfg = self.config.text().strip() or "al.yaml"
-        path = Path(cfg).expanduser()
+        job_dir = self._job_dir()                     # <cwd>/<workdir>/<job_name>, created
+        name = Path(self.config.text().strip() or "al.yaml").name or "al.yaml"
+        path = job_dir / name                         # config lives inside the job folder
+        data = self._config_dict()
+        # Point the backend's output at THIS folder (no nested <job>/<job_name>): the
+        # config sits in the job dir, so workdir=<job_dir> + empty job_name => outputs here.
+        data["workdir"] = str(job_dir)
+        data["job_name"] = ""
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(yaml.safe_dump(self._config_dict(), sort_keys=False), encoding="utf-8")
+            path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
         except OSError as exc:
             self.status.setText(f"Could not write config: {exc}")
             return None
-        self.status.setText(f"Wrote {path}. Review it, then Dry run / Run.")
+        self.config.setText(str(path))                # subsequent Run/Seed use this path
+        self.status.setText(f"Wrote {path}. All prepared files go to {job_dir}. "
+                            "Review it, then Dry run / Run.")
         return str(path)
+
+    def _job_dir(self, create: bool = True) -> Path:
+        """The one output folder for this job = <Output dir>/<job_name>. The Output
+        dir is whatever you set/Browse to (defaults to the launch directory). All
+        prepared files — config, seed, scaffold helpers, and run outputs — go here."""
+        wd = self.workdir.text().strip() or str(Path.cwd())
+        jd = (Path(wd).expanduser() / (self.job_name.text().strip() or "al_run")).resolve()
+        if create:
+            try:
+                jd.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+        return jd
 
     def _run(self, *, dry: bool) -> None:
         cfg = self._write_config()
@@ -701,14 +822,14 @@ class ActiveLearningPage(QWidget):
             argv.append("--dry-run")
         self._console.run(argv)
         self.status.setText(("Dry run: " if dry else "Running: ")
-                            + f"active-learning loop (oracle: {', '.join(self._selected_oracles()) or 'glide'}). "
-                            "Watch the Activity console.")
+                            + f"active-learning loop (oracle: {', '.join(self._selected_oracles()) or 'glide'}); "
+                            f"outputs → {self._job_dir(create=False)}. Watch the Activity console.")
 
     def _scaffold(self) -> None:
         if self._console is None:
             self.status.setText("No console attached; run: chemflow active-learn scaffold")
             return
-        dest = str(Path(self.config.text().strip() or "al.yaml").expanduser().parent)
+        dest = str(self._job_dir())          # into <workdir>/<job_name>/
         self._console.run(["active-learn", "scaffold", "--dir", dest])
         self.status.setText(f"Writing helper scripts (vsw_template.inp, vsw_dock.sh, …) to {dest}. "
                             "Edit vsw_template.inp (grid/constraints) before running.")
@@ -721,8 +842,7 @@ class ActiveLearningPage(QWidget):
         if not db:
             self.status.setText("Set the Library node first (preset auto-finds, or Browse a custom folder).")
             return
-        base = Path(self.config.text().strip() or "al.yaml").expanduser().parent
-        job_dir = base / (self.workdir.text().strip() or ".") / (self.job_name.text().strip() or "al_run")
+        job_dir = self._job_dir()            # create <workdir>/<job_name>/ now
         seed_out = str(job_dir / "seed.smi")
         argv = ["active-learn", "seed", "--library", self.library_preset.currentText(),
                 "--db", db,

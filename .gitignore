@@ -105,5 +105,5 @@ dataset/ADMET/ExpansionRX/*
 lstm_training/
 train/gpt_train.sh
 
-pmx/
+pmx
 screen_db

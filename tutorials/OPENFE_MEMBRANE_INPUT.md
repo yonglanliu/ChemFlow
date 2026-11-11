@@ -23,22 +23,20 @@ one is 12–90%.
 
 1. **Never `trj_align` or `trj_unwrap` the FEP input.** Both move atoms relative to
    the box and are the usual cause of this NaN:
+
    - `trj_unwrap` makes molecules continuous across frames → coordinates drift far
      outside the box (we saw 91% of atoms outside).
    - `trj_align` rigidly **rotates** the system while the box vectors stay
      axis‑aligned → the tilted slab no longer fits its cell.
-   For RBFE the orientation is irrelevant (OpenFE builds each edge in its own box),
-   so there is never a reason to align the FEP input.
-
+     For RBFE the orientation is irrelevant (OpenFE builds each edge in its own box),
+     so there is never a reason to align the FEP input.
 2. **Center on the PROTEIN, then wrap whole molecules.** Centering on the *membrane*
    pushes the protein into a neighboring periodic image — it ends up as a separate
    blob beside the box instead of embedded in the bilayer. Centering on the protein
    keeps it whole and in the middle; the bilayer and water tile around it.
-
 3. **Keep every molecule whole.** Wrapping per‑atom (or per‑residue for a
    multi‑residue protein) splits the protein across a face → a stretched peptide
    bond → NaN. Desmond's wrap keeps molecules whole; use it.
-
 4. **Export mmCIF, not PDB.** A solvated membrane is usually >99,999 atoms; PDB's
    serial column overflows and Maestro writes Hybrid36 (`A000G`) that OpenMM can't
    read. mmCIF has no such limit, and `create_json` accepts it.
@@ -102,6 +100,7 @@ measure minmax [atomselect top all]             ;# system extent (Angstrom)
 ```
 
 What you should see:
+
 - The protein is **embedded in the cyan bilayer**, inside the box — not a separate
   blob off to one side.
 - The extent is ≈ the box (a little larger is fine — whole molecules straddle the
@@ -145,6 +144,7 @@ the JSON has the coordinates baked in. Editing `protein_pdb` without re‑runnin
 `generate` changes nothing.
 
 Protocol notes for the membrane complex leg:
+
 - It is **pre‑solvated**, so the complex leg takes **no `SolventComponent`** (adding
   one double‑counts water).
 - Use the **`MonteCarloMembraneBarostat`**; `surface_tension = 0` (tensionless) is

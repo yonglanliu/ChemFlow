@@ -1,0 +1,220 @@
+"""``chemflow active-learn`` — active-learning virtual screening driver.
+
+    chemflow active-learn generate -o al.yaml     # write a commented config
+    chemflow active-learn run al.yaml [--dry-run]  # run the loop (Glide oracle + Chemprop)
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+_TEMPLATE = """\
+# ===================================================================
+# ChemFlow active-learning virtual screening (Deep-Docking style).
+#
+# A Chemprop surrogate scores the whole sharded library each round; the Glide
+# oracle only docks the batch that acquisition selects. Fill in the three command
+# templates for YOUR cluster (placeholders in {braces} are filled per round).
+# ===================================================================
+
+workdir: .                      # run from here (default: the current directory)
+job_name: al_run                # all outputs go into <workdir>/<job_name>/ (labels.csv, rounds, top_hits.csv)
+
+# --- Library -----------------------------------------------------------------
+# Pick a vendor preset (sets the shard glob + SMILES/ID columns for you) or
+# 'custom' to point library_shards / columns at your own files.
+library: enamine_real           # enamine_real | zinc20 | custom
+#   enamine_real -> screen_db/enamine_real/*.cxsmiles.bz2  (SMILES col 0, id col 1)
+#   zinc20       -> screen_db/zinc20/*.smi                  (SMILES col 0, zinc_id col 1)
+# .bz2/.gz shards are read transparently. Only needed for 'custom' (otherwise the
+# preset fills these in; set to override):
+library_shards: "screen_db/enamine_real/*.cxsmiles.bz2"  # sharded library
+smiles_column: 0
+id_column: 1
+
+rounds: 5                       # active-learning iterations
+seed_size: 2000                 # round-0 random sample to dock
+batch_size: 2000                # compounds docked per subsequent round
+strategy: ucb                   # greedy | ucb | thompson | random
+kappa: 1.0                      # UCB exploration weight (ucb strategy)
+lower_is_better: true           # docking score: more negative = better
+top_n: 500                      # how many final hits to emit
+seed: 0
+
+# --- Seed (round-0) selection ----------------------------------------------
+seed_method: diverse            # random | diverse (MaxMin, default) | scaffold (Butina)
+seed_pool: 0                    # oversample the diverse/scaffold pick draws from (0 = ~20x seed_size)
+seed_actives: ""               # optional SMILES file of known binders to warm-start the seed
+
+# --- Oracle (docking) ------------------------------------------------------
+oracle: glide                   # glide | vsw | vina | custom
+receptor: "grid.zip"            # Glide grid .zip  (for vina: receptor .pdbqt)
+modules: []                     # `module load` these before the oracle, e.g.
+                                #   [schrodinger]           # Glide / VSW
+                                #   [autodock-vina, openbabel]  # Vina
+# Enamine REAL is raw SMILES, so the oracle wrapper must run LIGAND PREP then dock.
+# Built-in wrappers (you provide the script): read the batch .smi (SMILES<TAB>id),
+# prep + dock against {receptor}, and WRITE {out} as CSV 'id,score':
+#   glide -> glide_dock.sh {batch} {receptor} {out}   # LigPrep -> Glide SP/XP
+#   vsw   -> vsw_dock.sh   {batch} {receptor} {out}   # Schrodinger VSW (prep + HTVS->SP->XP)
+#   vina  -> vina_dock.sh  {batch} {receptor} {out}   # Meeko/OpenBabel -> Vina
+# Override with a full custom command here (leave empty to use the built-in):
+oracle_command: ""
+
+# --- Multi-oracle (multi-fidelity) — OPTIONAL ------------------------------
+# Instead of the single oracle above, list several oracles, each with its OWN
+# input + output metric. Every metric becomes a training target for the
+# surrogate (multitask); the `primary_metric` drives which compounds are docked
+# next. Each oracle docks the SAME batch and writes {out} as CSV 'id,score'.
+# (If `oracles:` is set it takes precedence over the single `oracle:` above.)
+#   boltz2 -> ML co-fold affinity (AlchemFold); its `receptor` is a protein FASTA.
+# oracles:
+#   - name: glide
+#     receptor: grid.zip
+#     metric: glide_score
+#     lower_is_better: true
+#     modules: [schrodinger]
+#     command: ""                 # empty -> glide_dock.sh {batch} {receptor} {out}
+#   - name: boltz2
+#     receptor: target.fasta
+#     metric: pIC50
+#     lower_is_better: false
+#     command: "boltz2_screen.sh {batch} {receptor} {out}"
+# primary_metric: glide_score     # which metric drives acquisition / top hits
+
+# --- Surrogate: train + predict (ChemFlow) ---------------------------------
+# train: fit on cumulative {labels} (id,score) -> {model}
+train_command: "chemflow train chemprop --data {labels} --out {model}"
+# predict over the whole library -> {out} CSV with 'id,pred' (+ 'sigma' for UCB/Thompson)
+predict_command: "chemflow predict --model {model} --library {library} --out {out} --uncertainty"
+
+# TIP: for 10^8-10^9 libraries run train/predict as SLURM array jobs over the
+# shards and have the command block until they finish (e.g. sbatch --wait), so
+# each round's predict covers the full space before acquisition.
+"""
+
+
+def _generate(args: argparse.Namespace) -> int:
+    out = Path(args.output) if args.output else Path("al.yaml")
+    out = out.expanduser()
+    if out.exists() and not args.force:
+        print(f"Refusing to overwrite existing file: {out} (use --force)", file=sys.stderr)
+        return 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_TEMPLATE, encoding="utf-8")
+    print(f"Wrote active-learning config: {out}")
+    print("Next:")
+    print("  chemflow active-learn scaffold           # write VSW template + oracle wrapper + monitor")
+    print("  chemflow active-learn seed --db 'screen_db/*.cxsmiles' --n 10000   # make seed.smi")
+    print(f"  chemflow active-learn run {out}          # launch the loop (docks each round)")
+    return 0
+
+
+def _run(args: argparse.Namespace) -> int:
+    from chemflow.active_learning.workflow import run_loop
+
+    return run_loop(Path(args.config), dry_run=args.dry_run)
+
+
+def _seed(args: argparse.Namespace) -> int:
+    """Create a seed .smi (SMILES<TAB>id) by sampling the library."""
+    import csv
+    import glob
+
+    from chemflow.active_learning.seed import select_seed
+    from chemflow.active_learning.workflow import _LIBRARY_PRESETS, _chemflow_root
+
+    preset = _LIBRARY_PRESETS.get(args.library, {})
+    db = args.db or preset.get("library_shards")
+    if not db:
+        print("Set --db (a shard glob) or pick --library enamine_real|zinc20", file=sys.stderr)
+        return 1
+    # Preset fills the columns unless the user overrode them on the CLI.
+    smiles_col = args.smiles_col if args.smiles_col is not None else preset.get("smiles_column", 0)
+    id_col = args.id_col if args.id_col is not None else preset.get("id_column", 1)
+
+    db_expanded = str(Path(db).expanduser())
+    shards = sorted(glob.glob(db_expanded))
+    if not shards and not Path(db).is_absolute():
+        # Fall back to the ChemFlow install root (screen_db lives there), so this
+        # works no matter which directory you run from.
+        root = _chemflow_root()
+        if root is not None:
+            shards = sorted(glob.glob(str(root / db)))
+    if not shards:
+        print(f"No library shards matched {db!r}", file=sys.stderr)
+        return 1
+    print(f"Library '{args.library}': {len(shards)} shard(s); selecting {args.n} via '{args.method}' …")
+    recs = select_seed(
+        shards, args.n, method=args.method, pool=args.pool,
+        smiles_col=smiles_col, id_col=id_col,
+        actives_file=(args.actives or None), seed=args.seed, scan_cap=args.scan_cap,
+    )
+    out = Path(args.output).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(f"{smi}\t{cid}\n" for cid, smi in recs), encoding="utf-8")
+    csv_out = out.with_suffix(".csv")
+    with open(csv_out, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["id", "SMILES"])
+        w.writerows((cid, smi) for cid, smi in recs)
+    print(f"Wrote {len(recs)} compounds -> {out} (SMILES<TAB>id) and {csv_out}")
+    print("Feed this into your docking oracle (VSW/Glide/Vina) to get round-0 labels.")
+    return 0
+
+
+def _scaffold(args: argparse.Namespace) -> int:
+    """Write the cluster-side helper scripts (VSW template + wrapper + monitor)."""
+    from chemflow.active_learning.scaffold import write_assets
+
+    written = write_assets(args.dir, which=args.which, force=args.force)
+    if written:
+        print(f"Scaffolded {len(written)} file(s) into {args.dir}. "
+              "Edit vsw_template.inp (grid/constraints) + your al.yaml, then: "
+              "chemflow active-learn run al.yaml")
+    return 0
+
+
+def add_active_learn_parser(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "active-learn",
+        help="Active learning virtual screening (Chemprop surrogate + Glide/Vina/VSW oracle)",
+    )
+    commands = parser.add_subparsers(dest="active_learn_command", required=True)
+
+    gen = commands.add_parser("generate", help="Write a commented active-learning config")
+    gen.add_argument("-o", "--output", type=Path, help="Output YAML (default: al.yaml)")
+    gen.add_argument("--force", action="store_true", help="Overwrite an existing file")
+    gen.set_defaults(func=_generate)
+
+    sd = commands.add_parser("seed", help="Create a seed .smi by sampling the library")
+    sd.add_argument("--library", choices=["enamine_real", "zinc20", "custom"], default="custom",
+                    help="library preset → sets a default --db glob + SMILES/id columns")
+    sd.add_argument("--db", help="library shard glob, e.g. 'screen_db/*.cxsmiles' "
+                                 "(optional if --library enamine_real|zinc20)")
+    sd.add_argument("--n", type=int, default=10000, help="seed size (default 10000)")
+    sd.add_argument("--method", choices=["diverse", "random", "scaffold"], default="diverse")
+    sd.add_argument("--pool", type=int, default=0, help="oversample for diverse/scaffold (0 = ~20x n)")
+    sd.add_argument("--scan-cap", type=int, default=0,
+                    help="max records read per shard for compressed libs (.bz2/.gz); 0 = auto (~40x n)")
+    sd.add_argument("--smiles-col", type=int, default=None, help="override preset SMILES column")
+    sd.add_argument("--id-col", type=int, default=None, help="override preset id column")
+    sd.add_argument("--actives", default=None, help="optional SMILES file of known binders to include")
+    sd.add_argument("--seed", type=int, default=0)
+    sd.add_argument("-o", "--output", default="seed.smi")
+    sd.set_defaults(func=_seed)
+
+    sc = commands.add_parser("scaffold", help="Write the VSW template + oracle wrapper + monitor")
+    sc.add_argument("--dir", default=".", help="destination directory (default: current)")
+    sc.add_argument("--which", choices=["vsw", "glide", "seed", "all"], default="all",
+                    help="which helper set to write (default: all)")
+    sc.add_argument("--force", action="store_true", help="overwrite existing files")
+    sc.set_defaults(func=_scaffold)
+
+    run = commands.add_parser("run", help="Run the active-learning loop (launches docking jobs)")
+    run.add_argument("config", type=Path, help="Active-learning YAML config")
+    run.add_argument("--dry-run", action="store_true",
+                     help="Print each round's plan and commands without executing")
+    run.set_defaults(func=_run)

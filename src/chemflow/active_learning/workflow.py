@@ -50,7 +50,8 @@ _DEFAULTS = {
     #   train:   {labels} cumulative id,score csv, {model} output model dir
     #   predict: {model}, {library} shard glob, {out} csv (id,pred[,sigma])
     "oracle_command": "",               # empty → use the built-in template for `oracle`
-    "train_command": "chemflow train chemprop --data {labels} --out {model}",
+    "train_command": "chemflow train chemprop {config}",
+    "train_config": "",                 # chemprop config.toml (positional) -> {config}; point its dataset at labels.csv
     "predict_command": "chemflow predict --model {model} --library {library} --out {out} --uncertainty",
 }
 
@@ -100,11 +101,32 @@ def load_config(path) -> dict:
     return conf
 
 
+def _chemflow_root() -> Path | None:
+    """Repo/install root that contains `screen_db/` (walk up from the package)."""
+    try:
+        import chemflow
+        p = Path(chemflow.__file__).resolve()
+    except Exception:
+        return None
+    for parent in p.parents:
+        if (parent / "screen_db").is_dir():
+            return parent
+    return None
+
+
 def _shard_paths(pattern: str, base: Path) -> list[Path]:
     p = Path(pattern)
     if p.is_absolute():
         return sorted(Path(p.parent).glob(p.name))
-    return sorted(base.glob(pattern))
+    hits = sorted(base.glob(pattern))
+    if hits:
+        return hits
+    # Fallback: resolve a relative `screen_db/...` glob against the ChemFlow install
+    # root, so `active-learn run/seed` works regardless of the current directory.
+    root = _chemflow_root()
+    if root is not None:
+        hits = sorted(root.glob(pattern))
+    return hits
 
 
 def _parse_record(line: str, smiles_col: int, id_col: int):
@@ -435,7 +457,9 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
         if not dry_run and preds_csv.exists() and preds_csv.stat().st_size > 0:
             print(f"  round {rnd} predictions exist — skipping train+predict")
         else:
-            _run(conf["train_command"].format(labels=labels_csv, model=model_dir), dry_run=dry_run)
+            _run(conf["train_command"].format(
+                labels=labels_csv, model=model_dir, config=conf.get("train_config", "")),
+                dry_run=dry_run)
             _run(conf["predict_command"].format(
                 model=model_dir, library=conf["library_shards"], out=preds_csv), dry_run=dry_run)
 
