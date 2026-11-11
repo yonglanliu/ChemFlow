@@ -76,6 +76,25 @@ the predicted binding pose and its affinity / confidence scores in the desktop.
 
 ---
 
+## Modules under development
+
+**Active learning virtual screening** — screen an ultra‑large library (Enamine REAL /
+ZINC20, 10⁹–10¹⁰) by letting a cheap Chemprop surrogate score the whole library each
+round while a docking oracle (Glide / VSW / Vina / Boltz‑2) only docks the batch
+active learning selects; promising hits are filtered (hard constraints + optional
+MPO) and escalated to MM‑GBSA → co‑fold → FEP, or bought. See the
+<a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/ACTIVE_LEARNING_SCREENING.md">tutorial</a>.
+
+<p align="center">
+  <img src="assets/images/active_learning_workflow.svg" alt="Active learning virtual screening workflow" width="900">
+</p>
+
+<p align="center">
+  <img src="assets/images/active_learning_desktop.png" alt="Active learning virtual screening — desktop workflow view (nodes + Escalate/Buy configuration)" width="900">
+</p>
+
+---
+
 ## Quick start
 
 ### Train Hugging Face Graphormer
