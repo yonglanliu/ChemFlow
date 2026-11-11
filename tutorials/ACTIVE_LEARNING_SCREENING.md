@@ -11,8 +11,9 @@ pays off.
   <img src="../assets/images/active_learning_workflow.svg" alt="Active learning virtual screening workflow" width="900">
 </p>
 
-The loop: **seed → dock (oracle) → train surrogate → predict over the library →
-acquire next batch (UCB) → repeat**, then escalate the top hits to MM‑GBSA / FEP.
+The loop: **seed → [DiffDock gate] → dock (oracle) → train surrogate → predict over the
+library → acquire next batch (UCB) → repeat**, then escalate the top hits to MM‑GBSA / FEP.
+The **DiffDock gate** is optional (see [§2b](#2b-optional-diffdock-pose-gate)).
 
 ---
 
@@ -87,6 +88,65 @@ Methods: `diverse` (MaxMin fingerprint pick — **default, recommended**),
 `scaffold` (Butina clusters), `random` (fast). Add `--actives known.smi` to
 force‑include known binders (warm start). It samples a random pool by byte offset
 (doesn't read all 10⁹ lines) and writes `seed.smi` (`SMILES<TAB>id`) + `seed.csv`.
+
+---
+
+## 2b. (Optional) DiffDock pose gate
+
+A cheap **pose-prediction filter** in front of the expensive oracle (Glide / Vina / Boltz‑2).
+Each round, between *selecting the batch* and *running the oracle*:
+
+```
+selected batch ──► DiffDock‑L (all compounds, batched) ──► confidence per compound
+        │
+        ├─ high confidence (top 30%)           ──►  oracle(s): Glide / Vina / Boltz‑2
+        ├─ random 3% of the rest ("audit")     ──►  oracle(s)   (measures what the gate misses)
+        └─ everything else = "not evaluated"   ──►  no oracle score (blank), never re‑acquired
+                       │
+                       └─ the DiffDock confidence of ALL compounds → labels.csv column
+                          `diffdock_confidence` = an extra multitask target
+```
+
+**Meaning of the labels.** Compounds the gate rejects are *not evaluated*, **not** confirmed
+non‑binders — DiffDock's confidence is only a weak proxy for binding. That is why a small random
+**audit** share of the rejected is still sent to the oracle: it is the only way to measure how many
+good compounds the gate throws away. The oracle columns of `labels.csv` (e.g. `glide_score`) stay
+**empty** for gated‑out compounds, so the multitask surrogate is trained with those cells masked (Chemprop
+accepts empty target cells); `diffdock_confidence` is filled for everyone.
+
+**Setup.** Install DiffDock‑L in its own env first (`chemflow diffdock-env install`, then `warmup`; see
+`src/alchemfold/README.md`), then add to `al.yaml`:
+
+```yaml
+gate: diffdock
+gate_receptor: /path/to/receptor.pdb     # DiffDock docks every compound into this structure
+gate_pass_fraction: 0.3                  # or gate_threshold: <confidence cutoff>
+gate_audit_fraction: 0.03
+gate_samples: 10                         # DiffDock poses per compound
+gate_steps: 20                           # DiffDock denoising steps (10-15 = faster first pass)
+```
+
+The gate runs `chemflow alchemfold dock-batch …` (override with `gate_command`), which writes
+`round_NN/gate_scores.csv` (`id,smiles,confidence`) and keeps the rank‑1 pose of every compound in
+`round_NN/gate/poses/*.sdf` — usable later for rescoring (Vina/GNINA score‑only).
+
+**What each round writes:** `batch.smi` (the whole selected batch), `gate_report.csv` (every compound:
+confidence, `gate_pass`, `audit`), `batch_oracle.smi` (what the oracle actually sees: passed + audit).
+Gated‑out compounds are remembered and **excluded from later acquisition**, so they are not re‑docked.
+
+**Check that the gate is informative** — after each round the log prints
+`gate check: Spearman(confidence, <oracle score>) = …` and `gate audit: mean score passed vs rejected‑audit`.
+If the correlation is near 0 (or has the wrong sign) or the audited rejects score as well as the passed,
+the gate is not helping — raise `gate_pass_fraction` or switch it off. Also test the confidence on
+**known actives vs decoys** of your target before a large run.
+
+**Surrogate.** To use `diffdock_confidence` as an auxiliary target, list it next to the oracle metric in
+the Chemprop TOML (`target_column = ["glide_score", "diffdock_confidence"]`) and make the predict step
+output the **primary** metric as `pred` (+ `sigma`) for acquisition. Keep the primary metric first.
+
+> **Bias to keep in mind:** the oracle labels exist only for compounds DiffDock liked (plus the audit), so
+> the surrogate's oracle task is trained on a biased subset, and DiffDock's confidence tends to follow ligand
+> size/rigidity. The audit sample is what lets you detect and correct for this.
 
 ---
 

@@ -25,6 +25,7 @@ dependencies:
 
   # Alchemical and molecular-simulation stack
   - openfe=1.12
+  - openfe-analysis
   - openmm=8.4.0
   - openff-toolkit
   - gromacs

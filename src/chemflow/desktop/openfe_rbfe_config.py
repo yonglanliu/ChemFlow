@@ -84,7 +84,7 @@ DEFAULTS: dict[str, Any] = {
     "complex_timestep": 4.0,
     "solvent_timestep": 4.0,
     "barostat_frequency": 25.0,
-    "surface_tension": 300.0,             # bar*nm (membrane only)
+    "surface_tension": 0.0,               # bar*nm (membrane only; 0 => tensionless)
     # --- Mapper / planner ---
     "mapper": "KartografAtomMapper",      # LomapAtomMapper | KartografAtomMapper
     "planner": "minimal_redundant",       # minimal_spanning | minimal_redundant | radial

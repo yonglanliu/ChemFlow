@@ -1,0 +1,74 @@
+name: diffdock
+
+# DiffDock-L (blind molecular docking, MIT) — its OWN conda env, separate from
+# `alchemfold` (Boltz/Chai) because it needs the PyTorch-Geometric stack (torch-scatter /
+# sparse / cluster, e3nn). Do NOT merge it into the alchemfold env.
+#
+# DiffDock is a GitHub project, not a PyPI package. Two steps:
+#
+#   1) the env (this file)
+#        mamba env create -f env/environment-diffdock.yaml
+#   2) the code + DiffDock-L weights
+#        git clone https://github.com/gcorso/DiffDock.git <dir>
+#        # the DiffDock-L (v1.1) weights download automatically on the first inference
+#        # run (needs internet — do the first run on a login/data node, see below)
+#
+# or do both with ChemFlow:   chemflow diffdock-env install --dir <dir> [--cuda 12.1]
+#
+# The torch/CUDA wheels below are the "modern" profile: torch 2.4 + CUDA 12.1, which runs on
+# Ampere (A100), Ada (L40) and Hopper (H200) GPUs. The PyG wheels MUST match the torch+CUDA
+# tag — if you change `cu121`, change BOTH the torch index URL and the --find-links URL
+# (https://data.pyg.org/whl/torch-2.4.0+cuXXX.html). `chemflow diffdock-env install --cuda
+# 11.8` does that substitution for you (cu118 / cu121 / cu124 have PyG wheels for torch 2.4).
+#
+# If this env fails to solve/run with your DiffDock checkout, use the repo's own pinned
+# env instead:  chemflow diffdock-env install --profile repo   (builds from
+# <dir>/environment.yml; it pins an older torch that may not support H200/L40 GPUs).
+#
+# First run on a GPU node needs: (a) internet to download the DiffDock-L models and the
+# ESM2 weights (torch hub cache) — run `chemflow diffdock-env warmup` once on a node with
+# internet; (b) a couple of minutes to precompute SO(2)/SO(3) lookup tables (cached).
+
+channels:
+  - conda-forge
+
+dependencies:
+  # Python 3.11: ChemFlow itself needs >=3.11, so this lets `chemflow diffdock-env install` link
+  # chemflow into this env (pip install -e, like alchemfold-env). DiffDock's README pins 3.9;
+  # torch 2.4 / PyG wheels / e3nn support 3.11, but if DiffDock itself misbehaves on 3.11 try
+  # `python=3.10` here (then chemflow cannot be linked — it needs >=3.11 — which is optional).
+  - python=3.11
+  - pip
+  # Build support for the editable chemflow link (--no-build-isolation).
+  - setuptools>=80
+  - wheel
+  # Keep compiled extensions on the conda C++ runtime (enterprise-Linux clusters).
+  - libgcc-ng>=12
+  - libstdcxx-ng>=12
+  - git
+
+  # Chemistry + numerics (numpy<2: PyG/e3nn wheels are built against numpy 1.x).
+  - "numpy<2"
+  - scipy
+  - pandas
+  - networkx
+  - pyyaml
+  - requests
+  - tqdm
+  - biopython
+  - "rdkit>=2023.09"
+
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - --find-links https://data.pyg.org/whl/torch-2.4.0+cu121.html
+      - torch==2.4.1
+      - torch-scatter
+      - torch-sparse
+      - torch-cluster
+      - torch-spline-conv
+      - torch-geometric
+      - e3nn==0.5.1
+      - fair-esm==2.0.0          # ESM2 receptor embeddings (no ESMFold extras needed when you give a PDB)
+      - spyrmsd
+      - biopandas
+      - prody

@@ -19,11 +19,31 @@ from alchemfold.engines import get_engine
 from alchemfold._exec import resolve_command
 
 
+def _screen_chain_id(conf) -> str:
+    """Short (<=5 char) ligand chain id that doesn't clash with protein chains.
+
+    Boltz truncates chain names to 5 chars, so long library names used as chain
+    ids raise ``KeyError`` in ``parse_boltz_schema``.
+    """
+    taken = {str(getattr(p, "id", "")) for p in (getattr(conf, "proteins", []) or [])}
+    for cand in ("L", "Z", "X", "Y", "M", "N"):
+        if cand not in taken:
+            return cand
+    return "LIG1"
+
+
 def _run_one(engine, conf, workdir: Path, *, dry_run: bool) -> int:
     import os
 
     inputs, out_dir = engine.write_inputs(conf, workdir)
-    command = resolve_command(engine.build_command(conf, inputs, out_dir))
+    from alchemfold._exec import wrap_srun
+
+    # DiffDock is single-GPU and not Lightning-DDP: never srun-wrap it per device.
+    devices = 1 if str(getattr(conf, "engine", "")) == "diffdock" else int(getattr(conf, "devices", 1) or 1)
+    for w in (engine.preflight(conf) if hasattr(engine, "preflight") else []):
+        print(f"WARNING (first-run start-up): {w}", flush=True)
+    command = wrap_srun(resolve_command(engine.build_command(conf, inputs, out_dir)), devices)
+    cwd = engine.build_cwd(conf) if hasattr(engine, "build_cwd") else None
     env = os.environ.copy()
     if hasattr(engine, "build_env"):
         extra = engine.build_env(conf) or {}
@@ -34,9 +54,11 @@ def _run_one(engine, conf, workdir: Path, *, dry_run: bool) -> int:
     for label, path in inputs.items():
         print(f"  {label}: {path}")
     print(f"Running: {' '.join(shlex.quote(p) for p in command)}")
-    result = subprocess.run(command, check=False, env=env)
+    result = subprocess.run(command, check=False, env=env, cwd=cwd)
     if result.returncode == 0:
         print(f"  -> predictions in: {out_dir}")
+        if hasattr(engine, "post_run"):
+            engine.post_run(conf, out_dir)
     return result.returncode
 
 
@@ -47,23 +69,39 @@ def run_from_config(config_path, *, dry_run: bool = False) -> int:
 
     workdir = Path(conf.workdir).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        from alchemfold._gpuinfo import print_run_info
+
+        print_run_info(conf)
 
     ligand_file = getattr(conf, "ligand_file", None)
     if ligand_file:
         library = load_ligands_from_file(
             ligand_file, getattr(conf, "ligand_file_format", "auto")
         )
+        if str(conf.engine) == "boltz":
+            # Batched: one boltz call per library, one shared MSA, all poses in
+            # one folder and all scores in one CSV (no per-ligand folders).
+            from alchemfold.boltz_batch import run_library
+
+            return run_library(conf, library, dry_run=dry_run)
+        if str(conf.engine) == "diffdock":
+            # Batched too: one DiffDock call, all poses in poses/, scores in one CSV.
+            from alchemfold.diffdock_batch import run_library as run_diffdock_library
+
+            return run_diffdock_library(conf, library, dry_run=dry_run)
         print(f"Engine: {conf.engine}; screening {len(library)} ligand(s) from {ligand_file}")
         worst = 0
         for i, lig in enumerate(library, start=1):
             conf_i = copy.deepcopy(conf)
             conf_i.ligand_file = None
-            conf_i.ligands = [SimpleNamespace(id=lig["id"], smiles=lig["smiles"])]
+            chain_id = _screen_chain_id(conf_i)
+            conf_i.ligands = [SimpleNamespace(id=chain_id, smiles=lig["smiles"])]
             # Scope pocket / affinity to the ligand being screened.
             if getattr(conf_i, "pocket", None):
-                conf_i.pocket.binder = lig["id"]
+                conf_i.pocket.binder = chain_id
             if getattr(conf_i, "predict_affinity", False):
-                conf_i.affinity_binder = lig["id"]
+                conf_i.affinity_binder = chain_id
             ligand_workdir = workdir / "ligands" / lig["id"]
             print(f"[{i}/{len(library)}] ligand {lig['id']}: {lig['smiles']}")
             rc = _run_one(engine, conf_i, ligand_workdir, dry_run=dry_run)

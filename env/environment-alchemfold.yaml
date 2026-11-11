@@ -71,27 +71,11 @@ dependencies:
       # boltz-only env and install the matching kernels there, e.g.:
       #     pip install "boltz[cuda]"     # pins compatible cuequivariance/trifast
       # then set `no_kernels: false` in the docking config for that env.
-      # DiffDock (engine: diffdock) — blind docking, GitHub-only (no PyPI release).
-      # Uncomment the block below to install it into THIS env. It pulls the
-      # torch-geometric stack (torch_scatter/sparse/cluster), whose wheels MUST
-      # match the torch build boltz/chai install — set the find-links URL to that
-      # torch+CUDA tag (see `python -c "import torch;print(torch.__version__)"`).
-      # If pip reports a conflict with boltz/chai, use a separate env instead
-      # (see the note below) and point `diffdock_command` at it.
-      # - --find-links https://data.pyg.org/whl/torch-2.4.0+cu121.html
-      # - torch-scatter
-      # - torch-sparse
-      # - torch-cluster
-      # - torch-geometric
-      # - e3nn
-      # - fair-esm
-      # - spyrmsd
-      # - "DiffDock @ git+https://github.com/gcorso/DiffDock.git"
+      # DiffDock-L (engine: diffdock) is NOT installed in this env: it needs the
+      # torch-geometric stack and has its own env — see env/environment-diffdock.yaml
+      # (`chemflow diffdock-env install`, or the desktop Environments page).
 
-# DiffDock alternative — its own environment (recommended; avoids torch-geometric
-# vs boltz/chai conflicts). Clone the repo, build its conda env per its README,
-# then in docking.yaml / screen.yaml:
-#     engine: diffdock
-#     diffdock_command: "python /path/to/DiffDock/inference.py"
-#     receptor_pdb: receptor.pdb
-# AlchemFold only builds DiffDock's input CSV + command; it does not vendor the model.
+# DiffDock-L lives in its own environment: env/environment-diffdock.yaml
+#     chemflow diffdock-env install --dir ~/DiffDock
+# then use `engine: diffdock` + `receptor_pdb:` in docking.yaml / screen.yaml. AlchemFold finds that
+# env/repo automatically (or set diffdock_python / diffdock_dir) and only builds DiffDock's input CSV.

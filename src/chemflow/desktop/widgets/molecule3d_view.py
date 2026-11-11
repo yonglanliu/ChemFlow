@@ -19,8 +19,9 @@ import os
 from pathlib import Path
 
 from chemflow.config import PROJECT_ROOT
+from chemflow.desktop.pose_scene import COMPLEX, VIEWER_JS, build_scene
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
@@ -59,7 +60,13 @@ def _fmt_for(path: Path) -> str:
 
 
 class Molecule3DView(QWidget):
-    """A 3Dmol.js viewer for predicted complexes / binding poses."""
+    """A 3Dmol.js viewer for predicted complexes / binding poses.
+
+    Renders a *scene* of objects (see :mod:`chemflow.desktop.pose_scene`): a Boltz/Chai complex, a
+    DiffDock ligand pose + its separate receptor, and/or a multi-frame diffusion trajectory.
+    """
+
+    frames_changed = Signal(int)   # number of trajectory frames in the loaded scene (0 = none)
 
     def __init__(self, parent=None, *, min_height: int = 360):
         super().__init__(parent)
@@ -69,27 +76,55 @@ class Molecule3DView(QWidget):
         self.web_view.setMinimumHeight(min_height)
         layout.addWidget(self.web_view)
         self._ready = False
-        self._pending: tuple[str, str] | None = None
+        self._pending: tuple[list, bool] | None = None
         self.web_view.loadFinished.connect(self._on_load_finished)
         self.web_view.setHtml(self._page_html(), QUrl("about:blank"))
 
     # -- public API -------------------------------------------------------
+    def load_scene(self, objects: list[dict], autoplay: bool = True) -> None:
+        """Render objects ``[{data, fmt, role}]`` (role: complex | receptor | ligand | trajectory)."""
+        if not self._ready:
+            self._pending = (objects, autoplay)
+            return
+        script = (f"window.renderScene({json.dumps(objects)}, {json.dumps(bool(autoplay))});")
+        self.web_view.page().runJavaScript(script, self._emit_frames)
+
+    def load_files(self, pose: str | None = None, receptor: str | None = None,
+                   trajectory: str | None = None, autoplay: bool = True) -> list[str]:
+        """Render whichever files are given (complex | ligand pose + receptor | trajectory).
+
+        Returns human-readable notes (e.g. "ligand-only file: choose a receptor").
+        """
+        objects, notes = build_scene(pose, receptor, trajectory)
+        if objects:
+            self.load_scene(objects, autoplay)
+        else:
+            self._show_message("Nothing to show — choose a pose / complex file first.")
+        return notes
+
     def load_structure(self, path: str | Path) -> None:
-        """Load and render a structure file (PDB / mmCIF / SDF / mol2 / xyz)."""
+        """Load and render a single structure file (PDB / mmCIF / SDF / mol2 / xyz)."""
         target = Path(path).expanduser()
         if not target.is_file():
             self._show_message(f"File not found: {target}")
             return
-        data = target.read_text(encoding="utf-8", errors="replace")
-        self.load_data(data, _fmt_for(target))
+        self.load_files(pose=str(target))
 
     def load_data(self, data: str, fmt: str = "pdb") -> None:
-        """Render structure text already in memory."""
-        if not self._ready:
-            self._pending = (data, fmt)
-            return
-        script = f"window.renderModel({json.dumps(data)}, {json.dumps(fmt)});"
-        self.web_view.page().runJavaScript(script)
+        """Render structure text already in memory (treated as a complex)."""
+        self.load_scene([{"data": data, "fmt": fmt, "role": COMPLEX}])
+
+    def play(self) -> None:
+        if self._ready:
+            self.web_view.page().runJavaScript("window.playTraj && window.playTraj();")
+
+    def pause(self) -> None:
+        if self._ready:
+            self.web_view.page().runJavaScript("window.pauseTraj && window.pauseTraj();")
+
+    def set_frame(self, index: int) -> None:
+        if self._ready:
+            self.web_view.page().runJavaScript(f"window.setTrajFrame && window.setTrajFrame({int(index)});")
 
     def clear(self) -> None:
         if self._ready:
@@ -99,9 +134,15 @@ class Molecule3DView(QWidget):
     def _on_load_finished(self, ok: bool) -> None:
         self._ready = bool(ok)
         if ok and self._pending is not None:
-            data, fmt = self._pending
+            objects, autoplay = self._pending
             self._pending = None
-            self.load_data(data, fmt)
+            self.load_scene(objects, autoplay)
+
+    def _emit_frames(self, n) -> None:
+        try:
+            self.frames_changed.emit(max(0, int(n)))
+        except (TypeError, ValueError):
+            self.frames_changed.emit(0)
 
     def _show_message(self, message: str) -> None:
         if self._ready:
@@ -136,31 +177,7 @@ class Molecule3DView(QWidget):
             f"{self._three_dmol_script_tag()}"
             "</head><body>"
             "<div id='viewer'><div id='msg'>Run a docking job, then load its "
-            "predicted complex to see the binding pose.</div></div>"
-            "<script>"
-            "var _viewer=null;"
-            "function _ensure(){"
-            "  if(typeof $3Dmol==='undefined'){return null;}"
-            "  if(!_viewer){_viewer=$3Dmol.createViewer('viewer',{backgroundColor:'0x0b1622'});}"
-            "  return _viewer;"
-            "}"
-            "window.showMessage=function(t){var m=document.getElementById('msg');"
-            "if(m){m.textContent=t;m.style.display='block';}};"
-            "window.clearModel=function(){var v=_ensure();if(v){v.clear();v.render();}};"
-            "window.renderModel=function(data,fmt){"
-            "  var v=_ensure();"
-            "  if(!v){window.showMessage('3Dmol.js not found. Run  chemflow vendor-3dmol  "
-            "on a node with internet (or set CHEMFLOW_3DMOL_PATH), then reopen this page.');return;}"
-            "  var m=document.getElementById('msg');if(m){m.style.display='none';}"
-            "  v.clear();"
-            "  try{v.addModel(data,fmt);}catch(e){window.showMessage('Parse error: '+e);return;}"
-            "  v.setStyle({},{cartoon:{color:'spectrum'}});"
-            "  v.setStyle({hetflag:true},{stick:{colorscheme:'greenCarbon',radius:0.18}});"
-            "  v.addStyle({hetflag:true},{sphere:{scale:0.28}});"
-            "  var sel={hetflag:true};"
-            "  try{v.zoomTo(sel);}catch(e){v.zoomTo();}"
-            "  v.render();"
-            "};"
-            "</script>"
+            "result (a complex, or a ligand pose + receptor) to see the binding pose.</div></div>"
+            "<script>" + VIEWER_JS + "</script>"
             "</body></html>"
         )

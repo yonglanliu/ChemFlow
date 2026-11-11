@@ -15,6 +15,10 @@ gromacs:
   python: null            # GROMACS steps use the same env, e.g. <conda-prefix>/envs/alchemforge/bin/python
   command: null           # gmx executable; null = `gmx` from PATH / the env
 
+diffdock:                 # DiffDock-L: its own conda env + cloned repo (`chemflow diffdock-env install`)
+  python: null            # e.g. <conda-prefix>/envs/diffdock/bin/python  (null = auto-detect)
+  dir: null               # e.g. <ChemFlow>/DiffDock                       (null = auto-detect)
+
 obabel:
   command: null           # e.g. <conda-prefix>/envs/alchemforge/bin/obabel; null = PATH
 

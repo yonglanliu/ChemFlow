@@ -18,6 +18,7 @@ Schema (every key optional — omit a tool to fall back to auto-detection)::
     reinvent:  {command: /path/to/reinvent}  # REINVENT4 executable
     gromacs:   {command: gmx}                 # or a full path
     boltz:     {command: boltz}
+    diffdock:  {python: /env/bin/python, dir: /path/to/DiffDock}   # DiffDock-L env + repo
     rosetta_apps: {rosetta3: /rosetta/main/source}   # classic Rosetta root
     hpc:       {modules: [gromacs, openmm, openfe, pyrosetta, boltz2],
                 conda_init: <conda-prefix>/etc/profile.d/conda.sh,
@@ -51,6 +52,8 @@ ENV_MAP: dict[str, str] = {
     "reinvent.command": "REINVENT_COMMAND",
     "gromacs.command": "CHEMFLOW_GROMACS_COMMAND",
     "boltz.command": "CHEMFLOW_BOLTZ_COMMAND",
+    "diffdock.python": "CHEMFLOW_DIFFDOCK_PYTHON",
+    "diffdock.dir": "CHEMFLOW_DIFFDOCK_DIR",
     "obabel.command": "CHEMFLOW_OBABEL_COMMAND",
     "acpype.command": "CHEMFLOW_ACPYPE_COMMAND",
     "rosetta_apps.rosetta3": "ROSETTA3",
@@ -77,6 +80,10 @@ reinvent:
 
 boltz:
   command: boltz
+
+diffdock:                 # DiffDock-L (own conda env + cloned repo; `chemflow diffdock-env install`)
+  python: null            # e.g. <conda-prefix>/envs/diffdock/bin/python  (null = auto-detect)
+  dir: null               # e.g. <ChemFlow>/DiffDock                       (null = auto-detect)
 
 obabel:
   command: obabel         # Open Babel (GROMACS ligand prep); null to use PATH
@@ -128,6 +135,22 @@ def _get(config: dict, dotted: str):
     return node
 
 
+def _recorded_diffdock() -> dict[str, str]:
+    """``dir``/``python`` written by ``chemflow diffdock-env install`` (stdlib-only parse)."""
+    import re
+
+    out: dict[str, str] = {}
+    try:
+        text = (Path.home() / ".config" / "chemflow" / "diffdock.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        m = re.match(r'\s*(dir|python)\s*:\s*"?([^"#]+?)"?\s*(#.*)?$', line)
+        if m:
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
 def apply_env(config: dict | None = None, environ: dict | None = None) -> dict[str, str]:
     """Export the config's tool links as env vars (shell values take precedence).
 
@@ -145,9 +168,17 @@ def apply_env(config: dict | None = None, environ: dict | None = None) -> dict[s
         if env.get(var):           # explicit shell value wins
             continue
         text = str(value)
-        expand = dotted.endswith(("python", "rosetta3")) or text.startswith("~")
+        expand = dotted.endswith(("python", "rosetta3", "diffdock.dir")) or text.startswith("~")
         env[var] = str(Path(text).expanduser()) if expand else text
         applied[var] = env[var]
+    # DiffDock: also honour the location `chemflow diffdock-env install` recorded
+    # (~/.config/chemflow/diffdock.yaml), unless the shell / tools file already set it.
+    for key, var in (("python", "CHEMFLOW_DIFFDOCK_PYTHON"), ("dir", "CHEMFLOW_DIFFDOCK_DIR")):
+        if not env.get(var):
+            value = _recorded_diffdock().get(key)
+            if value:
+                env[var] = value
+                applied[var] = value
     return applied
 
 

@@ -559,7 +559,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         self.c_timestep = _dspin(4.0, 0.5, 5.0, 0.5, 2)
         self.s_timestep = _dspin(4.0, 0.5, 5.0, 0.5, 2)
         self.barostat_freq = _dspin(25.0, 1.0, 1000.0, 1.0, 1)
-        self.surface_tension = _dspin(300.0, 0.0, 10000.0, 10.0, 1)
+        self.surface_tension = _dspin(0.0, 0.0, 10000.0, 10.0, 1)
         integrator = self._group("Integrator", [
             ("Complex timestep (fs):", self.c_timestep),
             ("Solvent timestep (fs):", self.s_timestep),

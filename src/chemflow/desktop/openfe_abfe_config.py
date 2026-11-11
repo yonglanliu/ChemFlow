@@ -137,7 +137,7 @@ DEFAULTS: dict[str, Any] = {
     "complex_timestep": 4.0,   # femtosecond
     "solvent_timestep": 4.0,   # femtosecond
     "barostat_frequency": 25.0,  # timestep
-    "surface_tension": 300.0,  # bar*nm (membrane only)
+    "surface_tension": 0.0,  # bar*nm (membrane only; 0 => tensionless)
 }
 
 

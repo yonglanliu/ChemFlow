@@ -112,8 +112,12 @@ class MembraneModeller(Modeller):
         Counterions are added to neutralize the system if requested.
         Additional ions are added to achieve the specified ionic strength by replacing randomly selected water molecules.
         """
-        # All accept lipid names
-        lipid_names = ["POPC","POPE","DMPC","DOPC","DPPC","DLPC","DLPE","POP"]
+        # All accepted lipid residue names (3- and 4-letter conventions).
+        lipid_names = [
+            "POPC", "POPE", "POPG", "POPS", "POPI", "POPA", "DMPC", "DOPC",
+            "DPPC", "DLPC", "DLPE", "DPPE", "DOPE", "DSPC", "POP", "DLP",
+            "DMP", "DOP", "DPP",
+        ]
         # Save original waters so they are never deleted.
         original_water_keys = {
             self._residue_key(res)
@@ -132,14 +136,24 @@ class MembraneModeller(Modeller):
         sys_zmax = sys_max[2]
 
         # -------------------------------------------------
-        # Lipid atom positions from the existing structure.
+        # Lipid head-group (phosphate) z-range. Detect P by ELEMENT (robust to
+        # atom-name variants) within lipid residues; fail clearly if none match.
         # -------------------------------------------------
         lipid_atom_indices = [
             atom.index
             for atom in self.topology.atoms()
             if atom.residue.name in lipid_names
-            and atom.name == "P"
+            and atom.element is not None
+            and atom.element.symbol == "P"
         ]
+        if not lipid_atom_indices:
+            found = sorted({a.residue.name for a in self.topology.atoms()})
+            raise ValueError(
+                "No lipid phosphate atoms found. Either the lipid residue names "
+                f"aren't in the recognized list {lipid_names}, or there is no 'P' "
+                f"atom. Residue names present: {found}. Add your lipid name to "
+                "`lipid_names`."
+            )
 
         lipid_pos = all_pos[lipid_atom_indices, :]
         lipid_zmin = float(np.min(lipid_pos[:, 2]))
@@ -147,32 +161,48 @@ class MembraneModeller(Modeller):
 
         # -----------------------------------------------------
         #                   Determine PBC
+        #
+        # Precedence (first available wins per dimension):
+        #   explicit box_vectors / boxsize  >  pbc_x/pbc_y (+padding for z)  >
+        #   the input topology's own PBC  >  padding (z only; x/y must be known).
+        # padding NO LONGER silently overrides an explicit or input-file box z —
+        # so an equilibrated box is preserved for FEP consistency.
         # -----------------------------------------------------
         box_x, box_y, box_z = None, None, None
+
+        # (0) Reuse the input system's PBC if it defines one (docstring behaviour).
+        in_pbc = self.topology.getPeriodicBoxVectors()
+        if in_pbc is not None:
+            v = in_pbc.value_in_unit(nanometer)
+            box_x, box_y, box_z = float(v[0][0]), float(v[1][1]), float(v[2][2])
+            print(f'Reusing input PBC: box_x={box_x}, box_y={box_y}, box_z={box_z}')
+
+        # (1) explicit full box vectors override everything.
         if box_vectors is not None:
             print(f'box_vectors is {box_vectors}')
-            vector_x = box_vectors[0]
-            vector_y = box_vectors[1]
-            vector_z = box_vectors[2]
-
+            vector_x, vector_y, vector_z = box_vectors[0], box_vectors[1], box_vectors[2]
             vector_x = vector_x.value_in_unit(nanometer) if is_quantity(vector_x) else vector_x
             vector_y = vector_y.value_in_unit(nanometer) if is_quantity(vector_y) else vector_y
             vector_z = vector_z.value_in_unit(nanometer) if is_quantity(vector_z) else vector_z
             box_x, box_y, box_z = vector_x[0], vector_y[1], vector_z[2]
 
+        # (2) explicit box lengths override.
         if boxsize is not None:
             print(f'boxsize is {boxsize}')
             boxsize = boxsize.value_in_unit(nanometer) if is_quantity(boxsize) else boxsize
             box_x, box_y, box_z = boxsize
 
-        if padding is not None:
-            print(f'padding is: {padding}')
+        # (3) explicit in-plane vectors override x/y.
+        if (pbc_x_vector is not None) and (pbc_y_vector is not None):
+            pbc_x_vector = pbc_x_vector.value_in_unit(nanometer) if is_quantity(pbc_x_vector) else pbc_x_vector
+            pbc_y_vector = pbc_y_vector.value_in_unit(nanometer) if is_quantity(pbc_y_vector) else pbc_y_vector
+            box_x, box_y = pbc_x_vector[0], pbc_y_vector[1]
+
+        # (4) padding is a FALLBACK for z only (when nothing above set it).
+        if box_z is None and padding is not None:
             padding = padding.value_in_unit(nanometer) if is_quantity(padding) else padding
             box_z = float(sys_zmax - sys_zmin + 2.0 * padding)
-            if (pbc_x_vector is not None) and (pbc_y_vector is not None):
-                pbc_x_vector = pbc_x_vector.value_in_unit(nanometer) if is_quantity(pbc_x_vector) else pbc_x_vector
-                pbc_y_vector = pbc_y_vector.value_in_unit(nanometer) if is_quantity(pbc_y_vector) else pbc_y_vector
-                box_x, box_y = pbc_x_vector[0], pbc_y_vector[1]
+            print(f'padding fallback -> box_z={box_z}')
 
         print(f'box_x: {box_x}, box_y: {box_y}, box_z: {box_z}')
         if (box_x is not None) and (box_y is not None) and (box_z is not None):
@@ -181,7 +211,10 @@ class MembraneModeller(Modeller):
                         Vec3(0, 0, box_z)) * nanometer
             print(f'New PBC: {box_vector}')
         else:
-            raise ValueError("PBC cannot be determined; set padding, boxsize, or box_vectors")
+            raise ValueError(
+                "PBC cannot be determined; give the input a CRYST1 box, or set "
+                "box_vectors / boxsize / (pbc_x_vector + pbc_y_vector)."
+            )
 
         # -----------------------------------------------------
         #                    Copy system
@@ -231,17 +264,21 @@ class MembraneModeller(Modeller):
         # Recompute positions after solvation.
         solv_pos = self._to_nm_array(modeller.positions)
 
+        # Atoms 0..n_original-1 are the ORIGINAL system (copied in the same order
+        # above); addSolvent only APPENDS new atoms at higher indices. So a water is
+        # "newly added" iff its atoms sit beyond n_original_atoms. We delete ONLY
+        # newly added waters that land in the membrane core — every original water
+        # is preserved, including any that sit inside the membrane.
+        n_original_atoms = len(all_pos)
+
         to_delete = []
-        addedChain = list(modeller.topology.chains())[-1]
-        for residue in addedChain.residues():
+        kept_original_core = 0
+        for residue in modeller.topology.residues():
             if residue.name not in ["HOH", "WAT"]:
                 continue
 
-            key = self._residue_key(residue)
-
-            if len(original_water_keys) > 0:
-                if key in original_water_keys:
-                    continue  # never delete original waters
+            atom_indices = [atom.index for atom in residue.atoms()]
+            is_original = min(atom_indices) < n_original_atoms
 
             oxy_index = None
             for atom in residue.atoms():
@@ -251,13 +288,22 @@ class MembraneModeller(Modeller):
             if oxy_index is None:
                 continue
 
-            oxy_pos = solv_pos[oxy_index]
-            z = oxy_pos[2]
+            z = solv_pos[oxy_index][2]
+            in_core = lipid_zmin < z < lipid_zmax
 
-            # Delete waters in the membrane core
-            if lipid_zmin < z < lipid_zmax:
+            if is_original:
+                if in_core:
+                    kept_original_core += 1
+                continue  # NEVER delete an original water, core or not
+
+            if in_core:
                 to_delete.append(residue)
 
+        print(
+            f'Core-water cleanup: deleting {len(to_delete)} newly-added water(s) '
+            f'inside the membrane; keeping {kept_original_core} ORIGINAL water(s) '
+            f'inside the membrane (never deleted).'
+        )
         if len(to_delete) > 0:
             modeller.delete(to_delete)
 

@@ -516,7 +516,7 @@ solvent_sim_prod_length: 30.0         # nanosecond
 complex_timestep: 4.0      # femtosecond
 solvent_timestep: 4.0      # femtosecond
 barostat_frequency: 25.0
-surface_tension: 300.0     # bar*nm (membrane only)
+surface_tension: 0.0       # bar*nm (membrane only; 0 => tensionless, standard)
 
 # --- Mapper / planner ---
 mapper: KartografAtomMapper   # LomapAtomMapper | KartografAtomMapper
@@ -646,7 +646,7 @@ solvent_lambda_vdw: [0.0, 0.0, 0.0, 0.0, 0.0, 0.12, 0.24, 0.36, 0.48, 0.6, 0.7, 
 complex_timestep: 4.0      # femtosecond
 solvent_timestep: 4.0      # femtosecond
 barostat_frequency: 25.0
-surface_tension: 300.0     # bar*nm (membrane only)
+surface_tension: 0.0       # bar*nm (membrane only; 0 => tensionless, standard)
 
 # --- HPC resources (inline; used to write the SLURM array submit script) ---
 slurm:

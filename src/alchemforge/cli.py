@@ -17,6 +17,7 @@ from chemflow.fe.gromacs.rbfe.workflow import add_ligand_rbfe_parser
 from chemflow.fe.gromacs.resFEP.workflow import add_resfep_parser
 from chemflow.fe.gromacs.septop.workflow import add_septop_gromacs_parser
 from alchemforge.structure.pdbfix import add_pdbfix_parser
+from alchemforge.structure.wrap_pbc import add_wrap_pbc_parser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_mmgbsa_parser(workflows)
     add_network_parser(workflows)
     add_pdbfix_parser(workflows)
+    add_wrap_pbc_parser(workflows)
     add_generate_parser(workflows)
     add_gpu_test_parser(workflows)
     return parser

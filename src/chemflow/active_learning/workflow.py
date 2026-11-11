@@ -6,6 +6,13 @@ batch that acquisition selects. The oracle / train / predict steps are **pluggab
 command templates** in the config, so the Glide wrapper and the ChemFlow
 train/predict CLI slot in without hard-coding either.
 
+Optional **DiffDock pose gate** between "select the batch" and "run the oracle(s)":
+the (cheap) DiffDock-L docking scores every selected compound; only the compounds with a
+high pose confidence (plus a small random *audit* sample of the rest) go to the expensive
+oracle(s). The DiffDock confidence is also recorded for ALL compounds as an extra column
+(`diffdock_confidence`) in labels.csv — a multitask training target whose oracle columns are
+simply empty for compounds that were gated out.
+
 Only stdlib + PyYAML are imported here; the heavy work happens in the subprocess
 commands you configure. Use ``--dry-run`` to print the plan without executing.
 """
@@ -53,7 +60,24 @@ _DEFAULTS = {
     "train_command": "chemflow train chemprop {config}",
     "train_config": "",                 # chemprop config.toml (positional) -> {config}; point its dataset at labels.csv
     "predict_command": "chemflow predict --model {model} --library {library} --out {out} --uncertainty",
+    # --- Optional DiffDock-L pose GATE (between batch selection and the oracle) ---
+    # Compounds with a LOW DiffDock confidence are not sent to the expensive oracle (they are
+    # "not evaluated", NOT confirmed non-binders). A random `gate_audit_fraction` of them is sent
+    # anyway so the gate's recall can be measured; the DiffDock confidence is stored for all.
+    "gate": "",                         # "" = off | diffdock
+    "gate_receptor": "",                # receptor PDB DiffDock docks into
+    "gate_command": ("chemflow alchemfold dock-batch --ligands {batch} --receptor {receptor} "
+                     "--out {out} --workdir {workdir} --samples {samples} --steps {steps}"),
+    "gate_modules": [],                 # `module load` these before the gate command
+    "gate_samples": 10,                 # DiffDock poses per compound
+    "gate_steps": 20,                   # DiffDock denoising (reverse-diffusion) steps
+    "gate_pass_fraction": 0.3,          # keep the top fraction of each batch by confidence ...
+    "gate_threshold": None,             # ... or an absolute confidence cutoff (overrides the fraction)
+    "gate_audit_fraction": 0.03,        # random share of the REJECTED sent to the oracle anyway
+    "gate_seed": True,                  # also gate the round-0 seed batch
 }
+
+GATE_METRIC = "diffdock_confidence"     # labels.csv column holding the DiffDock confidence
 
 # Built-in oracle wrapper contracts (you provide the wrapper scripts): each reads
 # the batch .smi (SMILES<TAB>id), runs **ligand preparation then docking**, and
@@ -226,6 +250,17 @@ def _read_preds(path: Path):
     return cands, smiles
 
 
+def _read_batch(path: Path) -> list[tuple[str, str]]:
+    """Read a batch.smi ('SMILES<TAB>id' per line) back as (id, smiles) records."""
+    records: list[tuple[str, str]] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t") if "\t" in line else line.split()
+            if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
+                records.append((parts[1].strip(), parts[0].strip()))
+    return records
+
+
 def _read_scores(path: Path) -> dict[str, float]:
     out: dict[str, float] = {}
     with open(path, encoding="utf-8") as fh:
@@ -348,6 +383,112 @@ def _oracle_template(conf: dict) -> str:
     return _BUILTIN_ORACLE[oracle]
 
 
+def _read_gate_scores(path: Path) -> dict[str, float]:
+    """``{id: confidence}`` from the gate command's CSV (rows without a pose are skipped)."""
+    out: dict[str, float] = {}
+    with open(path, encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            cid = row.get("id") or row.get("ID") or row.get("name")
+            v = row.get("confidence") or row.get("score")
+            if cid and v not in (None, ""):
+                try:
+                    out[str(cid)] = float(v)
+                except ValueError:
+                    pass
+    return out
+
+
+def apply_gate(records, conf_by_id: dict[str, float], *, threshold, pass_fraction: float,
+               audit_fraction: float, rng: random.Random):
+    """Split a batch by DiffDock confidence (higher = better pose).
+
+    Returns ``(passed, audited, report)``. ``passed``/``audited`` are (id, smiles) record lists
+    that go to the oracle; ``report`` has one ``(id, smiles, confidence, gate, audit)`` row per
+    compound. Compounds without a DiffDock pose are rejected (confidence blank).
+    """
+    scored = [(cid, smi, conf_by_id[cid]) for cid, smi in records if cid in conf_by_id]
+    unscored = [(cid, smi, None) for cid, smi in records if cid not in conf_by_id]
+    if threshold is not None:
+        keep = {cid for cid, _, c in scored if c >= float(threshold)}
+    else:
+        n_keep = int(round(max(0.0, min(1.0, float(pass_fraction))) * len(records)))
+        ranked = sorted(scored, key=lambda t: t[2], reverse=True)
+        keep = {cid for cid, _, _ in ranked[:n_keep]}
+    rejected = [(cid, smi, c) for cid, smi, c in scored + unscored if cid not in keep]
+    n_audit = int(round(max(0.0, min(1.0, float(audit_fraction))) * len(rejected)))
+    audit_ids = {cid for cid, _, _ in rng.sample(rejected, n_audit)} if n_audit else set()
+    passed, audited, report = [], [], []
+    for cid, smi, c in scored + unscored:
+        if cid in keep:
+            passed.append((cid, smi)); report.append((cid, smi, c, 1, 0))
+        elif cid in audit_ids:
+            audited.append((cid, smi)); report.append((cid, smi, c, 0, 1))
+        else:
+            report.append((cid, smi, c, 0, 0))
+    return passed, audited, report
+
+
+def _spearman(x: list[float], y: list[float]) -> float | None:
+    """Spearman rank correlation (stdlib); None if it is undefined."""
+    n = len(x)
+    if n < 5:
+        return None
+
+    def ranks(v):
+        order = sorted(range(n), key=lambda i: v[i])
+        r = [0.0] * n
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                r[order[k]] = (i + j) / 2.0
+            i = j + 1
+        return r
+
+    rx, ry = ranks(x), ranks(y)
+    mx, my = sum(rx) / n, sum(ry) / n
+    cov = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    vx = sum((a - mx) ** 2 for a in rx)
+    vy = sum((b - my) ** 2 for b in ry)
+    return cov / (vx * vy) ** 0.5 if vx > 0 and vy > 0 else None
+
+
+def _gate_quality(labels_rows, report, primary_metric: str, lower_is_better: bool) -> None:
+    """Print how well the gate agrees with the oracle (needs oracle scores for passed + audited)."""
+    both = [(r[2], labels_rows.get(r[0], {}).get(primary_metric)) for r in report
+            if r[2] is not None and primary_metric in labels_rows.get(r[0], {})]
+    audited = [labels_rows[r[0]][primary_metric] for r in report
+               if r[4] and primary_metric in labels_rows.get(r[0], {})]
+    passed = [labels_rows[r[0]][primary_metric] for r in report
+              if r[3] and primary_metric in labels_rows.get(r[0], {})]
+    if len(both) >= 5:
+        rho = _spearman([c for c, _ in both], [v for _, v in both])
+        # confidence is higher=better; the oracle score is better when LOWER (docking) -> expect rho < 0
+        good = (-rho if lower_is_better else rho) if rho is not None else None
+        if good is not None:
+            print(f"  gate check: Spearman(confidence, {primary_metric}) = {rho:+.2f} over {len(both)} "
+                  f"compounds ({'agrees' if good > 0 else 'DISAGREES'} with the oracle; "
+                  f"|rho| near 0 = the gate is not informative)")
+    if passed and audited:
+        mp, ma = sum(passed) / len(passed), sum(audited) / len(audited)
+        print(f"  gate audit: mean {primary_metric} passed={mp:.2f} (n={len(passed)}) vs "
+              f"rejected-audit={ma:.2f} (n={len(audited)}) — if these are close, the gate is not "
+              f"separating good from bad")
+
+
+def _load_gate_seen(outdir: Path) -> set[str]:
+    """Ids already evaluated by the gate in earlier rounds (never re-acquire them)."""
+    seen: set[str] = set()
+    for rep in sorted(outdir.glob("round_*/gate_report.csv")):
+        with open(rep, encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if row.get("id"):
+                    seen.add(row["id"])
+    return seen
+
+
 def run_loop(config_path, *, dry_run: bool = False) -> int:
     conf = load_config(config_path)
     base = Path(config_path).expanduser().resolve().parent
@@ -377,8 +518,23 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
     print(f"Oracles: {', '.join(o['name']+'→'+o['metric'] for o in oracle_specs)} "
           f"(primary: {primary_metric}, lower_is_better={primary_lower})")
 
+    gate_on = str(conf.get("gate") or "").strip().lower() == "diffdock"
+    if gate_on:
+        if not dry_run and not Path(str(conf.get("gate_receptor") or "")).expanduser().is_file():
+            raise FileNotFoundError(
+                f"gate: diffdock needs gate_receptor (a receptor PDB); got {conf.get('gate_receptor')!r}")
+        print(f"DiffDock gate ON: pass top {conf['gate_pass_fraction']:.0%} per batch"
+              if conf.get("gate_threshold") is None else
+              f"DiffDock gate ON: pass confidence >= {conf['gate_threshold']}",
+              f"+ {conf['gate_audit_fraction']:.0%} audit of the rejected")
+    elif str(conf.get("gate") or "").strip():
+        raise ValueError(f"gate must be '' or 'diffdock'; got {conf.get('gate')!r}")
+    # The DiffDock confidence is one more labels column (an auxiliary multitask target).
+    label_metrics = metrics + ([GATE_METRIC] if gate_on else [])
+    gate_seen: set[str] = _load_gate_seen(outdir) if gate_on else set()
+
     labels_csv = outdir / "labels.csv"
-    labels_rows: dict[str, dict] = _read_labels_multi(labels_csv, metrics) if labels_csv.exists() else {}
+    labels_rows: dict[str, dict] = _read_labels_multi(labels_csv, label_metrics) if labels_csv.exists() else {}
     scored: dict[str, float] = {cid: r[primary_metric] for cid, r in labels_rows.items()
                                 if primary_metric in r}
     smiles_col = int(conf.get("smiles_column", 0))
@@ -389,8 +545,15 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
         rdir.mkdir(exist_ok=True)
         print(f"\n=== Round {rnd} ===")
 
-        # 1. Select this round's batch as (id, smiles) records.
-        if rnd == 0 and not scored:
+        # 1. Select this round's batch as (id, smiles) records. RESUME: if this round's batch.smi
+        #    already exists, reuse it — re-selecting would pick a different batch (the already-docked
+        #    compounds are excluded now) and no longer match the saved oracle/gate scores.
+        batch_smi = rdir / "batch.smi"   # 'SMILES<TAB>id' — oracle does ligand prep + dock
+        resumed = (not dry_run) and batch_smi.exists() and batch_smi.stat().st_size > 0
+        if resumed:
+            records = _read_batch(batch_smi)
+            print(f"Round {rnd} batch exists — reusing batch.smi ({len(records)} compounds)")
+        elif rnd == 0 and not scored:
             if dry_run:
                 records = [(f"seed_{i}", "CCO") for i in range(int(conf["seed_size"]))]
             else:
@@ -411,7 +574,7 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
             batch_ids = select_batch(
                 cands, k=int(conf["batch_size"]), strategy=conf["strategy"],
                 kappa=float(conf["kappa"]), lower_is_better=primary_lower,
-                exclude=set(scored), seed=int(conf["seed"]) + rnd,
+                exclude=set(scored) | gate_seen, seed=int(conf["seed"]) + rnd,
             )
             # Build dock-ready records: prefer SMILES carried in preds.csv, else
             # scan the library once for the selected ids.
@@ -423,9 +586,49 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
             records = [(cid, smi) for cid, smi in records if smi]
             print(f"Acquired batch: {len(records)} compounds ({conf['strategy']})")
 
-        batch_smi = rdir / "batch.smi"   # 'SMILES<TAB>id' — oracle does ligand prep + dock
-        if not dry_run:
+        if not dry_run and not resumed:
             _write_batch(batch_smi, records)
+
+        # 1b. Optional DiffDock pose gate: dock the whole batch with DiffDock-L (cheap), keep the
+        #     high-confidence compounds (+ a random audit sample of the rest) for the oracle(s).
+        oracle_batch = batch_smi
+        if gate_on and (rnd > 0 or bool(conf.get("gate_seed", True))):
+            gate_csv = rdir / "gate_scores.csv"
+            if not dry_run and gate_csv.exists() and gate_csv.stat().st_size > 0:
+                print(f"  round {rnd} gate already scored — reusing {gate_csv.name}")
+            else:
+                _run(str(conf["gate_command"]).format(
+                    batch=batch_smi, receptor=str(Path(str(conf["gate_receptor"])).expanduser()),
+                    out=gate_csv, workdir=rdir / "gate", samples=int(conf["gate_samples"]),
+                    steps=int(conf["gate_steps"])),
+                    dry_run=dry_run, modules=conf.get("gate_modules") or [])
+            if not dry_run:
+                conf_by_id = _read_gate_scores(gate_csv)
+                passed, audited, report = apply_gate(
+                    records, conf_by_id,
+                    threshold=conf.get("gate_threshold"),
+                    pass_fraction=float(conf["gate_pass_fraction"]),
+                    audit_fraction=float(conf["gate_audit_fraction"]),
+                    rng=random.Random(int(conf["seed"]) + 1000 + rnd))
+                with open(rdir / "gate_report.csv", "w", newline="", encoding="utf-8") as fh:
+                    w = csv.writer(fh)
+                    w.writerow(["id", "smiles", "confidence", "gate_pass", "audit"])
+                    w.writerows(report)
+                for cid, c in conf_by_id.items():
+                    labels_rows.setdefault(cid, {})[GATE_METRIC] = c
+                gate_seen.update(r[0] for r in report)
+                oracle_records = passed + audited
+                oracle_batch = rdir / "batch_oracle.smi"
+                _write_batch(oracle_batch, oracle_records)
+                print(f"Gate: {len(conf_by_id)}/{len(records)} compounds got a DiffDock pose; "
+                      f"{len(passed)} passed + {len(audited)} audit -> oracle "
+                      f"({len(oracle_records)}/{len(records)} = "
+                      f"{len(oracle_records) / max(1, len(records)):.0%} of the batch)")
+            else:
+                print("  [dry-run] gate would split the batch -> batch_oracle.smi (passed + audit)")
+                report = []
+        else:
+            report = []
 
         # 2. Oracle(s) on the batch. Each selected oracle docks/scores the SAME batch
         #    with its own input + command and writes its metric column; all metrics are
@@ -439,15 +642,17 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
                 print(f"  round {rnd} {spec['name']} already scored — reusing {scores_csv.name}")
             else:
                 cmd = _oracle_command_for(spec).format(
-                    batch=batch_smi, receptor=spec.get("receptor", ""), out=scores_csv)
+                    batch=oracle_batch, receptor=spec.get("receptor", ""), out=scores_csv)
                 _run(cmd, dry_run=dry_run, modules=spec.get("modules") or [])
             if not dry_run and scores_csv.exists():
                 for cid, val in _read_scores(scores_csv).items():
                     labels_rows.setdefault(cid, {})[spec["metric"]] = val
         if not dry_run:
-            _write_labels_multi(labels_csv, labels_rows, metrics)
+            _write_labels_multi(labels_csv, labels_rows, label_metrics)
             scored = {cid: r[primary_metric] for cid, r in labels_rows.items()
                       if primary_metric in r}
+            if report:
+                _gate_quality(labels_rows, report, primary_metric, primary_lower)
         print(f"Total scored (primary metric {primary_metric}): {len(scored)}")
 
         # 3. Train surrogate on all labels; 4. predict over the whole library.

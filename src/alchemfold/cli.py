@@ -19,10 +19,10 @@ import sys
 from pathlib import Path
 
 
-def _hpc_preset_names() -> list[str]:
+def _hpc_preset_names(section: str = "docking") -> list[str]:
     from alchemfold.hpc_config import presets
 
-    return list(presets().keys())
+    return list(presets(section).keys())
 
 
 def _hpc_default_preset() -> str:
@@ -178,7 +178,8 @@ def _dock_generate(args: argparse.Namespace) -> int:
         engine=args.engine,
         protein_id=args.protein_id,
         ligand_id=args.ligand_id,
-        out_dir=(args.jobname or "docking_output"),
+        out_dir=("predictions" if args.jobname else "docking_output"),
+        jobname=(args.jobname or ""),
         sequence=args.sequence or "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
         proteins=proteins,
         smiles=args.smiles or "CCO",
@@ -186,7 +187,8 @@ def _dock_generate(args: argparse.Namespace) -> int:
         pocket_binder=args.pocket_binder,
         pocket_max_distance=args.pocket_max_distance,
         pocket_contacts=args.pocket_contacts,
-        ligand_file=args.ligand_file,
+        # absolute: the config may live in a job subfolder, and paths resolve from the config's folder
+        ligand_file=(str(Path(args.ligand_file).expanduser().resolve()) if args.ligand_file else None),
         ligand_file_format=args.ligand_file_format,
         cache_dir=args.cache_dir or default_cache_dir(),
         diffusion_samples=args.diffusion_samples,
@@ -196,8 +198,18 @@ def _dock_generate(args: argparse.Namespace) -> int:
         use_msa_server=args.use_msa_server,
         predict_affinity=args.predict_affinity,
         affinity_binder=args.affinity_binder,
+        receptor_pdb=(str(Path(args.receptor_pdb).expanduser().resolve()) if args.receptor_pdb else None),
+        diffdock_samples=args.diffdock_samples if args.engine == "diffdock" else None,
+        diffdock_steps=args.diffdock_steps if args.engine == "diffdock" else None,
+        diffdock_trajectory=bool(args.diffdock_trajectory and args.engine == "diffdock"),
+        diffdock_batch_size=args.diffdock_batch_size if args.engine == "diffdock" else None,
     )
-    output = Path(args.output) if args.output else Path("docking.yaml")
+    if args.output:
+        output = Path(args.output)
+    elif args.jobname:
+        output = Path(args.jobname) / "docking.yaml"   # the config lives IN the job folder
+    else:
+        output = Path("docking.yaml")
     output = output.expanduser()
     if output.exists() and not args.force:
         print(f"Refusing to overwrite existing file: {output} (use --force)", file=sys.stderr)
@@ -227,13 +239,60 @@ def _screen_generate(args: argparse.Namespace) -> int:
         elif len(parsed) == 1:
             args.sequence = parsed[0][1]
 
+    # SLURM resources: screening preset (env/hpc.yaml `screening:`) then CLI overrides.
+    from alchemfold import hpc_config
+
+    preset_name = args.hpc_preset or hpc_config.default_preset("screening")
+    res = hpc_config.preset_resources(preset_name, "screening")
+    slurm = {
+        "partition": res["partition"], "account": res["account"], "nodes": res["nodes"],
+        "gpus_per_task": res["gpus_per_node"], "gpu_type": res["gpu_type"],
+        "cpus_per_task": res["cpus_per_task"], "mem": res["mem"], "time": res["time"],
+        "conda_env": res["conda_env"],
+    }
+    if args.gpus_per_task is not None:
+        slurm["gpus_per_task"] = args.gpus_per_task
+    if args.gpu_type is not None:
+        slurm["gpu_type"] = args.gpu_type
+    n_shards = args.n_shards if args.n_shards is not None else res["shards"]
+    lig_files = [str(Path(f).expanduser().resolve()) for f in (args.ligand_files or [])] or None
+    if args.library == "custom" and not lig_files:
+        print("--library custom requires --ligand-files", file=sys.stderr)
+        return 1
+    if args.library == "enamine_real" and args.max_ligands <= 0:
+        print("Note: Enamine REAL is billions of ligands — set --max-ligands "
+              "(e.g. 10000) or Validate will refuse it.", file=sys.stderr)
+
     text = default_yaml_text(
         engine=args.engine,
         library=args.library,
         sequence=args.sequence or "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
         proteins=proteins,
+        ligand_files=lig_files,
+        max_ligands=args.max_ligands,
+        sample=args.sample,
+        n_shards=n_shards,
+        shard_size=0 if n_shards else 1000,
+        slurm=slurm,
+        jobname=args.jobname or "",
+        cleanup=args.cleanup,
+        predict_affinity=args.predict_affinity and args.engine == "boltz",
+        rank_metric=args.rank_metric,
+        receptor_pdb=(str(Path(args.receptor_pdb).expanduser().resolve()) if args.receptor_pdb else None),
+        diffdock_samples=args.diffdock_samples,
+        diffdock_steps=args.diffdock_steps,
+        diffdock_trajectory=bool(args.diffdock_trajectory),
+        diffdock_batch_size=args.diffdock_batch_size,
     )
-    output = Path(args.output) if args.output else Path("screen.yaml")
+    print(f"SLURM preset {preset_name}: {n_shards or 'size-based'} shard(s) x "
+          f"{slurm['gpus_per_task']} GPU(s)"
+          + (f" ({slurm['gpu_type']})" if slurm["gpu_type"] else ""))
+    if args.output:
+        output = Path(args.output)
+    elif args.jobname:
+        output = Path(args.jobname) / "screen.yaml"   # config lives in the job folder
+    else:
+        output = Path("screen.yaml")
     output = output.expanduser()
     if output.exists() and not args.force:
         print(f"Refusing to overwrite existing file: {output} (use --force)", file=sys.stderr)
@@ -258,6 +317,28 @@ def _screen_stage(args: argparse.Namespace) -> int:
     from alchemfold.screen import stage
 
     return stage(Path(args.config).expanduser().resolve())
+
+
+def _trajectory_fix(args: argparse.Namespace) -> int:
+    from alchemfold.diffdock_traj import clean_file
+
+    dst, info = clean_file(args.trajectory.expanduser(), args.output.expanduser() if args.output else None)
+    print(f"Wrote {dst}: {info['frames_out']} frame(s) (from {info['frames_in']}), "
+          f"{info['dropped_hydrogens']} frozen hydrogen(s) removed, "
+          f"{'frames reordered to random start -> final pose' if info['reordered'] else 'frame order unchanged'}")
+    return 0
+
+
+def _gpu_test(args: argparse.Namespace) -> int:
+    from alchemfold.gpu_test import run
+
+    return run(args)
+
+
+def _screen_clean(args: argparse.Namespace) -> int:
+    from alchemfold.screen import cleanup
+
+    return cleanup(args.config, force=args.force)
 
 
 def _screen_rank(args: argparse.Namespace) -> int:
@@ -321,9 +402,22 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Output YAML path (default: docking.yaml)")
     dgen.add_argument("--protein-id", default="A", help="Protein chain id")
     dgen.add_argument("--jobname", default=None,
-                      help="Job/output directory name (config out_dir); all predictions go "
-                           "under <workdir>/<jobname>/ (default: docking_output)")
+                      help="Job name: EVERYTHING (config, engine inputs, scripts, logs, predictions) is "
+                           "written under <workdir>/<jobname>/, config included (-o defaults to "
+                           "<jobname>/docking.yaml)")
     dgen.add_argument("--ligand-id", default="L", help="Ligand chain id")
+    dgen.add_argument("--receptor-pdb", default=None,
+                      help="Receptor structure (PDB) — required for engine diffdock")
+    dgen.add_argument("--diffdock-samples", type=int, default=None,
+                      help="engine diffdock: poses sampled per ligand (default 10)")
+    dgen.add_argument("--diffdock-steps", type=int, default=None,
+                      help="engine diffdock: denoising (reverse-diffusion) steps (default 20)")
+    dgen.add_argument("--diffdock-batch-size", type=int, default=None,
+                      help="engine diffdock: GPU batch over one ligand's poses (default 10; only helps "
+                           "when --diffdock-samples is larger)")
+    dgen.add_argument("--diffdock-trajectory", action="store_true",
+                      help="engine diffdock: save the diffusion trajectory of every pose "
+                           "(rank<k>_reverseprocess.pdb, multi-frame, ligand only)")
     dgen.add_argument("--sequence", default=None, help="Protein sequence to pre-fill")
     dgen.add_argument("--sequence-file", default=None,
                       help="FASTA/.fa file to read the protein sequence(s) from "
@@ -410,10 +504,58 @@ def build_parser() -> argparse.ArgumentParser:
         "generate", help="Write a commented screening config for a chosen engine"
     )
     sgen.add_argument("--engine", choices=["boltz", "chai", "diffdock"], default="boltz")
-    sgen.add_argument("--library", choices=["zinc20", "enamine_real"], default="zinc20",
-                      help="Source ligand catalog to screen (default: zinc20)")
+    sgen.add_argument("--library", choices=["zinc20", "enamine_real", "custom"], default="zinc20",
+                      help="Source ligand catalog (default: zinc20). zinc20/enamine_real "
+                           "use the files under screen_db/ unless --ligand-files is given; "
+                           "custom needs --ligand-files")
+    sgen.add_argument("--receptor-pdb", default=None,
+                      help="Receptor structure (PDB) — required for engine diffdock")
+    sgen.add_argument("--diffdock-samples", type=int, default=10,
+                      help="engine diffdock: poses sampled per ligand (default 10)")
+    sgen.add_argument("--diffdock-steps", type=int, default=20,
+                      help="engine diffdock: denoising (reverse-diffusion) steps (default 20)")
+    sgen.add_argument("--diffdock-batch-size", type=int, default=None,
+                      help="engine diffdock: GPU batch over one ligand's poses (default 10; only helps "
+                           "when --diffdock-samples is larger)")
+    sgen.add_argument("--diffdock-trajectory", action="store_true",
+                      help="engine diffdock: save each ligand's best-pose diffusion trajectory "
+                           "(multi-frame PDB) to <job>/trajectories/<id>.pdb")
+    sgen.add_argument("--jobname", default=None,
+                      help="Job name: everything (split library, SLURM scripts, poses, "
+                           "results, ranking) is written under <workdir>/<jobname>/")
+    sgen.add_argument("--predict-affinity", action=argparse.BooleanOptionalAction, default=False,
+                      help="Boltz-2 only: predict binding affinity for every ligand "
+                           "(adds affinity_pred_value + affinity_probability_binary)")
+    sgen.add_argument("--rank-metric", default="auto",
+                      choices=["auto", "affinity_probability_binary", "affinity_pred_value",
+                               "confidence_score", "confidence", "iptm", "ptm", "complex_plddt"],
+                      help="Score used to rank hits (default: auto)")
+    sgen.add_argument("--cleanup", action=argparse.BooleanOptionalAction, default=True,
+                      help="After ranking, delete intermediate files (split library, shard "
+                           "work folders) when all ligands finished (default: on)")
+    sgen.add_argument("--ligand-files", nargs="+", default=None, metavar="FILE",
+                      help="Library file(s) to screen (.smi/.csv/.cxsmiles, .bz2/.gz; "
+                           "globs ok). Overrides the catalog's default files")
+    sgen.add_argument("--max-ligands", type=int, default=0,
+                      help="Dock only this many ligands, sampled from the library "
+                           "(0 = all; REQUIRED for Enamine REAL, which is billions)")
+    sgen.add_argument("--sample", choices=["random", "head"], default="random",
+                      help="How to pick --max-ligands: random (uniform; decompresses the "
+                           "whole library — slow on huge files) or head (first N, instant)")
+    _scr_presets = list(_hpc_preset_names("screening"))
+    sgen.add_argument("--hpc-preset", choices=_scr_presets, default=None,
+                      help="SLURM screening preset from env/hpc.yaml (sets walltime, "
+                           f"shards, GPUs/task). Choices: {', '.join(_scr_presets)}")
+    sgen.add_argument("--n-shards", type=int, default=None,
+                      help="Number of shards = parallel GPUs (SLURM array size); "
+                           "overrides the preset")
+    sgen.add_argument("--gpus-per-task", type=int, default=None,
+                      help="GPUs per shard task (>1 enables Boltz DDP); overrides the preset")
+    sgen.add_argument("--gpu-type", default=None,
+                      help="GPU type for --gres, e.g. a100 ('' = any); overrides the preset")
     sgen.add_argument("-o", "--output", type=Path,
-                      help="Output YAML path (default: screen.yaml)")
+                      help="Output YAML path (default: <jobname>/screen.yaml, or screen.yaml "
+                           "without --jobname)")
     sgen.add_argument("--sequence", default=None, help="Receptor sequence to pre-fill")
     sgen.add_argument("--sequence-file", default=None,
                       help="FASTA/.fa file to read the receptor sequence(s) from "
@@ -431,11 +573,59 @@ def build_parser() -> argparse.ArgumentParser:
     sstage.add_argument("config", type=Path, help="Screening YAML config")
     sstage.set_defaults(func=_screen_stage)
 
+    sclean = screen_commands.add_parser(
+        "clean", help="Delete intermediate files (split library, shard work folders)"
+    )
+    sclean.add_argument("config", type=Path, help="Screening YAML config")
+    sclean.add_argument("--force", action="store_true",
+                        help="Clean even if some ligands failed / are missing")
+    sclean.set_defaults(func=_screen_clean)
+
     srank = screen_commands.add_parser(
         "rank", help="Rank completed screening results and keep the top hits"
     )
     srank.add_argument("config", type=Path, help="Screening YAML config")
     srank.set_defaults(func=_screen_rank)
+
+    # --- Repair an existing DiffDock trajectory (frozen hydrogens, frame order) ---
+    tfix = commands.add_parser(
+        "trajectory-fix",
+        help="Clean a DiffDock rank<k>_reverseprocess.pdb: drop frozen hydrogens, fix frame order")
+    tfix.add_argument("trajectory", type=Path, help="DiffDock trajectory PDB")
+    tfix.add_argument("-o", "--output", type=Path, default=None,
+                      help="Output PDB (default: <name>_clean.pdb next to the input)")
+    tfix.set_defaults(func=_trajectory_fix)
+
+    # --- DiffDock batch docking (backend of the active-learning DiffDock gate) ---
+    from alchemfold import dock_batch
+
+    dock_batch.add_parser(commands)
+
+    # --- GPU / multi-GPU / tiny-example test (run inside a GPU allocation) ---
+    gtest = commands.add_parser(
+        "gpu-test",
+        help="Check GPUs, multi-GPU srun launch, and optionally run a tiny built-in Boltz screen",
+    )
+    gtest.add_argument("--gpus", type=int, default=1,
+                       help="GPUs per shard to test (>1 also probes the srun/NCCL launch)")
+    gtest.add_argument("--boltz", action="store_true",
+                       help="Also run a tiny real Boltz screen (4 ligands, 35-residue protein, "
+                            "no MSA server) through the normal stage->run->rank path")
+    gtest.add_argument("--diffdock", action="store_true",
+                       help="Also run a tiny DiffDock-L screen (4 ligands, DiffDock's bundled 1a0q "
+                            "receptor) through stage->run->rank; needs `chemflow diffdock-env "
+                            "install` + warmup")
+    gtest.add_argument("--affinity", action="store_true",
+                       help="With --boltz: also exercise Boltz-2 affinity prediction")
+    gtest.add_argument("--submit", action="store_true",
+                       help="With --boltz: sbatch the staged array instead of running in the "
+                            "current allocation (tests the real submit script)")
+    gtest.add_argument("--jobname", default="gpu_test",
+                       help="Job folder name for the example (default: gpu_test)")
+    gtest.add_argument("--workdir", type=Path, default=Path("."),
+                       help="Base folder; the example is written to <workdir>/<jobname>/")
+    gtest.add_argument("--boltz-command", default=None, help=argparse.SUPPRESS)
+    gtest.set_defaults(func=_gpu_test)
     return parser
 
 

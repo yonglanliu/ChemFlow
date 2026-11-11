@@ -26,6 +26,9 @@ SUPPORTED_ACCELERATORS = {"gpu", "cpu", "tpu"}
 DEFAULTS: dict[str, Any] = {
     "engine": "boltz",            # boltz | chai
     "workdir": ".",
+    # Job name: ALL files of the run — config, engine inputs, SLURM/runner scripts, logs and
+    # predictions (out_dir) — live in <workdir>/<jobname>/. Empty => directly in <workdir>.
+    "jobname": "",
     "out_dir": "docking_output",
     "seed": 1,
     "use_msa_server": True,
@@ -52,7 +55,16 @@ DEFAULTS: dict[str, Any] = {
     # --- Chai-1 specific ---
     "chai_command": "chai-lab",
     # --- DiffDock specific (diffusion docking into a receptor STRUCTURE) ---
-    "diffdock_command": "python -m inference",  # run from the DiffDock repo
+    # DiffDock-L lives in its OWN env (chemflow diffdock-env install), not in alchemfold.
+    # diffdock_command: null => "<diffdock env python> -m inference" run from diffdock_dir.
+    "diffdock_command": None,
+    "diffdock_python": None,       # interpreter of the diffdock env (auto-detected)
+    "diffdock_dir": None,          # the cloned gcorso/DiffDock folder (auto-detected)
+    "diffdock_trajectory": False,  # save the reverse-diffusion trajectory (multi-frame PDB per pose)
+    "trajectories_dir": None,      # screens: one folder for all trajectories (default <workdir>/trajectories)
+    "diffdock_batch_size": None,   # GPU batch over the poses of ONE ligand (DiffDock --batch_size, default 10); only helps when poses > batch
+    "diffdock_dedupe_esm": True,   # embed the receptor once per run, not once per ligand (see engines/_diffdock_shim.py)
+    "diffdock_samples": None,      # poses per ligand (DiffDock --samples_per_complex); null => diffusion_samples if >1 else 10
     "diffdock_inference_steps": 20,
     "diffdock_model_dir": None,
     "diffdock_config": None,
@@ -69,6 +81,12 @@ DEFAULTS: dict[str, Any] = {
     # .cxsmiles file (CXSMILES + id, e.g. Enamine REAL). Plain or .bz2/.gz.
     "ligand_file": None,
     "ligand_file_format": "auto",  # auto | csv | smiles | cxsmiles
+    # Boltz library screening runs batched (one boltz call, one MSA) and writes
+    # ALL poses into poses_dir and ALL scores into results_csv (no per-ligand
+    # folders). Defaults: <workdir>/poses and <workdir>/results.csv.
+    "poses_dir": None,
+    "results_csv": None,
+    "keep_raw": False,             # keep Boltz raw output + input YAMLs
     # --- optional binding-site pocket constraint ---
     # pocket:
     #   binder: L
@@ -97,8 +115,16 @@ def load_config(path: str | Path) -> SimpleNamespace:
         conf.workdir = os.getcwd()
     else:
         conf.workdir = _resolve(base_dir, workdir)
+    jobname = str(getattr(conf, "jobname", "") or "").strip()
+    if jobname:
+        # A config that already lives in <workdir>/<jobname>/ means that folder IS the job folder
+        # (no <jobname>/<jobname> nesting); otherwise the job folder is <workdir>/<jobname>.
+        in_job_folder = base_dir.name == jobname and (
+            not workdir or str(workdir) == "." or Path(conf.workdir).resolve() == base_dir.parent)
+        conf.workdir = str(base_dir if in_job_folder else Path(conf.workdir) / jobname)
 
-    for key in ("receptor_pdb", "diffdock_model_dir", "diffdock_config", "ligand_file"):
+    for key in ("receptor_pdb", "diffdock_model_dir", "diffdock_config", "ligand_file",
+                "diffdock_dir", "diffdock_python"):
         value = getattr(conf, key, None)
         if value:
             setattr(conf, key, _resolve(base_dir, value))
@@ -305,6 +331,13 @@ def validate_config(conf: SimpleNamespace) -> None:
         raise ValueError(
             f"engine must be one of {sorted(SUPPORTED_ENGINES)} (got {engine!r})"
         )
+
+    import re
+
+    jobname = str(getattr(conf, "jobname", "") or "").strip()
+    if jobname and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", jobname):
+        raise ValueError("jobname may contain only letters, digits, '.', '_' and '-' "
+                         f"(got {jobname!r})")
 
     proteins = getattr(conf, "proteins", []) or []
     ligands = getattr(conf, "ligands", []) or []
@@ -660,6 +693,12 @@ def default_yaml_text(
     use_msa_server: bool = True,
     predict_affinity: bool = False,
     affinity_binder: str | None = None,
+    receptor_pdb: str | None = None,
+    diffdock_samples: int | None = None,
+    diffdock_steps: int | None = None,
+    jobname: str = "",
+    diffdock_trajectory: bool = False,
+    diffdock_batch_size: int | None = None,
 ) -> str:
     """Return a commented example docking config for the chosen engine.
 
@@ -745,7 +784,9 @@ def default_yaml_text(
         "\n"
         f'engine: "{engine}"              # boltz | chai\n'
         'workdir: "."                    # working directory ("." = the current directory you run from)\n'
-        f'out_dir: "{out_dir}"            # job folder: all predictions go to <workdir>/<out_dir>/\n'
+        + (f'jobname: "{jobname}"            # job folder: EVERYTHING (config, inputs, scripts, logs, predictions) '
+           f"goes to <workdir>/{jobname}/\n" if jobname else "")
+        + f'out_dir: "{out_dir}"            # predictions folder (inside the job folder when jobname is set)\n'
         'output_format: "pdb"            # pdb | mmcif (Chai writes mmCIF)\n'
         f"use_msa_server: {'true' if use_msa_server else 'false'}            "
         "# compute MSAs via the model's server (needs internet; false on offline nodes)\n"
@@ -767,10 +808,25 @@ def default_yaml_text(
         'boltz_command: "boltz"          # used when engine: boltz\n'
         'chai_command: "chai-lab"        # used when engine: chai\n'
         "# --- DiffDock (engine: diffdock) docks into a receptor structure ---\n"
-        '# receptor_pdb: "receptor.pdb"  # receptor structure (or omit to fold the sequence via ESMFold)\n'
-        '# diffdock_command: "python -m inference"   # run from the DiffDock repo\n'
-        "# diffdock_inference_steps: 20\n"
-        '# diffdock_model_dir: "/path/to/DiffDock/workdir"\n'
+        + (f'receptor_pdb: "{receptor_pdb}"   # receptor structure DiffDock docks into\n'
+           if receptor_pdb else
+           '# receptor_pdb: "receptor.pdb"  # receptor structure (or omit to fold the sequence via ESMFold)\n')
+        + "# DiffDock-L runs from its OWN env (chemflow diffdock-env install); paths are auto-detected:\n"
+        '# diffdock_python: "/path/to/envs/diffdock/bin/python"\n'
+        '# diffdock_dir: "/path/to/DiffDock"\n'
+        + (f"diffdock_samples: {int(diffdock_samples)}            # poses per ligand (the best by confidence is kept)\n"
+           if diffdock_samples else
+           "# diffdock_samples: 10           # poses per ligand (confidence ranks them)\n")
+        + (f"diffdock_inference_steps: {int(diffdock_steps)}     # denoising (reverse-diffusion) steps; default 20\n"
+           if diffdock_steps else
+           "# diffdock_inference_steps: 20   # denoising (reverse-diffusion) steps\n")
+        + (f"diffdock_batch_size: {int(diffdock_batch_size)}       # GPU batch over one ligand's poses (default 10); raise only if poses > 10\n"
+           if diffdock_batch_size else
+           "# diffdock_batch_size: 10      # GPU batch over one ligand's poses (default 10); only helps when poses > batch\n")
+        + ("diffdock_trajectory: true      # save the diffusion trajectory: rank<k>_reverseprocess.pdb (multi-frame, ligand only)\n"
+           if diffdock_trajectory else
+           "# diffdock_trajectory: true    # save the diffusion trajectory (multi-frame PDB per pose)\n")
+        + '# diffdock_model_dir: "/path/to/DiffDock/workdir"\n'
         "\n"
         + _format_proteins_block(proteins or [(protein_id, sequence)])
         + "\n"

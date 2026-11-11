@@ -34,6 +34,7 @@ gpu_types:
   - p100
   - v100
   - l40
+  - gpuh200   # H200 nodes (gres name as configured on this cluster)
 
 # Which preset is selected by default.
 default_preset: singlenode-singlegpu-day
@@ -84,6 +85,52 @@ docking:
       gpus_per_node: 2
       gpu_type: a100
       cpus_per_task: 8
+      mem: 64G
+
+# ------------------------------------------------------------------
+# AlchemFold VIRTUAL SCREENING presets (library -> shards -> SLURM array).
+#
+# Read ONLY by `alchemfold screen ...` and the desktop screening page. Each preset:
+#   time            walltime per array task (one task = one shard)
+#   shards          number of array tasks = GPUs running in parallel (n_shards)
+#   gpus_per_node   GPUs per task (>1 turns on Boltz DDP inside each shard)
+#   gpu_type, cpus_per_task, mem, partition, account, conda_env   (optional)
+# Name format is free; add your own, e.g. a 100-GPU run. The desktop "Preset" +
+# "Shards" + "GPUs/task" boxes can override any of these per run.
+# ------------------------------------------------------------------
+screening:
+  default_preset: screen-1gpu-x20
+  # defaults:            # optional — override partition/cpus_per_task/mem/conda_env
+  #   cpus_per_task: 8
+  #   mem: 32G
+  presets:
+    screen-1gpu-x4:
+      time: "1-00:00:00"
+      gpus_per_node: 1
+      shards: 4
+    screen-1gpu-x20:
+      time: "1-00:00:00"
+      gpus_per_node: 1
+      shards: 20
+    screen-1gpu-x50:
+      time: "1-00:00:00"
+      gpus_per_node: 1
+      shards: 50
+    screen-l40-x20:                 # 20 shards on L40 GPUs (1 GPU each)
+      time: "1-00:00:00"
+      gpus_per_node: 1
+      gpu_type: l40
+      shards: 20
+    screen-h200-x10:                # 10 shards on H200 GPUs (1 GPU each)
+      time: "1-00:00:00"
+      gpus_per_node: 1
+      gpu_type: gpuh200
+      shards: 10
+    screen-4gpu-x5:                 # 5 shards x 4 GPUs (DDP) = 20 GPUs
+      time: "1-00:00:00"
+      gpus_per_node: 4
+      shards: 5
+      gpu_type: a100
       mem: 64G
 
 # ------------------------------------------------------------------

@@ -51,7 +51,7 @@ _BUILTIN: dict[str, Any] = {
         "mem": "32G",
         "conda_env": "alchemfold",
     },
-    "gpu_types": ["", "a100", "v100x", "p100", "v100", "l40"],
+    "gpu_types": ["", "a100", "v100x", "p100", "v100", "l40", "gpuh200"],
     "default_preset": "docking-standard",
     "presets": {
         # Co-folding / docking is single-GPU inference and short per complex, so
@@ -78,9 +78,25 @@ def config_path() -> Path | None:
     return None
 
 
-def load_settings() -> dict[str, Any]:
-    """Load HPC settings, merging a YAML file (if any) over the built-ins."""
+def load_settings(section: str = "docking") -> dict[str, Any]:
+    """Load HPC settings, merging a YAML file (if any) over the built-ins.
+
+    ``section`` selects the per-workflow override block (``docking`` for single
+    docking, ``screening`` for virtual screening); it overrides the top-level
+    values, which stay shared with OpenFE.
+    """
     settings = copy.deepcopy(_BUILTIN)
+    if section == "screening":
+        settings["default_preset"] = "screen-1gpu-x20"
+        settings["presets"] = {
+            # Screening = a SLURM array of shards. 'shards' is how many array tasks
+            # (= GPUs running in parallel); 'gpus_per_task' > 1 enables Boltz DDP
+            # inside each shard.
+            "screen-1gpu-x4": {"time": "1-00:00:00", "gpus_per_node": 1, "shards": 4},
+            "screen-1gpu-x20": {"time": "1-00:00:00", "gpus_per_node": 1, "shards": 20},
+            "screen-1gpu-x50": {"time": "1-00:00:00", "gpus_per_node": 1, "shards": 50},
+            "screen-4gpu-x5": {"time": "1-00:00:00", "gpus_per_node": 4, "shards": 5},
+        }
     path = config_path()
     if path is None:
         return settings
@@ -92,23 +108,28 @@ def load_settings() -> dict[str, Any]:
         return settings
     if not isinstance(data, dict):
         return settings
-    if isinstance(data.get("defaults"), dict):
-        settings["defaults"].update(data["defaults"])
-    if isinstance(data.get("presets"), dict) and data["presets"]:
-        # A preset value is either a walltime string (single-node single-GPU) or
-        # a mapping of resources (time/nodes/ntasks_per_node/gpus_per_node/...).
-        norm: dict[str, Any] = {}
-        for key, value in data["presets"].items():
-            norm[str(key)] = value if isinstance(value, dict) else str(value)
-        settings["presets"] = norm
+    if section == "docking":
+        # Top-level presets/defaults/gpu_types are the shared (OpenFE-style) ones;
+        # screening ignores them and uses only its own section.
+        if isinstance(data.get("defaults"), dict):
+            settings["defaults"].update(data["defaults"])
+        if isinstance(data.get("presets"), dict) and data["presets"]:
+            # A preset value is either a walltime string (single-node single-GPU) or
+            # a mapping of resources (time/nodes/ntasks_per_node/gpus_per_node/...).
+            norm: dict[str, Any] = {}
+            for key, value in data["presets"].items():
+                norm[str(key)] = value if isinstance(value, dict) else str(value)
+            settings["presets"] = norm
+        if data.get("default_preset"):
+            settings["default_preset"] = str(data["default_preset"])
+    else:
+        if isinstance(data.get("defaults"), dict):
+            settings["defaults"].update(data["defaults"])
     if isinstance(data.get("gpu_types"), list):
         settings["gpu_types"] = ["" if g is None else str(g) for g in data["gpu_types"]]
-    if data.get("default_preset"):
-        settings["default_preset"] = str(data["default_preset"])
-    # A dedicated `docking:` section (mirrors the `openfe:` section) overrides the
-    # top-level values for the docking path, so docking can have short, tuned
-    # presets while the shared top-level `presets` stay available to OpenFE.
-    dock = data.get("docking")
+    # A dedicated section (`docking:` / `screening:`, mirrors the `openfe:` section)
+    # overrides the top-level values for that path.
+    dock = data.get(section)
     if isinstance(dock, dict):
         if isinstance(dock.get("defaults"), dict):
             settings["defaults"].update(dock["defaults"])
@@ -124,39 +145,40 @@ def load_settings() -> dict[str, Any]:
     return settings
 
 
-def presets() -> dict[str, str]:
-    """``{preset_name: walltime}`` from the current config."""
-    return load_settings()["presets"]
+def presets(section: str = "docking") -> dict[str, Any]:
+    """``{preset_name: walltime-or-resources}`` from the current config."""
+    return load_settings(section)["presets"]
 
 
-def gpu_types() -> list[str]:
+def gpu_types(section: str = "docking") -> list[str]:
     """Selectable GPU types ("" = no type constraint / any GPU)."""
-    return load_settings()["gpu_types"]
+    return load_settings(section)["gpu_types"]
 
 
-def resource_defaults() -> dict[str, Any]:
+def resource_defaults(section: str = "docking") -> dict[str, Any]:
     """Default SLURM resources (partition/account/cpus_per_task/mem/conda_env)."""
-    return load_settings()["defaults"]
+    return load_settings(section)["defaults"]
 
 
-def default_preset() -> str:
+def default_preset(section: str = "docking") -> str:
     """The configured default preset, guaranteed to exist in ``presets()``."""
-    settings = load_settings()
+    settings = load_settings(section)
     chosen = settings["default_preset"]
     available = settings["presets"]
     return chosen if chosen in available else next(iter(available))
 
 
-def preset_resources(name: str) -> dict[str, Any]:
+def preset_resources(name: str, section: str = "docking") -> dict[str, Any]:
     """Return the fully-resolved SLURM resources for a preset.
 
     A preset may be a plain walltime string (single-node single-GPU) or a
     mapping overriding any of: ``time, nodes, ntasks_per_node, gpus_per_node,
     gpu_type, cpus_per_task, mem, partition, account, conda_env``. Missing keys
     fall back to the ``defaults`` section, then to built-in single-node values.
-    Raises ``KeyError`` if the preset name is unknown.
+    Screening presets may also set ``shards`` (number of SLURM array tasks, i.e.
+    GPUs running in parallel). Raises ``KeyError`` if the preset name is unknown.
     """
-    settings = load_settings()
+    settings = load_settings(section)
     presets = settings["presets"]
     if name not in presets:
         raise KeyError(name)
@@ -182,4 +204,5 @@ def preset_resources(name: str) -> dict[str, Any]:
         "partition": str(pick("partition", DEFAULT_PARTITION)),
         "account": str(pick("account", "") or ""),
         "conda_env": str(pick("conda_env", "alchemfold") or ""),
+        "shards": int(raw.get("shards") or 0),
     }

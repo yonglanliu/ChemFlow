@@ -28,7 +28,7 @@ alchemforge openmm modeling build-soluble | build-membrane  →  relax  →  FEP
 ## Docking (multi-model) — `alchemfold dock`
 
 ```bash
-# pick a model with --engine (boltz | chai); --pocket adds a binding-site block
+# pick a model with --engine (boltz | chai | diffdock); --pocket adds a binding-site block (not for diffdock)
 alchemfold dock generate --engine boltz -o docking.yaml \
     --sequence MKT... --smiles "CC(=O)Oc1ccccc1C(=O)O" --pocket
 # edit docking.yaml (sequence, ligand, pocket residues as chain:residue)
@@ -40,7 +40,11 @@ alchemfold dock run docking.yaml            # --dry-run prints the engine comman
 |---|---|---|
 | `boltz` (Boltz-2) | `boltz` | MIT, local; supports binding-affinity prediction + pocket constraints |
 | `chai` (Chai-1) | `chai-lab` | open weights, local; pocket via a restraints file (best-effort) |
-| `diffdock` (DiffDock) | GitHub repo (not PyPI) | diffusion **docking into a receptor PDB** (or ESMFold from sequence); blind — no pocket/affinity |
+| `diffdock` (DiffDock-L) | **own conda env** + GitHub repo (`chemflow diffdock-env install`) | fast diffusion **docking into a receptor PDB**; blind — no pocket/affinity; gives pose *confidence* only |
+
+**Job folder:** pass `--jobname NAME` to `dock generate` and EVERYTHING for the run — the config
+(`NAME/docking.yaml`), the engine inputs, `run_docking.slurm`, logs and `predictions/` — goes under
+`<workdir>/NAME/`. (`screen`, `gpu-test` and the `diffdock-env` tests follow the same rule.)
 
 The **pocket** block steers the ligand into a known site (Boltz/Chai only; DiffDock
 is blind docking):
@@ -183,3 +187,122 @@ sites, large **induced-fit** motions, and **virtual-screening ranking** (often n
 better than docking on diverse decoys). Treat AlchemFold as a pose/complex
 *generator* that feeds physics-based relaxation + FEP, not as a standalone
 affinity ranker.
+
+
+## DiffDock-L (separate environment)
+
+<p align="center">
+  <img src="../../assets/movie/diffdock_docking.gif" alt="DiffDock-L reverse diffusion: the ligand starts at a random position and is denoised into the binding pocket" width="460"><br>
+  <em>DiffDock-L docking a ligand: reverse diffusion moves it from a random start into the pocket
+  (shown 8&times; slower; produced with <code>--diffdock-trajectory</code>).</em>
+</p>
+
+DiffDock-L is a fast, **structure-based blind docking** model. It is much quicker per ligand than
+Boltz-2/Chai-1 co-folding, but it needs a receptor **structure** and gives a pose-quality
+**confidence**, not a binding affinity. It runs from its **own conda env** (it needs the
+PyTorch-Geometric stack), never inside the `alchemfold` env.
+
+### What DiffDock takes as input
+
+| Input | What to give | Notes |
+|---|---|---|
+| **Protein** | a 3D receptor structure, **`receptor_pdb`** (`.pdb`) | Required here (DiffDock can also fold a sequence with ESMFold, but that part is not installed). Use a clean, protein-only structure. DiffDock is built for medium-size proteins of 1–2 chains in a conformation close to the bound one (a holo/near-holo crystal structure); expect weaker results on a very different apo structure or a large complex. **Every ligand is docked into this one fixed structure.** |
+| **Ligand** | a SMILES string, or any file RDKit reads (`.sdf`, `.mol2`) | In AlchemFold: an inline `smiles`, or a library file (`.smi` / `.csv` / `.cxsmiles`, plain or `.bz2`/`.gz`), or `enamine_real` / `zinc20`. |
+| **Pocket / box** | none | Blind docking over the whole protein — a `pocket:` block is **not** accepted. |
+| **Settings** | poses per ligand (`diffdock_samples`, default 10), denoising (reverse-diffusion) steps (`diffdock_inference_steps`, default 20 — DiffDock performs 19 of them, the last being noise-free) | The best pose by confidence is kept. Fewer steps = faster, roughly linearly, with a small accuracy cost. AlchemFold passes these through a generated `--config` YAML, because DiffDock's `inference.py` lets the YAML overwrite command-line flags. |
+| **Batch size** | `diffdock_batch_size` (default 10) | GPU batch over the poses of **one** ligand. DiffDock docks ligands strictly one after another, so this does **not** speed up a library; it only helps when poses per ligand exceed it (e.g. 40 poses: batch 10 = 4 GPU passes, batch 40 = 1 pass, more GPU memory). |
+
+DiffDock itself reads a CSV with one row per complex (`complex_name, protein_path,
+ligand_description, protein_sequence`). **AlchemFold writes this CSV for you** — you only supply the
+receptor PDB and the ligand(s).
+
+### Install (own env)
+
+The env is defined in `env/environment-diffdock.yaml` (Python 3.11, torch 2.4 + CUDA 12.1 wheels,
+so it runs on A100 / L40 / H200):
+
+```bash
+chemflow diffdock-env install                 # env 'diffdock' + git clone gcorso/DiffDock into <ChemFlow>/DiffDock (next to src/)
+chemflow diffdock-env install --cuda 11.8     # other CUDA wheels (11.8 | 12.1 | 12.4)
+chemflow diffdock-env install --profile repo  # fallback: build from DiffDock's own environment.yml
+chemflow diffdock-env warmup                  # ONCE, on a node WITH internet: DiffDock-L models + ESM2 weights + lookup tables
+chemflow diffdock-env status                  # env, repo, models, GPU visibility
+```
+
+The desktop equivalent is the **DiffDock-L** card on the **Environments** page (folder, CUDA, Install /
+Preview / Check / **Warm-up**). The install also links ChemFlow into the env (`pip install -e`, skip with
+`--no-link-chemflow`) and records its location in `~/.config/chemflow/diffdock.yaml`; AlchemFold finds the
+env and repo automatically (or set `diffdock_python` / `diffdock_dir` in the config, or
+`$CHEMFLOW_DIFFDOCK_PYTHON` / `$CHEMFLOW_DIFFDOCK_DIR`, or the `diffdock:` block of `chemflow_tools.yaml`).
+Compute nodes are often offline — run **warm-up** on a login/data node first.
+
+### Run
+
+Single docking:
+
+```bash
+alchemfold dock generate --engine diffdock --receptor-pdb receptor.pdb \
+    --smiles "CC(=O)Oc1ccccc1C(=O)O" --jobname one \
+    --diffdock-samples 10 --diffdock-steps 20     # poses per ligand, denoising steps (defaults)
+#   -> everything is written to ./one/ : docking.yaml, DiffDock inputs, run_docking.slurm, predictions/
+alchemfold dock validate one/docking.yaml
+alchemfold dock run one/docking.yaml
+```
+
+Library screen on SLURM (everything goes under `<workdir>/<jobname>/`, config included):
+
+```bash
+alchemfold screen generate --engine diffdock --receptor-pdb receptor.pdb \
+    --library enamine_real --max-ligands 10000 --n-shards 20 --jobname dd_run \
+    --diffdock-samples 5 --diffdock-steps 12      # a faster first pass
+alchemfold screen validate dd_run/screen.yaml
+alchemfold screen stage    dd_run/screen.yaml
+bash dd_run/submit_screen.sh                  # array of shards, then the ranking job
+```
+
+In the desktop: **AI docking & screening** → engine `diffdock` → pick the **Receptor PDB**. The page
+then hides all the Boltz/Chai controls (sequence, pocket, MSA, kernels, affinity, recycles, sampling steps,
+model cache), shows **DiffDock poses per ligand** and **Denoising steps**, shows whether DiffDock was found,
+locks GPUs per shard to 1, and ranks by `confidence`.
+
+DiffDock uses **1 GPU per shard** (a config asking for more is refused) — parallelize with more shards.
+A screen runs **one DiffDock call per shard**, so the model loads once per shard.
+
+### Output
+
+- `poses/<ligand>.sdf` — the top-ranked (rank 1) pose of every ligand, all in one folder
+- `results/shard_*.csv` → merged into `ranking.csv`, with `ligand_id, smiles, confidence, pose`
+- `confidence` is DiffDock's pose-quality score (higher is better). It is **not** a binding affinity and is
+  known to be weak at separating binders from non-binders — treat DiffDock as a fast pose generator and
+  **rescore** the top poses (GNINA / Vina / Glide, or Boltz-2 affinity on the best few thousand).
+- **Diffusion trajectory (optional):** `--diffdock-trajectory` (or `diffdock_trajectory: true`, or the
+  **Save diffusion trajectory** checkbox in the desktop) makes DiffDock also write
+  `rank<k>_reverseprocess.pdb` for each pose — a multi-frame PDB with one frame per denoising step, **ligand
+  only**. DiffDock's raw file is not viewer-friendly (its hydrogens never move, so every bond to a hydrogen
+  stretches ~50 Å across the box, and the frames are out of order), so AlchemFold writes a **cleaned**
+  copy: heavy atoms only, in time order (random start → final pose). Single docking keeps the raw file and
+  `rank<k>_trajectory.pdb` (cleaned) in `predictions/<complex>/`; in a screen only each ligand's **best**
+  pose is kept, cleaned, as `<job>/trajectories/<ligand>.pdb` (listed in the results CSV and
+  `ranking.csv`). Repair an existing raw file with `alchemfold trajectory-fix rank1_reverseprocess.pdb`
+  (writes `*_clean.pdb`). The ligand starts at a random position, often tens of Å from the pocket — that is
+  the diffusion start, not an error. Load the receptor PDB plus the trajectory in PyMOL / VMD / ChimeraX to watch it dock. Each is
+  tens of KB, so leave it off for very large screens.
+- **Big libraries:** DiffDock embeds the receptor with ESM2 once per ligand row, so one process with
+  10,000 ligands does ~10,000 identical embeddings and holds ~19 GB of them (367-residue receptor).
+  AlchemFold runs DiffDock through `engines/_diffdock_shim.py`, which embeds each unique sequence once
+  (`diffdock_dedupe_esm: false` turns this off). Still prefer `alchemfold screen` (shards of ~500) over
+  one huge `dock run`: shards run in parallel on many GPUs and resume per shard.
+- With `cleanup: true` (default) the split library and shard work folders are deleted after ranking when every
+  ligand finished.
+
+### Test before a big screen (inside a GPU allocation)
+
+```bash
+chemflow diffdock-env gpu-test            # (job folder ./diffdock_gpu_test/) GPU visible? torch build matches the GPU? torch_scatter / torch_cluster / e3nn run on it?
+chemflow diffdock-env gpu-test --dock     # + dock 4 small molecules into DiffDock's bundled 1a0q receptor, prints s/ligand
+chemflow alchemfold gpu-test --diffdock   # tiny screen through AlchemFold: stage -> run -> rank (add --submit to test sbatch)
+```
+
+The first check catches a PyTorch / PyG build that has no kernel for your GPU (for example an old CUDA build
+on an H200 or L40) before it fails mid-screen. The first real run also builds SO(2)/SO(3) lookup tables
+(a few minutes, cached).

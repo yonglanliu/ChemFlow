@@ -574,7 +574,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         self.complex_timestep = _dspin(4.0, 0.5, 4.0, step=0.5, decimals=1)
         self.solvent_timestep = _dspin(4.0, 0.5, 4.0, step=0.5, decimals=1)
         self.barostat_freq = _dspin(25.0, 1.0, 1000.0, step=1.0, decimals=1)
-        self.surface_tension = _dspin(300.0, 0.0, 2000.0, step=10.0, decimals=1)
+        self.surface_tension = _dspin(0.0, 0.0, 2000.0, step=10.0, decimals=1)
         self.hmass = _dspin(3.0, 1.0, 4.0, step=0.5, decimals=1)
         self.softcore = _combo(["gapsys", "beutler"], "gapsys")
         self.softcore_alpha = _dspin(0.85, 0.0, 1.0, step=0.05, decimals=2)

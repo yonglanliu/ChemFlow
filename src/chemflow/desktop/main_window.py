@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
             {"index": 1, "title": "ADMET", "detail": "Physicochemical & ADME/Tox endpoints"},
             {"index": 5, "title": "PROTAC design", "detail": "Ternary search, linker design, screening"},
             {"index": 3, "title": "LBVS", "detail": "Ligand-based virtual screening (chemical similarity)"},
-            {"index": 9, "title": "AI docking & screening", "detail": "Dock or screen with Boltz-2 / Chai-1 + 3D pose"},
+            {"index": 9, "title": "AI docking & screening", "detail": "Dock or screen with Boltz-2 / Chai-1 / DiffDock-L + 3D pose"},
             {"index": 10, "title": "Active learning virtual screening", "detail": "Deep-Docking loop: Chemprop surrogate + Vina/Glide oracle"},
             {"index": 2, "title": "Predict", "detail": "Run a saved model on a molecule set"},
             {"index": 4, "title": "Generate", "detail": "Sample novel SMILES"},

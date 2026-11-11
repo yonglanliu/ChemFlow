@@ -76,3 +76,33 @@ def resolve_command(command: list[str]) -> list[str]:
     if os.path.exists(candidate):
         return [candidate, *command[1:]]
     return command
+
+
+def wrap_srun(command: list[str], devices: int = 1) -> list[str]:
+    """Launch ``command`` through ``srun`` (one task per GPU) when Lightning needs it.
+
+    Under SLURM, PyTorch Lightning expects one process per GPU started by ``srun``
+    (``--ntasks-per-node == devices``). So for multi-GPU runs — or any run inside a
+    multi-task allocation (e.g. a 1-GPU MSA step in a 4-GPU job, where Lightning would
+    otherwise see SLURM_NTASKS=4 but devices=1) — wrap the engine command in
+    ``srun --ntasks=<devices>``. Single-GPU runs in a 1-task job, runs outside SLURM,
+    and hosts without ``srun`` are returned unchanged.
+    """
+    if not os.environ.get("SLURM_JOB_ID"):
+        return command
+    srun = shutil.which("srun")
+    if not srun:
+        return command
+    devices = max(1, int(devices or 1))
+    try:
+        ntasks = int(os.environ.get("SLURM_NTASKS", "1") or 1)
+    except ValueError:
+        ntasks = 1
+    if devices == 1 and ntasks <= 1:
+        return command
+    wrapped = [srun, "--nodes=1", f"--ntasks={devices}", f"--ntasks-per-node={devices}",
+               "--kill-on-bad-exit=1"]
+    cpt = os.environ.get("SLURM_CPUS_PER_TASK")
+    if cpt:  # newer SLURM no longer lets srun inherit --cpus-per-task from sbatch
+        wrapped.append(f"--cpus-per-task={cpt}")
+    return wrapped + list(command)

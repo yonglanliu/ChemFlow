@@ -46,18 +46,108 @@ _AUTO_METRIC = {
 # --------------------------------------------------------------------------- shard
 
 
+def _iter_lines(path):
+    import bz2
+    import gzip
+
+    name = str(path).lower()
+    opener = bz2.open if name.endswith(".bz2") else gzip.open if name.endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            s = line.strip()
+            if s and not s.startswith("#") and s.split()[0].lower() != "smiles":  # skip header
+                yield s
+
+
+def _is_csv(path) -> bool:
+    from alchemfold.dock_config import _inner_suffix
+
+    return _inner_suffix(Path(path)) == ".csv"
+
+
+def _sample_stream(files, n: int, mode: str, seed: int) -> list[tuple[str, str]]:
+    """Take n lines from huge SMILES/CXSMILES files without loading them whole.
+
+    ``head``: the first n lines (instant). ``random``: a uniform reservoir sample
+    over all files (Li's Algorithm L) — has to decompress every line, so on
+    billion-ligand catalogs it is bounded by bz2 speed (hours).
+    """
+    import math
+    import random
+
+    rng = random.Random(seed)
+    if mode == "head":
+        out: list[tuple[str, str]] = []
+        for f in files:
+            for line in _iter_lines(f):
+                out.append((str(f), line))
+                if len(out) >= n:
+                    return out
+        return out
+
+    res: list[tuple[str, str]] = []
+    seen = 0
+    w = math.exp(math.log(rng.random()) / n)
+    next_i = 0
+    for f in files:
+        for line in _iter_lines(f):
+            seen += 1
+            if seen <= n:
+                res.append((str(f), line))
+                if seen == n:
+                    next_i = n + int(math.log(rng.random()) / math.log(1 - w)) + 1
+                continue
+            if seen == next_i:
+                res[rng.randrange(n)] = (str(f), line)
+                w *= math.exp(math.log(rng.random()) / n)
+                next_i += int(math.log(rng.random()) / math.log(1 - w)) + 1
+            if seen % 100_000_000 == 0:
+                print(f"  ... scanned {seen / 1e6:.0f}M ligands", flush=True)
+    return res
+
+
 def combine_ligands(conf) -> list[dict]:
-    """Merge all library files into one deduplicated [{id, smiles}] list."""
+    """Merge library files into one deduplicated [{id, smiles}] list.
+
+    With ``max_ligands`` > 0 only a subset (``sample``: random | head) is taken,
+    streamed so catalog-size files (Enamine REAL) are never loaded whole.
+    """
+    from alchemfold.dock_config import _sanitize_id, _split_smiles_line
+
+    files = list(getattr(conf, "ligand_files", []) or [])
+    n_max = int(getattr(conf, "max_ligands", 0) or 0)
+    fmt = str(getattr(conf, "ligand_file_format", "auto"))
+    entries: list[dict] = []
+
+    if n_max > 0 and files and not any(_is_csv(f) for f in files) and fmt in ("auto", "smiles", "cxsmiles"):
+        mode = str(getattr(conf, "sample", "random"))
+        print(f"Sampling {n_max} ligand(s) ({mode}) from {len(files)} file(s) ...")
+        picked = _sample_stream(files, n_max, mode, int(getattr(conf, "sample_seed", 1)))
+        for k, (f, line) in enumerate(picked, start=1):
+            cx = fmt == "cxsmiles" or str(f).lower().replace(".bz2", "").replace(".gz", "").endswith(".cxsmiles")
+            smi, name = _split_smiles_line(line, cx)
+            if smi:
+                entries.append({"id": _sanitize_id(name, f"lig{k}"), "smiles": smi})
+    else:
+        for path in files:
+            entries.extend(load_ligands_from_file(path, fmt))
+        if n_max > 0 and len(entries) > n_max:
+            import random
+
+            if str(getattr(conf, "sample", "random")) == "random":
+                entries = random.Random(int(getattr(conf, "sample_seed", 1))).sample(entries, n_max)
+            else:
+                entries = entries[:n_max]
+
     merged: list[dict] = []
     seen: set[str] = set()
-    for path in getattr(conf, "ligand_files", []) or []:
-        for entry in load_ligands_from_file(path, getattr(conf, "ligand_file_format", "auto")):
-            cid, base, k = entry["id"], entry["id"], 2
-            while cid in seen:
-                cid = f"{base}_{k}"
-                k += 1
-            seen.add(cid)
-            merged.append({"id": cid, "smiles": entry["smiles"]})
+    for entry in entries:
+        cid, base, k = entry["id"], entry["id"], 2
+        while cid in seen:
+            cid = f"{base}_{k}"
+            k += 1
+        seen.add(cid)
+        merged.append({"id": cid, "smiles": entry["smiles"]})
     return merged
 
 
@@ -77,18 +167,31 @@ def split_shards(ligands: list[dict], n_shards: int, shard_size: int) -> list[li
     return [ligands[i:i + size] for i in range(0, total, size)]
 
 
-def _shard_dock_yaml(conf, shard_smi: Path, shard_workdir: Path) -> dict:
+def _shard_dock_yaml(conf, shard_smi: Path, shard_workdir: Path,
+                     poses_dir: Path | None = None, results_csv: Path | None = None) -> dict:
     """Build a single-shard docking config (screened as a library)."""
     engine = str(conf.engine)
+    gpus = int(getattr(getattr(conf, "slurm", None), "gpus_per_task", 1) or 0)
     cfg: dict = {
         "engine": engine,
         "workdir": str(shard_workdir),
         "out_dir": "docking_output",
+        **({"poses_dir": str(poses_dir)} if poses_dir else {}),
+        **({"results_csv": str(results_csv)} if results_csv else {}),
+        "keep_raw": bool(getattr(conf, "keep_raw", False)),
+        **({"diffdock_trajectory": True,
+            "trajectories_dir": str(poses_dir.parent / "trajectories") if poses_dir else None}
+           if getattr(conf, "diffdock_trajectory", False) else {}),
+        "no_kernels": bool(getattr(conf, "no_kernels", True)),
+        **({"cache_dir": str(conf.cache_dir)} if getattr(conf, "cache_dir", None) else {}),
         "output_format": getattr(conf, "output_format", "pdb"),
         "use_msa_server": bool(getattr(conf, "use_msa_server", True)),
         "seed": int(getattr(conf, "seed", 1)),
         "accelerator": str(getattr(conf, "accelerator", "gpu")),
-        "devices": int(getattr(conf, "devices", 1)),
+        # GPUs per shard task: >1 makes Boltz run DDP across them.
+        "devices": 1 if engine == "diffdock" else (
+            max(1, gpus) if str(getattr(conf, "accelerator", "gpu")) == "gpu"
+            else int(getattr(conf, "devices", 1))),
         "diffusion_samples": int(getattr(conf, "diffusion_samples", 1)),
         "recycling_steps": int(getattr(conf, "recycling_steps", 3)),
         "sampling_steps": int(getattr(conf, "sampling_steps", 200)),
@@ -103,10 +206,13 @@ def _shard_dock_yaml(conf, shard_smi: Path, shard_workdir: Path) -> dict:
         ],
     }
     for key in ("receptor_pdb", "diffdock_command", "diffdock_inference_steps",
-                "diffdock_model_dir", "diffdock_config", "boltz_command", "chai_command"):
+                "diffdock_model_dir", "diffdock_config", "boltz_command", "chai_command",
+                "diffdock_python", "diffdock_dir", "diffdock_samples", "diffdock_batch_size"):
         value = getattr(conf, key, None)
         if value:
             cfg[key] = value
+    if engine == "diffdock":
+        cfg["diffdock_dedupe_esm"] = bool(getattr(conf, "diffdock_dedupe_esm", True))
     pocket = getattr(conf, "pocket", None)
     if pocket:
         cfg["pocket"] = {
@@ -115,6 +221,12 @@ def _shard_dock_yaml(conf, shard_smi: Path, shard_workdir: Path) -> dict:
                          for c in (getattr(pocket, "contacts", []) or [])],
         }
     return cfg
+
+
+def _slurm_ntasks(slurm) -> str:
+    """Multi-GPU shard: one SLURM task per GPU (Lightning DDP is launched via srun)."""
+    g = int(getattr(slurm, "gpus_per_task", 1))
+    return f"#SBATCH --ntasks-per-node={g}\n" if g > 1 else ""
 
 
 def _slurm_gres(slurm) -> str:
@@ -144,6 +256,12 @@ def stage(config_path) -> int:
     workdir = Path(conf.workdir).expanduser().resolve()
     shard_dir = workdir / "shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
+    # Keep a copy of the exact config next to the results (reproducibility).
+    if config_path.parent != workdir:
+        try:
+            shutil.copy2(config_path, workdir / "screen_config.yaml")
+        except (OSError, shutil.SameFileError):
+            pass
 
     ligands = combine_ligands(conf)
     if not ligands:
@@ -162,7 +280,10 @@ def stage(config_path) -> int:
         import yaml
 
         (shard_dir / f"shard_{tag}.yaml").write_text(
-            yaml.safe_dump(_shard_dock_yaml(conf, smi, shard_work), sort_keys=False),
+            yaml.safe_dump(
+                _shard_dock_yaml(conf, smi, shard_work, workdir / "poses",
+                                 workdir / "results" / f"shard_{tag}.csv"),
+                sort_keys=False),
             encoding="utf-8",
         )
 
@@ -179,6 +300,7 @@ def stage(config_path) -> int:
         f"#SBATCH --array=0-{n - 1}\n"
         f"#SBATCH --nodes={int(slurm.nodes)}\n"
         f"#SBATCH --cpus-per-task={int(slurm.cpus_per_task)}\n"
+        f"{_slurm_ntasks(slurm)}"
         f"{_slurm_gres(slurm)}"
         f"#SBATCH --mem={slurm.mem}\n"
         f"#SBATCH --time={slurm.time}\n"
@@ -191,11 +313,15 @@ def stage(config_path) -> int:
     )
     array_sh.chmod(array_sh.stat().st_mode | 0o100)
 
+    rp = str(getattr(slurm, "rank_partition", "") or "").strip()
+    rank_partition = f"#SBATCH --partition={rp}\n" if rp else ""
     rank_sh = workdir / "rank.sh"
     rank_sh.write_text(
         "#!/bin/bash\n"
         "#SBATCH --job-name=screen_rank\n"
-        f"#SBATCH --partition={slurm.partition}\n"
+        # Ranking is CPU-only: never use the GPU partition (clusters reject a gpu
+        # partition request with no GPU). Use rank_partition, else the cluster default.
+        f"{rank_partition}"
         f"{account}"
         "#SBATCH --nodes=1\n"
         "#SBATCH --cpus-per-task=2\n"
@@ -223,6 +349,12 @@ def stage(config_path) -> int:
     )
     submit_sh.chmod(submit_sh.stat().st_mode | 0o100)
 
+    if str(conf.engine) == "diffdock":
+        from alchemfold.engines.diffdock import preflight
+
+        for w in preflight(conf):
+            print(f"WARNING (before you submit): {w}")
+    print(f"Job folder: {workdir}")
     print(f"Staged {len(ligands)} ligand(s) into {n} shard(s) under {shard_dir}")
     print(f"Submit the screen (array + ranking) with:\n    bash {submit_sh}")
     return 0
@@ -263,6 +395,11 @@ def _scrape_json_scores(ligand_dir: Path) -> dict[str, float]:
 
 def _pick_metric(conf, scores: dict[str, float], diffdock_conf: float | None):
     requested = str(getattr(conf.ranking, "metric", "auto"))
+    # Friendly aliases -> the real score names written by Boltz/Chai.
+    requested = {"affinity": "affinity_pred_value", "binder": "affinity_probability_binary",
+                 "confidence": "confidence_score" if scores and "confidence_score" in scores
+                 else "confidence", "plddt": "complex_plddt" if scores and "complex_plddt" in scores
+                 else "plddt"}.get(requested, requested)
     if requested != "auto":
         if requested == "confidence" and diffdock_conf is not None and not scores:
             return "confidence", diffdock_conf
@@ -279,11 +416,100 @@ def _pick_metric(conf, scores: dict[str, float], diffdock_conf: float | None):
     return "none", None
 
 
+def _rank_batched(conf, workdir: Path) -> int | None:
+    """Merge per-shard results CSVs (batched Boltz). Returns None if none exist."""
+    import csv as _csv
+
+    files = sorted((workdir / "results").glob("shard_*.csv"))
+    if not files:
+        return None
+    rows: list[dict] = []
+    failed = 0
+    for f in files:
+        with f.open(newline="", encoding="utf-8") as fh:
+            for r in _csv.DictReader(fh):
+                if r.get("status") != "ok":
+                    failed += 1
+                    continue
+                scores = {}
+                for k, v in r.items():
+                    if k in _SCORE_DIRECTION and v not in ("", None):
+                        scores[k] = float(v)
+                metric, value = _pick_metric(conf, scores, None)
+                if value is None:
+                    continue
+                r.update(metric=metric, score=value, shard=f.stem)
+                rows.append(r)
+    if not rows:
+        print("No scored predictions found to rank.", file=sys.stderr)
+        return 1
+    order = str(getattr(conf.ranking, "order", "auto"))
+    metric_name = rows[0]["metric"]
+    descending = _SCORE_DIRECTION.get(metric_name, True) if order == "auto" else (order == "desc")
+    rows.sort(key=lambda r: r["score"], reverse=descending)
+    out_csv = workdir / str(getattr(conf.ranking, "output", "ranking.csv"))
+    cols = ["rank", "ligand_id", "smiles", "metric", "score",
+            *[c for c in rows[0] if c in _SCORE_DIRECTION or c in (
+                "ligand_iptm", "protein_iptm", "complex_plddt", "complex_iplddt")], "pose", "trajectory"]
+    with out_csv.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=list(dict.fromkeys(cols)), extrasaction="ignore")
+        w.writeheader()
+        for i, r in enumerate(rows, start=1):
+            w.writerow({**r, "rank": i})
+    print(f"Ranked {len(rows)} ligand(s) by '{metric_name}' "
+          f"({'desc' if descending else 'asc'}); {failed} failed/unscored.")
+    print(f"All results: {out_csv}\nAll poses:   {workdir / 'poses'}")
+    return 0
+
+
+def cleanup(config_path, *, force: bool = False) -> int:
+    """Delete intermediate files (split library + per-shard work folders).
+
+    Keeps poses/, results/, ranking.csv, screen.yaml and the submit scripts. Unless
+    ``force``, it only cleans when every staged ligand has a result row and none
+    failed (a failed run keeps ``shards/`` so it can be re-run).
+    """
+    import csv as _csv
+
+    conf = load_config(config_path)
+    workdir = Path(conf.workdir).expanduser().resolve()
+    shard_dir = workdir / "shards"
+    if not shard_dir.is_dir():
+        print("Nothing to clean (no shards/ folder).")
+        return 0
+    if not force:
+        staged = 0
+        for f in shard_dir.glob("shard_*.smi"):
+            staged += sum(1 for line in f.read_text(encoding="utf-8").splitlines() if line.strip())
+        done = failed = 0
+        for f in (workdir / "results").glob("shard_*.csv"):
+            with f.open(newline="", encoding="utf-8") as fh:
+                for r in _csv.DictReader(fh):
+                    done += 1
+                    failed += r.get("status") != "ok"
+        if done < staged or failed:
+            print(f"Keeping intermediate files: {done}/{staged} ligand(s) have results, "
+                  f"{failed} failed (re-run the array to resume, then rank again; "
+                  "or `screen clean --force`).")
+            return 0
+    size = sum(p.stat().st_size for p in shard_dir.rglob("*") if p.is_file())
+    shutil.rmtree(shard_dir, ignore_errors=True)
+    print(f"Removed intermediate files: {shard_dir} ({size / 1e6:.1f} MB). "
+          "Kept poses/, results/, ranking.csv, screen.yaml.")
+    return 0
+
+
 def rank(config_path) -> int:
     conf = load_config(config_path)
     validate_config(conf)
     workdir = Path(conf.workdir).expanduser().resolve()
     shard_dir = workdir / "shards"
+
+    batched = _rank_batched(conf, workdir)
+    if batched is not None:
+        if batched == 0 and bool(getattr(conf, "cleanup", True)):
+            cleanup(config_path)
+        return batched
 
     rows: list[dict] = []
     for ligands_root in shard_dir.glob("work_*/ligands"):

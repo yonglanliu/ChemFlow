@@ -24,6 +24,7 @@ Step-by-step guides live in <a href="https://github.com/yonglanliu/ChemFlow/blob
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/HPC_GUIDE.md">Running on HPC</a> — free-energy, PyRosetta and REINVENT4 workflows on a SLURM GPU cluster.
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/MEMBRANE_PREP.md">Membrane system prep for OpenFE</a> — fix a Maestro/Desmond membrane PDB for `ProteinMembraneComponent`.
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/OPENFE_MEMBRANE_INPUT.md">Membrane input (sol.cif) for OpenFE RBFE</a> — save an equilibrated membrane as a wrapped mmCIF; fixes the step-0 NaN crash.
+- <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/MEMBRANE_WRAP_PBC.md">Wrapping a membrane with <code>alchemforge wrap-pbc</code></a> — read the chorus box from Schrödinger, then rotate/wrap/center in one command; fixes the step-0 NaN crash.
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/3D_VIEWER.md">Configuring the 3D viewer</a> — vendor 3Dmol.js for offline use, enable WebGL on headless HPC nodes, and read the affinity/pIC50 scores.
 - <a href="https://github.com/yonglanliu/ChemFlow/blob/main/tutorials/ACTIVE_LEARNING_SCREENING.md">Active learning virtual screening</a> — screen an ultra-large library with a Chemprop surrogate + Glide/VSW/Vina oracle (`chemflow active-learn`).
 
@@ -65,13 +66,16 @@ chemflow-desktop
 - Ligand-based virtual screening via similarity search
 - Model training (Chemprop v2, Graphormer, KERMET, CheMeleon, ChemBERTa, GPT, and LSMT)
 
-### AI docking & virtual screening (Boltz-2 / Chai-1)
-
-Co-fold a receptor with a ligand (or screen a library on a SLURM array), then view
-the predicted binding pose and its affinity / confidence scores in the desktop.
+### AI docking & virtual screening (Boltz-2 / Chai-1 / DiffDock-L)
 
 <p align="center">
   <img src="assets/images/alchemfold-docking.png" alt="AlchemFold docking — predicted complex with binding-pose viewer and confidence scores" width="900">
+</p>
+
+**DiffDock-L** is a fast blind-docking engine. Here is an example of docking trajectory
+
+<p align="center">
+  <img src="assets/movie/diffdock_docking.gif" alt="DiffDock-L reverse diffusion: the ligand starts at a random position and is denoised into the binding pocket" width="460">
 </p>
 
 ---

@@ -84,6 +84,26 @@ oracle_command: ""
 #     command: "boltz2_screen.sh {batch} {receptor} {out}"
 # primary_metric: glide_score     # which metric drives acquisition / top hits
 
+# --- DiffDock pose GATE (between "select the batch" and "run the oracle") — OPTIONAL
+# DiffDock-L (own env: `chemflow diffdock-env install`) docks the WHOLE selected batch
+# cheaply; only compounds with a high pose confidence (+ a small random audit sample of
+# the rest) go to the expensive oracle(s). Low-confidence compounds are "NOT EVALUATED"
+# (not confirmed non-binders) and are never re-acquired. The DiffDock confidence of EVERY
+# compound is saved as the labels.csv column `diffdock_confidence` (an extra multitask
+# target); the oracle columns are simply empty for gated-out compounds.
+# TIP: check the gate first on known actives/decoys of your target (is the confidence
+# informative?) and read the "gate check / gate audit" lines printed after each round.
+gate: ""                         # "" = off | diffdock
+# gate_receptor: "/path/to/receptor.pdb"   # receptor structure (PDB) DiffDock docks into
+# gate_pass_fraction: 0.3        # keep the top 30% of each batch by confidence ...
+# gate_threshold: null           # ... or an absolute confidence cutoff (overrides the fraction)
+# gate_audit_fraction: 0.03      # random 3% of the REJECTED still go to the oracle (measures recall)
+# gate_samples: 10               # DiffDock poses per compound
+# gate_steps: 20                 # DiffDock denoising (reverse-diffusion) steps — fewer = faster
+# gate_seed: true                # also gate the round-0 seed batch
+# gate_modules: []               # `module load` before the gate command, if needed
+# gate_command: "chemflow alchemfold dock-batch --ligands {batch} --receptor {receptor} --out {out} --workdir {workdir} --samples {samples} --steps {steps}"
+
 # --- Surrogate: train + predict (ChemFlow) ---------------------------------
 # train: ChemFlow's chemprop trainer takes a config.toml positionally:
 #        `chemflow train chemprop config.toml`. {config} = train_config below.

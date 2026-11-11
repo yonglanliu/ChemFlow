@@ -18,6 +18,7 @@ Import-light (no engine/model needed): used for generate/stage/rank wiring.
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,22 +27,72 @@ from alchemfold.boltz_config import _deep_merge, _load_yaml, _resolve, _to_names
 from alchemfold.dock_config import DEFAULTS as _DOCK_DEFAULTS
 
 # Source ligand catalogs the screen can target (DB build is handled elsewhere).
-SUPPORTED_LIBRARIES = ("zinc20", "enamine_real")
+# "custom" = use exactly the ligand_files you give (browse in the desktop).
+SUPPORTED_LIBRARIES = ("zinc20", "enamine_real", "custom")
+
+# Established on-disk catalogs under <ChemFlow root>/screen_db/ (same layout the
+# active-learning workflow uses).
+LIBRARY_GLOBS = {
+    "enamine_real": "screen_db/enamine_real/*.cxsmiles.bz2",
+    "zinc20": "screen_db/zinc20/*.smi",
+}
+# Compressed catalogs bigger than this are billions of ligands: refuse to load
+# them whole and require max_ligands (a sampled subset).
+CATALOG_SIZE_LIMIT = 500 * 1024 * 1024
+
+
+def _screen_db_roots() -> list[Path]:
+    import os
+
+    roots: list[Path] = []
+    env = os.environ.get("CHEMFLOW_SCREEN_DB", "").strip()
+    if env:
+        roots.append(Path(env).expanduser().parent)
+    here = Path(__file__).resolve()
+    roots += list(here.parents)
+    roots.append(Path.cwd())
+    roots += list(Path.cwd().parents)
+    return roots
+
+
+def find_library_files(library: str) -> list[str]:
+    """Resolve an established catalog name to its files under ``screen_db/``."""
+    pattern = LIBRARY_GLOBS.get(str(library))
+    if not pattern:
+        return []
+    for root in _screen_db_roots():
+        hits = sorted(root.glob(pattern))
+        if hits:
+            return [str(p) for p in hits]
+    return []
+
 
 # Screening defaults = docking defaults + screening-specific sections.
 DEFAULTS: dict[str, Any] = copy.deepcopy(_DOCK_DEFAULTS)
 DEFAULTS.update(
     {
         "screen_out": "screen_output",
-        # Source library catalog for the screen. Supported: "zinc20" | "enamine_real".
+        # Job name: ALL outputs (split library shards, SLURM scripts, poses, results,
+        # ranking) go to <workdir>/<jobname>/. Empty => directly into <workdir>.
+        "jobname": "",
+        # After ranking, delete intermediates (split library, shard work folders) when
+        # every ligand finished OK. Keeps poses/, results/, ranking.csv, screen.yaml.
+        "cleanup": True,
+        # Source library catalog for the screen: "zinc20" | "enamine_real" | "custom".
+        # With an empty ligand_files, the catalog's files are taken from screen_db/.
         "library": "zinc20",
         "ligand_files": [],        # list of library files; ligand_file also accepted
+        # Subset of a (huge) catalog to actually dock. 0 = all ligands.
+        "max_ligands": 0,
+        "sample": "random",        # random (reservoir; decompresses everything) | head (first N, instant)
+        "sample_seed": 1,
         # Sharding: set exactly one. n_shards splits into that many subsets;
         # shard_size caps ligands per shard. If neither is set, one shard.
         "n_shards": 0,
         "shard_size": 0,
         "slurm": {
             "partition": "gpu",
+            "rank_partition": "",   # CPU partition for the ranking job ("" = cluster default)
             "account": "",
             "nodes": 1,
             "gpus_per_task": 1,     # 0 => CPU-only tasks
@@ -77,19 +128,35 @@ def load_config(path: str | Path) -> SimpleNamespace:
     base_dir = config_path.parent
     workdir = getattr(conf, "workdir", ".")
     conf.workdir = os.getcwd() if (not workdir or str(workdir) == ".") else _resolve(base_dir, workdir)
+    jobname = str(getattr(conf, "jobname", "") or "").strip()
+    if jobname:
+        parent = config_path.parent
+        in_job_folder = parent.name == jobname and (
+            not workdir or str(workdir) == "." or Path(conf.workdir).resolve() == parent.parent)
+        # A config that already lives in <workdir>/<jobname>/ means that folder IS the
+        # job folder (don't nest <jobname>/<jobname>).
+        conf.workdir = str(parent if in_job_folder else Path(conf.workdir) / jobname)
 
-    for key in ("receptor_pdb", "diffdock_model_dir", "diffdock_config"):
+    for key in ("receptor_pdb", "diffdock_model_dir", "diffdock_config", "diffdock_dir"):
         value = getattr(conf, key, None)
         if value:
             setattr(conf, key, _resolve(base_dir, value))
 
-    # Normalize library inputs to an absolute list.
+    # Normalize library inputs to an absolute list (globs expanded).
+    import glob as _glob
+
     files: list[str] = []
     single = getattr(conf, "ligand_file", None)
-    if single:
-        files.append(_resolve(base_dir, single))
-    for item in getattr(conf, "ligand_files", []) or []:
-        files.append(_resolve(base_dir, item))
+    raw_items = ([single] if single else []) + list(getattr(conf, "ligand_files", []) or [])
+    for item in raw_items:
+        resolved = _resolve(base_dir, item)
+        if any(ch in str(resolved) for ch in "*?["):
+            files.extend(sorted(_glob.glob(str(resolved))))
+        else:
+            files.append(resolved)
+    if not files:
+        # Nothing browsed/listed: use the chosen established catalog (screen_db/).
+        files = find_library_files(str(getattr(conf, "library", "")))
     conf.ligand_files = files
     conf.ligand_file = None
 
@@ -112,15 +179,44 @@ def validate_config(conf: SimpleNamespace) -> None:
     if library not in SUPPORTED_LIBRARIES:
         raise ValueError(f"library must be one of {sorted(SUPPORTED_LIBRARIES)}")
 
-    if not (getattr(conf, "proteins", []) or []):
+    if engine == "diffdock":
+        rp = getattr(conf, "receptor_pdb", None)
+        if not rp or not Path(rp).is_file():
+            raise ValueError("engine: diffdock needs 'receptor_pdb' (an existing receptor "
+                             f"structure file; got {rp!r})")
+        slurm_ = getattr(conf, "slurm", None)
+        if slurm_ is not None and int(getattr(slurm_, "gpus_per_task", 1)) > 1:
+            raise ValueError("DiffDock uses 1 GPU per shard — set slurm.gpus_per_task: 1 and "
+                             "use more shards (n_shards) for parallelism")
+    elif not (getattr(conf, "proteins", []) or []):
         raise ValueError("screening requires at least one receptor (protein) chain")
 
     files = getattr(conf, "ligand_files", []) or []
     if not files:
-        raise ValueError("screening requires 'ligand_files' (or 'ligand_file')")
+        lib = str(getattr(conf, "library", ""))
+        hint = (f" (no files found for library '{lib}' under screen_db/; set "
+                "CHEMFLOW_SCREEN_DB or list ligand_files)") if lib in LIBRARY_GLOBS else ""
+        raise ValueError("screening requires 'ligand_files' (or 'ligand_file')" + hint)
     for path in files:
         if not Path(path).is_file():
             raise ValueError(f"ligand library file not found: {path}")
+
+    if bool(getattr(conf, "predict_affinity", False)) and engine != "boltz":
+        raise ValueError("predict_affinity is only available with engine: boltz (Boltz-2)")
+    jobname = str(getattr(conf, "jobname", "") or "").strip()
+    if jobname and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", jobname):
+        raise ValueError("jobname may contain only letters, digits, '.', '_' and '-' "
+                         f"(got {jobname!r})")
+    if int(getattr(conf, "max_ligands", 0) or 0) < 0:
+        raise ValueError("max_ligands must be >= 0")
+    if str(getattr(conf, "sample", "random")) not in {"random", "head"}:
+        raise ValueError("sample must be random | head")
+    total = sum(Path(p).stat().st_size for p in files)
+    if total > CATALOG_SIZE_LIMIT and int(getattr(conf, "max_ligands", 0) or 0) < 1:
+        raise ValueError(
+            f"the selected library files total {total / 1e9:.1f} GB (billions of ligands) — "
+            "set max_ligands (e.g. 10000) to dock a sampled subset, or use "
+            "`chemflow active-learn` to screen the full catalog")
 
     if int(getattr(conf, "n_shards", 0)) < 0 or int(getattr(conf, "shard_size", 0)) < 0:
         raise ValueError("n_shards and shard_size must be >= 0")
@@ -165,10 +261,60 @@ def default_yaml_text(
     protein_id: str = "A",
     sequence: str = "PUT_YOUR_PROTEIN_SEQUENCE_HERE",
     proteins: list | None = None,
+    ligand_files: list | None = None,
+    max_ligands: int = 0,
+    sample: str = "random",
+    n_shards: int = 0,
+    shard_size: int = 1000,
+    slurm: dict | None = None,
+    jobname: str = "",
+    cleanup: bool = True,
+    predict_affinity: bool = False,
+    rank_metric: str = "auto",
+    receptor_pdb: str | None = None,
+    diffdock_samples: int = 10,
+    diffdock_steps: int = 20,
+    diffdock_trajectory: bool = False,
+    diffdock_batch_size: int | None = None,
 ) -> str:
     """Return a commented example screening config."""
+    sl = {"partition": "gpu", "account": "", "nodes": 1, "gpus_per_task": 1,
+          "gpu_type": "", "cpus_per_task": 8, "mem": "32G", "time": "24:00:00",
+          "conda_env": "alchemfold"}
+    sl.update({k: v for k, v in (slurm or {}).items() if v is not None})
+    if ligand_files:
+        files_block = "ligand_files:                   # browsed / listed library files\n" + "".join(
+            f'  - "{f}"\n' for f in ligand_files)
+    elif library in LIBRARY_GLOBS:
+        files_block = (
+            "# ligand_files left empty => the '" + library + "' catalog under screen_db/ is used\n"
+            "# (" + LIBRARY_GLOBS[library] + "). List files (globs ok) to override.\n"
+            "ligand_files: []\n")
+    else:
+        files_block = (
+            "ligand_files:                   # one or more libraries (CSV/.smi/.cxsmiles, .bz2/.gz)\n"
+            '  - "library_part1.cxsmiles.bz2"\n')
     from alchemfold.dock_config import _format_proteins_block
     proteins_block = _format_proteins_block(proteins or [(protein_id, sequence)])
+    if engine == "diffdock":
+        # DiffDock docks into a receptor STRUCTURE — no sequence needed.
+        proteins_block = (
+            f'receptor_pdb: "{receptor_pdb or "receptor.pdb"}"   # receptor structure all ligands are docked into\n'
+            f"diffdock_samples: {int(diffdock_samples)}                # poses per ligand; the best by confidence is kept\n"
+            f"diffdock_inference_steps: {int(diffdock_steps)}         # denoising (reverse-diffusion) steps\n"
+            + (f"diffdock_batch_size: {int(diffdock_batch_size)}              # GPU batch over one ligand's poses (default 10); raise only if poses > 10\n"
+               if diffdock_batch_size else
+               "# diffdock_batch_size: 10             # GPU batch over one ligand's poses (default 10); only helps when poses > batch\n")
+            + ("diffdock_trajectory: true             # also save each ligand's best-pose diffusion trajectory -> <job>/trajectories/<id>.pdb\n"
+               if diffdock_trajectory else
+               "# diffdock_trajectory: true           # save each ligand's best-pose diffusion trajectory (multi-frame PDB)\n") +
+            "# DiffDock-L runs from its OWN env (chemflow diffdock-env install); auto-detected, or set:\n"
+            '# diffdock_python: "/path/to/envs/diffdock/bin/python"\n'
+            '# diffdock_dir: "/path/to/DiffDock"\n'
+            "proteins:                       # unused by DiffDock (kept for config validation)\n"
+            f'  - id: "{protein_id}"\n'
+            '    sequence: ""\n'
+        )
     return (
         "# ===================================================================\n"
         "# AlchemFold virtual screening: dock a ligand library in parallel on HPC,\n"
@@ -178,8 +324,16 @@ def default_yaml_text(
         "# ===================================================================\n"
         "\n"
         f'engine: "{engine}"              # boltz | chai | diffdock\n'
-        f'library: "{library}"           # source catalog: zinc20 | enamine_real\n'
+        f'library: "{library}"           # source catalog: zinc20 | enamine_real | custom\n'
+        f'jobname: "{jobname}"            # all outputs go to <workdir>/<jobname>/ (shards, scripts, poses, results)\n'
+        f'cleanup: {"true" if cleanup else "false"}                  # after ranking, delete shards/ (split library, work folders) if all ligands finished\n'
         'screen_out: "screen_output"\n'
+        + (
+            "predict_affinity: true          # Boltz-2 binding affinity (adds a model pass per ligand; "
+            "affinity_binder is set per ligand automatically)\n"
+            if predict_affinity else
+            "predict_affinity: false         # Boltz-2 only; set true for affinity + binder probability\n"
+        ) +
         "use_msa_server: true\n"
         'accelerator: "gpu"\n'
         "diffusion_samples: 1\n"
@@ -188,27 +342,32 @@ def default_yaml_text(
         + proteins_block
         + "# receptor_pdb: receptor.pdb     # for engine: diffdock\n"
         "\n"
-        "ligand_files:                   # one or more libraries (CSV/.smi/.cxsmiles, .bz2/.gz)\n"
-        '  - "library_part1.cxsmiles.bz2"\n'
-        '  - "library_part2.cxsmiles.bz2"\n'
+        + files_block
+        + "\n"
+        "# Dock only a subset of a huge catalog (Enamine REAL is billions). 0 = all.\n"
+        f"max_ligands: {int(max_ligands)}\n"
+        f'sample: "{sample}"                # random (reservoir; slow on huge files) | head (first N)\n'
+        "sample_seed: 1\n"
         "\n"
         "# Split the combined library. Set n_shards OR shard_size (not both).\n"
-        "n_shards: 0                     # e.g. 100 array tasks\n"
-        "shard_size: 1000                # ligands per shard (used when n_shards: 0)\n"
+        "# n_shards = number of SLURM array tasks = GPUs running in parallel.\n"
+        f"n_shards: {int(n_shards)}                     # e.g. 20 GPUs\n"
+        f"shard_size: {int(shard_size)}                # ligands per shard (used when n_shards: 0)\n"
         "\n"
         "slurm:\n"
-        '  partition: "gpu"\n'
-        '  account: ""\n'
-        "  nodes: 1\n"
-        "  gpus_per_task: 1              # 0 => CPU-only tasks\n"
-        '  gpu_type: ""                  # e.g. a100 -> --gres=gpu:a100:1\n'
-        "  cpus_per_task: 8\n"
-        '  mem: "32G"\n'
-        '  time: "24:00:00"\n'
-        '  conda_env: "alchemfold"\n'
+        f'  partition: "{sl["partition"]}"\n'
+        f'  rank_partition: "{sl.get("rank_partition", "")}"      # CPU partition for the ranking job ("" = cluster default, e.g. norm)\n'
+        f'  account: "{sl["account"]}"\n'
+        f'  nodes: {int(sl["nodes"])}\n'
+        f'  gpus_per_task: {int(sl["gpus_per_task"])}              # per shard; >1 => Boltz DDP; 0 => CPU-only\n'
+        f'  gpu_type: "{sl["gpu_type"]}"                  # e.g. a100 -> --gres=gpu:a100:N\n'
+        f'  cpus_per_task: {int(sl["cpus_per_task"])}\n'
+        f'  mem: "{sl["mem"]}"\n'
+        f'  time: "{sl["time"]}"\n'
+        f'  conda_env: "{sl["conda_env"]}"\n'
         "\n"
         "ranking:\n"
-        '  metric: "auto"                # auto | confidence | affinity | ptm | iptm | plddt\n'
+        f'  metric: "{rank_metric}"                # auto | affinity_probability_binary | affinity_pred_value | confidence_score | confidence (DiffDock) | iptm | complex_plddt\n'
         "  top_k: 100\n"
         '  order: "auto"                 # auto | asc | desc\n'
         '  output: "ranking.csv"\n'

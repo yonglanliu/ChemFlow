@@ -34,6 +34,21 @@ class _EnvSpec:
     recreate: bool = False      # offer a recreate option
     status_env: bool = True     # does `status` accept --env?
     extra: list[tuple[str, str]] = field(default_factory=list)  # (flag, label) toggles
+    cuda_default: str = "12.6"  # prefilled CUDA version for the GPU option
+    path_flag: str = ""         # optional folder option, e.g. "--dir"
+    path_label: str = ""
+    path_default: str = ""
+    warmup: bool = False        # offer a "Warm-up" button (`<key> warmup`)
+
+
+def _default_diffdock_dir() -> str:
+    """<ChemFlow root>/DiffDock — a sibling of src/ (like REINVENT4/), not in HOME."""
+    from pathlib import Path
+
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "env" / "environment-diffdock.yaml").is_file():
+            return str(parent / "DiffDock")
+    return "~/DiffDock"
 
 
 ENVIRONMENTS = [
@@ -47,6 +62,17 @@ ENVIRONMENTS = [
         "Co-folding / docking structure prediction (Boltz-2 and Chai-1). Pulls a Torch "
         "stack; set GPU for a CUDA build.",
         default_env="alchemfold", gpu=True, recreate=True),
+    _EnvSpec(
+        "diffdock-env", "DiffDock-L — blind docking (own env)",
+        "DiffDock-L (gcorso/DiffDock) in its OWN env, separate from AlchemFold: creates the conda "
+        "env from env/environment-diffdock.yaml and clones the repo. After installing, run "
+        "Warm-up ONCE on a node with internet (downloads the DiffDock-L models + ESM2 weights). "
+        "Then pick engine 'diffdock' on the AI docking & screening page. GPU wheels are CUDA "
+        "12.1 by default (A100/L40/H200); tick GPU to choose 11.8 / 12.1 / 12.4.",
+        default_env="diffdock", gpu=True, recreate=True, cuda_default="12.1",
+        path_flag="--dir", path_label="DiffDock folder:", path_default=_default_diffdock_dir(),
+        extra=[("--profile repo", "Use DiffDock's own environment.yml (older torch)")],
+        warmup=True),
     _EnvSpec(
         "rosetta-env", "Rosetta — PROTAC docking",
         "Classic Rosetta C++ apps (rosetta_scripts, docking_protocol, molfile_to_params) "
@@ -101,7 +127,7 @@ class EnvironmentsPage(QWidget):
         if spec.gpu:
             gpu = QCheckBox("GPU (CUDA)")
             row.addWidget(gpu)
-            cuda = QLineEdit("12.6")
+            cuda = QLineEdit(spec.cuda_default)
             cuda.setMaximumWidth(70)
             row.addWidget(QLabel("CUDA:"))
             row.addWidget(cuda)
@@ -118,6 +144,15 @@ class EnvironmentsPage(QWidget):
         row.addStretch()
         card.body.addLayout(row)
 
+        if spec.path_flag:
+            prow = QHBoxLayout()
+            prow.addWidget(QLabel(spec.path_label))
+            path = QLineEdit(spec.path_default)
+            path.setToolTip("Where the code is cloned (put it on a disk with room — /data, not HOME quota).")
+            prow.addWidget(path, 1)
+            state["path"] = path
+            card.body.addLayout(prow)
+
         buttons = QHBoxLayout()
         install = action_button("Install")
         install.clicked.connect(lambda _=False, s=spec, st=state: self._run(s, st, dry=False))
@@ -128,6 +163,12 @@ class EnvironmentsPage(QWidget):
         buttons.addWidget(install)
         buttons.addWidget(preview)
         buttons.addWidget(check)
+        if spec.warmup:
+            warm = action_button("Warm-up")
+            warm.setToolTip("First run: download the models/weights and build lookup tables. "
+                            "Needs internet — run on a login/data node.")
+            warm.clicked.connect(lambda _=False, s=spec, st=state: self._warmup(s, st))
+            buttons.addWidget(warm)
         buttons.addStretch()
         card.body.addLayout(buttons)
         return card
@@ -140,7 +181,9 @@ class EnvironmentsPage(QWidget):
             argv.append("--recreate")
         for flag, box in state.get("extra", []):
             if box.isChecked():
-                argv.append(flag)
+                argv.extend(flag.split())
+        if spec.path_flag and state.get("path") is not None and state["path"].text().strip():
+            argv += [spec.path_flag, state["path"].text().strip()]
         if dry:
             argv.append("--dry-run")
         return argv
@@ -155,4 +198,14 @@ class EnvironmentsPage(QWidget):
         argv = [spec.key, "status"]
         if spec.status_env:
             argv += ["--env", state["env"].text().strip() or spec.default_env]
+        if spec.path_flag and state.get("path") is not None and state["path"].text().strip():
+            argv += [spec.path_flag, state["path"].text().strip()]
+        self._console.run(argv)
+
+    def _warmup(self, spec: _EnvSpec, state: dict) -> None:
+        if self._console is None:
+            return
+        argv = [spec.key, "warmup", "--env", state["env"].text().strip() or spec.default_env]
+        if spec.path_flag and state.get("path") is not None and state["path"].text().strip():
+            argv += [spec.path_flag, state["path"].text().strip()]
         self._console.run(argv)

@@ -1,4 +1,4 @@
-"""AI docking & virtual screening (Boltz-2 / Chai-1) via the ``alchemfold`` CLI.
+"""AI docking & virtual screening (Boltz-2 / Chai-1 / DiffDock-L) via the ``alchemfold`` CLI.
 
 Two modes on one page:
 
@@ -17,19 +17,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QScrollArea,
+    QSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from chemflow.desktop import pose_scene
 from chemflow.desktop.widgets.forms import (
     NoScrollComboBox,
     NoScrollSpinBox,
@@ -53,7 +58,7 @@ _BUILTIN_PRESETS = {
     "docking-long": "1-00:00:00",
     "docking-xlong": "2-00:00:00",
 }
-_BUILTIN_GPUS = ["", "a100", "v100x", "p100", "v100", "l40"]
+_BUILTIN_GPUS = ["", "a100", "v100x", "p100", "v100", "l40", "gpuh200"]
 _BUILTIN_DEFAULT_PRESET = "docking-standard"
 
 
@@ -122,6 +127,20 @@ def _hpc_settings() -> tuple[list[str], list[str], str]:
     return list(_BUILTIN_PRESETS.keys()), list(_BUILTIN_GPUS), _BUILTIN_DEFAULT_PRESET
 
 
+def _screening_hpc_settings() -> tuple[list[str], list[str], str]:
+    """Return (preset_names, gpu_types, default_preset) for AlchemFold screening."""
+    try:
+        from alchemfold import hpc_config
+
+        names = list(hpc_config.presets("screening").keys())
+        if names:
+            return (names, list(hpc_config.gpu_types("screening")),
+                    hpc_config.default_preset("screening"))
+    except Exception:
+        pass
+    return ["screen-1gpu-x20"], list(_BUILTIN_GPUS), "screen-1gpu-x20"
+
+
 def _default_cache_dir() -> str:
     """A non-HOME default for the model-cache field (/data or scratch)."""
     import getpass
@@ -144,7 +163,7 @@ def _default_cache_dir() -> str:
 
 
 class CofoldScreeningPage(QWidget):
-    """Docking and virtual screening with an AI co-folding engine (Boltz-2 / Chai-1)."""
+    """Docking and virtual screening with an AI engine (Boltz-2 / Chai-1 / DiffDock-L)."""
 
     def __init__(self, console=None, parent=None):
         super().__init__(parent)
@@ -163,11 +182,12 @@ class CofoldScreeningPage(QWidget):
         layout.setContentsMargins(34, 28, 34, 34)
         layout.setSpacing(14)
         layout.addWidget(PageHeader(
-            "AI docking & screening", "Docking & virtual screening (Boltz-2 / Chai-1)",
-            "Dock a single ligand, or screen a whole library on a SLURM array, with an "
-            "AI structure-prediction engine; view the predicted binding pose below. "
-            "Runs through the 'alchemfold' environment (install it from the Working "
-            "environment page)."))
+            "AI docking & screening", "Docking & virtual screening (Boltz-2 / Chai-1 / DiffDock-L)",
+            "Dock a single ligand, or screen a whole library on a SLURM array, with an AI "
+            "engine: Boltz-2 / Chai-1 (co-folding from a sequence) or DiffDock-L (fast blind "
+            "docking into a receptor PDB). View the predicted binding pose below. Boltz / Chai "
+            "run in the 'alchemfold' environment and DiffDock-L in its own 'diffdock' "
+            "environment — install them from the Environments page."))
 
         # Two columns: form controls on the left, binding-pose viewer on the right,
         # so the page uses the width instead of growing very tall.
@@ -183,42 +203,78 @@ class CofoldScreeningPage(QWidget):
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(10)
         right_w.setMinimumWidth(420)
-        cols.addWidget(left_w, 3)
+        cols.addWidget(left_w, 5)
         cols.addWidget(right_w, 4)
         layout.addLayout(cols, 1)
 
-        # --- Mode + engine + config -------------------------------------
+        # --- Mode + engine, then config on its own row -------------------
         row = QHBoxLayout()
+        row.setSpacing(10)
         row.addWidget(QLabel("Mode:"))
         self.mode = NoScrollComboBox()
         self.mode.addItems([_MODE_DOCK, _MODE_SCREEN])
         self.mode.setToolTip("Docking: one ligand. Virtual screening: a sharded library.")
-        row.addWidget(self.mode)
+        row.addWidget(self.mode, 1)
         row.addWidget(QLabel("Engine:"))
         self.engine = NoScrollComboBox()
-        self.engine.addItems(["boltz", "chai"])
-        self.engine.setToolTip("Co-folding / docking model: Boltz-2 or Chai-1.")
+        self.engine.addItems(["boltz", "chai", "diffdock"])
+        self.engine.setToolTip(
+            "Boltz-2 / Chai-1: co-folding from sequence (slower, Boltz-2 can predict affinity). "
+            "DiffDock-L: fast blind docking into a receptor PDB (own env — install it on the "
+            "Environments page; gives a pose confidence, no affinity).")
+        self.engine.setMinimumWidth(90)
         row.addWidget(self.engine)
-        row.addWidget(QLabel("Config:"))
-        self.config = PathField("screen.yaml / docking.yaml",
-                                mode="save", save_filter="YAML (*.yaml *.yml)")
-        self.config.setText("docking.yaml")
-        row.addWidget(self.config, 1)
         left.addLayout(row)
 
+        # Docking: pick the config file. Screening: pick a base working directory; the
+        # config is generated INSIDE the job folder: <workdir>/<job name>/screen.yaml.
+        self._cfg_box = QWidget()
+        cfg_row = QHBoxLayout(self._cfg_box)
+        cfg_row.setContentsMargins(0, 0, 0, 0)
+        cfg_row.addWidget(QLabel("Config:"))
+        self.config = PathField("docking.yaml",
+                                mode="save", save_filter="YAML (*.yaml *.yml)")
+        self.config.setText("docking.yaml")
+        cfg_row.addWidget(self.config, 1)
+        left.addWidget(self._cfg_box)
+
+        self._workdir_box = QWidget()
+        wd_col = QVBoxLayout(self._workdir_box)
+        wd_col.setContentsMargins(0, 0, 0, 0)
+        wd_col.setSpacing(3)
+        wd_row = QHBoxLayout()
+        wd_row.addWidget(QLabel("Working dir:"))
+        self.workdir_field = PathField(
+            "base folder — the job folder <working dir>/<job name>/ is created inside it",
+            mode="directory")
+        self.workdir_field.setText(str(Path.cwd()))
+        wd_row.addWidget(self.workdir_field, 1)
+        wd_col.addLayout(wd_row)
+        self._cfg_hint = QLabel()
+        self._cfg_hint.setObjectName("Muted")
+        self._cfg_hint.setWordWrap(True)
+        wd_col.addWidget(self._cfg_hint)
+        left.addWidget(self._workdir_box)
+
         # Job name → output directory: predictions land in <workdir>/<jobname>/.
-        job_row = QHBoxLayout()
+        # Docking: predictions in <workdir>/<jobname>/. Screening: EVERYTHING (split
+        # library shards, SLURM scripts, poses, results, ranking) in <workdir>/<jobname>/.
+        self._job_box = QWidget()
+        job_row = QHBoxLayout(self._job_box)
+        job_row.setContentsMargins(0, 0, 0, 0)
         job_row.addWidget(QLabel("Job name:"))
-        self.jobname = QLineEdit("docking_output")
-        self.jobname.setPlaceholderText("output directory name, e.g. trpv1_cap1")
+        self.jobname = QLineEdit("dock_run")
+        self.jobname.setPlaceholderText("job name, e.g. trpv1_cap1")
         self.jobname.setToolTip(
-            "All predictions for this run are written to <working dir>/<job name>/. "
-            "Use a distinct name per target/ligand so runs don't overwrite each other.")
+            "EVERYTHING for this run is written to <working dir>/<job name>/: the config, engine "
+            "inputs, SLURM scripts, logs and predictions (for a screen also the split library "
+            "shards, poses/, results and ranking.csv). Use a distinct name per run.")
         job_row.addWidget(self.jobname, 1)
-        left.addLayout(job_row)
+        left.addWidget(self._job_box)
 
         # --- Receptor sequence (shared) ---------------------------------
-        left.addWidget(QLabel("Receptor sequence (pre-filled into the generated config):"))
+        self._seq_label = QLabel("Receptor sequence (pre-filled into the generated config):")
+        left.addWidget(self._seq_label)
         self.sequence = QPlainTextEdit()
         self.sequence.setPlaceholderText(
             "MKT… (one-letter sequence). For multiple chains, paste FASTA (>chainA … "
@@ -226,7 +282,8 @@ class CofoldScreeningPage(QWidget):
         self.sequence.setFixedHeight(70)
         left.addWidget(self.sequence)
         seqfile_row = QHBoxLayout()
-        seqfile_row.addWidget(QLabel("…or sequence file:"))
+        self._seqfile_label = QLabel("…or sequence file:")
+        seqfile_row.addWidget(self._seqfile_label)
         self.sequence_file = PathField(
             "FASTA / .fa / .fasta (optional; overrides the box — each record is a chain A, B, …)",
             mode="file")
@@ -235,6 +292,21 @@ class CofoldScreeningPage(QWidget):
             "separate protein chains (A, B, C, …) for multi-chain / complex prediction.")
         seqfile_row.addWidget(self.sequence_file, 1)
         left.addLayout(seqfile_row)
+
+        # --- DiffDock receptor structure (engine: diffdock) --------------
+        self._receptor_box = QWidget()
+        rec_row = QHBoxLayout(self._receptor_box)
+        rec_row.setContentsMargins(0, 0, 0, 0)
+        rec_row.addWidget(QLabel("Receptor PDB:"))
+        self.receptor_pdb = PathField(
+            "receptor structure (.pdb) — DiffDock docks every ligand into this one structure",
+            mode="file")
+        rec_row.addWidget(self.receptor_pdb, 1)
+        left.addWidget(self._receptor_box)
+        self._dd_status = QLabel()
+        self._dd_status.setObjectName("Muted")
+        self._dd_status.setWordWrap(True)
+        left.addWidget(self._dd_status)
 
         # --- Docking-only inputs ----------------------------------------
         self._dock_box = QWidget()
@@ -290,7 +362,9 @@ class CofoldScreeningPage(QWidget):
         self.use_pocket.toggled.connect(self._pocket_box.setVisible)
 
         # Engine parameters (Boltz-2 / Chai-1).
-        param_row = QHBoxLayout()
+        self._param_box = QWidget()   # Boltz / Chai: poses, recycles, sampling steps
+        param_row = QHBoxLayout(self._param_box)
+        param_row.setContentsMargins(0, 0, 0, 0)
         param_row.addWidget(QLabel("Poses:"))
         self.diffusion_samples = NoScrollSpinBox()
         self.diffusion_samples.setRange(1, 100)
@@ -298,14 +372,16 @@ class CofoldScreeningPage(QWidget):
         self.diffusion_samples.setToolTip("diffusion_samples (Chai: --num-diffn-samples)")
         self.diffusion_samples.setMinimumWidth(70)
         param_row.addWidget(self.diffusion_samples)
-        param_row.addWidget(QLabel("Recycles:"))
+        self._lbl_recycles = QLabel("Recycles:")
+        param_row.addWidget(self._lbl_recycles)
         self.recycling_steps = NoScrollSpinBox()
         self.recycling_steps.setRange(1, 50)
         self.recycling_steps.setValue(3)
         self.recycling_steps.setToolTip("recycling_steps (Chai: --num-trunk-recycles)")
         self.recycling_steps.setMinimumWidth(70)
         param_row.addWidget(self.recycling_steps)
-        param_row.addWidget(QLabel("Sampling:"))
+        self._lbl_sampling = QLabel("Sampling:")
+        param_row.addWidget(self._lbl_sampling)
         self.sampling_steps = NoScrollSpinBox()
         self.sampling_steps.setRange(1, 2000)
         self.sampling_steps.setValue(200)
@@ -313,10 +389,50 @@ class CofoldScreeningPage(QWidget):
         self.sampling_steps.setMinimumWidth(80)
         param_row.addWidget(self.sampling_steps)
         param_row.addStretch()
-        dock_layout.addLayout(param_row)
+        dock_layout.addWidget(self._param_box)
+
+        # DiffDock-L parameters (shown only for engine diffdock).
+        self._dd_params_box = QWidget()
+        ddp = QHBoxLayout(self._dd_params_box)
+        ddp.setContentsMargins(0, 0, 0, 0)
+        ddp.addWidget(QLabel("DiffDock poses per ligand:"))
+        self.dd_poses = NoScrollSpinBox()
+        self.dd_poses.setRange(1, 100)
+        self.dd_poses.setValue(10)
+        self.dd_poses.setMinimumWidth(70)
+        self.dd_poses.setToolTip(
+            "Poses DiffDock samples for the ligand; the best by confidence is kept (default 10). "
+            "More poses = slower but a better top pose.")
+        ddp.addWidget(self.dd_poses)
+        ddp.addWidget(QLabel("Denoising steps:"))
+        self.dd_steps = NoScrollSpinBox()
+        self.dd_steps.setRange(1, 200)
+        self.dd_steps.setValue(20)
+        self.dd_steps.setMinimumWidth(70)
+        self.dd_steps.setToolTip(
+            "Reverse-diffusion (denoising) steps per pose (default 20; DiffDock performs one fewer, "
+            "the last is noise-free). Fewer = faster, roughly linearly, with a small accuracy cost.")
+        ddp.addWidget(self.dd_steps)
+        ddp.addWidget(QLabel("Batch size:"))
+        self.dd_batch = NoScrollSpinBox()
+        self.dd_batch.setRange(1, 512)
+        self.dd_batch.setValue(10)
+        self.dd_batch.setMinimumWidth(70)
+        self.dd_batch.setToolTip("GPU batch over the poses of ONE ligand (DiffDock default 10). DiffDock always docks ligands one after another, so this does NOT speed up a library; it only matters when poses per ligand exceed it (e.g. 40 poses at batch 10 = 4 GPU passes; batch 40 = 1 pass, more GPU memory).")
+        ddp.addWidget(self.dd_batch)
+        self.dd_traj = QCheckBox("Save diffusion trajectory")
+        self.dd_traj.setToolTip(
+            "Also save how each pose was built: rank<k>_reverseprocess.pdb in the predictions "
+            "folder — a multi-frame PDB (one frame per denoising step, ligand only). Open it "
+            "together with the receptor PDB in PyMOL / VMD / ChimeraX to watch the docking.")
+        ddp.addWidget(self.dd_traj)
+        ddp.addStretch()
+        dock_layout.addWidget(self._dd_params_box)
 
         # Toggles on their own row so they don't get clipped in a narrow column.
-        opts_row = QHBoxLayout()
+        self._opts_box = QWidget()   # MSA server / kernels / affinity — Boltz-Chai options
+        opts_row = QHBoxLayout(self._opts_box)
+        opts_row.setContentsMargins(0, 0, 0, 0)
         self.use_msa_server = QCheckBox("Use MSA server")
         self.use_msa_server.setChecked(True)
         self.use_msa_server.setToolTip("Compute MSAs via the model's server (needs internet; "
@@ -336,16 +452,18 @@ class CofoldScreeningPage(QWidget):
             "affinity_pred_value plus pIC50 (= 6 - value) and IC50. Chai-1 has no affinity head.")
         opts_row.addWidget(self.predict_affinity)
         opts_row.addStretch()
-        dock_layout.addLayout(opts_row)
+        dock_layout.addWidget(self._opts_box)
 
         # Model/CCD weights cache (avoids the HOME disk quota on HPC).
-        cache_row = QHBoxLayout()
+        self._cache_box = QWidget()  # Boltz/Chai weights cache (DiffDock keeps its own, in its repo)
+        cache_row = QHBoxLayout(self._cache_box)
+        cache_row.setContentsMargins(0, 0, 0, 0)
         cache_row.addWidget(QLabel("Model cache:"))
         self.cache_dir = PathField("weights/CCD cache dir, e.g. /data/<user>/.alchemfold_cache "
                                    "(optional; avoids HOME quota)", mode="directory")
         self.cache_dir.setText(_default_cache_dir())
         cache_row.addWidget(self.cache_dir, 1)
-        dock_layout.addLayout(cache_row)
+        dock_layout.addWidget(self._cache_box)
 
         # Run target: localhost (interactive) vs an HPC SLURM job with presets.
         preset_names, gpu_values, default_preset = _hpc_settings()
@@ -376,7 +494,7 @@ class CofoldScreeningPage(QWidget):
         dock_layout.addLayout(rt_row)
 
         self._cpu_warn = QLabel(
-            "⚠ AI docking (Boltz-2 / Chai-1) is GPU-bound. On localhost without a GPU "
+            "⚠ AI docking (Boltz-2 / Chai-1 / DiffDock) is GPU-bound. On localhost without a GPU "
             "it is only practical for tiny smoke tests — use HPC for real jobs.")
         self._cpu_warn.setObjectName("Muted")
         self._cpu_warn.setWordWrap(True)
@@ -386,32 +504,213 @@ class CofoldScreeningPage(QWidget):
 
         # --- Screening-only inputs --------------------------------------
         self._screen_box = QWidget()
-        screen_layout = QHBoxLayout(self._screen_box)
+        screen_layout = QVBoxLayout(self._screen_box)
         screen_layout.setContentsMargins(0, 0, 0, 0)
-        screen_layout.addWidget(QLabel("Library:"))
+        screen_layout.setSpacing(10)
+
+        def _heading(text: str) -> QLabel:
+            lab = QLabel(text)
+            lab.setObjectName("Muted")
+            return lab
+
+        def _field(label: str, widget) -> QVBoxLayout:
+            """A label stacked above its widget (compact, no side-by-side crowding)."""
+            col = QVBoxLayout()
+            col.setSpacing(3)
+            col.addWidget(QLabel(label))
+            col.addWidget(widget)
+            return col
+
+        # ---- Library ----
+        screen_layout.addWidget(_heading("LIBRARY"))
         self.library = NoScrollComboBox()
-        self.library.addItems(["zinc20", "enamine_real"])
-        self.library.setToolTip("Source ligand catalog to screen: ZINC20 or Enamine REAL.")
-        screen_layout.addWidget(self.library)
-        screen_note = QLabel("Add the library's ligand_files to the generated config, then Validate.")
-        screen_note.setObjectName("Muted")
-        screen_note.setWordWrap(True)
-        screen_layout.addWidget(screen_note, 1)
+        self.library.addItems(["enamine_real", "zinc20", "custom"])
+        self.library.setToolTip(
+            "enamine_real / zinc20: the established catalogs under ChemFlow/screen_db/ "
+            "(selected automatically). custom: browse your own .smi / .csv / .cxsmiles files.")
+        self.library_info = QLabel()
+        self.library_info.setObjectName("Muted")
+        self.library_info.setWordWrap(True)
+        lib_row = QHBoxLayout()
+        lib_row.setSpacing(12)
+        lib_row.addLayout(_field("Catalog", self.library))
+        info_col = QVBoxLayout()
+        info_col.addStretch()
+        info_col.addWidget(self.library_info)
+        lib_row.addLayout(info_col, 1)
+        screen_layout.addLayout(lib_row)
+
+        self.ligand_files = QLineEdit()
+        self.ligand_files.setPlaceholderText("optional — browse your own library files")
+        self._btn_browse_lib = action_button("Browse…")
+        self._btn_browse_lib.clicked.connect(self._browse_ligand_files)
+        files_row = QHBoxLayout()
+        files_row.addLayout(_field("Ligand files (.smi / .csv / .cxsmiles, .bz2/.gz ok)",
+                                   self.ligand_files), 1)
+        browse_col = QVBoxLayout()
+        browse_col.addStretch()
+        browse_col.addWidget(self._btn_browse_lib)
+        files_row.addLayout(browse_col)
+        screen_layout.addLayout(files_row)
+
+        self.max_ligands = NoScrollSpinBox()
+        self.max_ligands.setRange(0, 100_000_000)
+        self.max_ligands.setValue(10000)
+        self.max_ligands.setSingleStep(1000)
+        self.max_ligands.setMinimumWidth(110)
+        self.max_ligands.setToolTip(
+            "Number of ligands to dock, sampled from the library (0 = all). Required for "
+            "Enamine REAL, which has billions of compounds.")
+        self.sample_mode = NoScrollComboBox()
+        self.sample_mode.addItems(["random", "head"])
+        self.sample_mode.setMinimumWidth(110)
+        self.sample_mode.setToolTip(
+            "random: uniform sample (reads the whole library — can take hours on Enamine "
+            "REAL). head: first N ligands (instant, but not random).")
+        sub_row = QHBoxLayout()
+        sub_row.setSpacing(12)
+        sub_row.addLayout(_field("Ligands to dock", self.max_ligands))
+        sub_row.addLayout(_field("Sampling", self.sample_mode))
+        sub_row.addStretch()
+        screen_layout.addLayout(sub_row)
+
+        # ---- Compute (SLURM): preset + custom shard / GPU counts ----
+        screen_layout.addSpacing(4)
+        screen_layout.addWidget(_heading("COMPUTE (SLURM)"))
+        s_names, s_gpus, s_default = _screening_hpc_settings()
+        self._screen_gpu_values = s_gpus
+        self.screen_preset = NoScrollComboBox()
+        self.screen_preset.addItems(s_names)
+        self.screen_preset.setToolTip(
+            "SLURM screening preset (edit the screening section of env/hpc.yaml). "
+            "Choosing one fills Shards / GPUs per shard / GPU type, which you can then change.")
+        screen_layout.addLayout(_field("Preset", self.screen_preset))
+
+        self.screen_shards = NoScrollSpinBox()
+        self.screen_shards.setRange(1, 5000)
+        self.screen_shards.setValue(20)
+        self.screen_shards.setMinimumWidth(90)
+        self.screen_shards.setToolTip(
+            "Number of shards = SLURM array tasks = GPUs running in parallel "
+            "(each task docks its shard on its own GPU(s)).")
+        self.screen_gpus = NoScrollSpinBox()
+        self.screen_gpus.setRange(1, 16)
+        self.screen_gpus.setValue(1)
+        self.screen_gpus.setMinimumWidth(90)
+        self.screen_gpus.setToolTip(
+            "GPUs per shard task. 1 is simplest and most robust; >1 makes Boltz use "
+            "multi-GPU (DDP) inside each shard.")
+        self.screen_gpu_type = NoScrollComboBox()
+        self.screen_gpu_type.addItems([(g or "any") for g in s_gpus])
+        self.screen_gpu_type.setMinimumWidth(90)
+        self.screen_gpu_type.setToolTip("GPU type for --gres (any = no type constraint).")
+        gpu_row = QHBoxLayout()
+        gpu_row.setSpacing(12)
+        gpu_row.addLayout(_field("Shards (parallel tasks)", self.screen_shards))
+        gpu_row.addLayout(_field("GPUs per shard", self.screen_gpus))
+        gpu_row.addLayout(_field("GPU type", self.screen_gpu_type))
+        gpu_row.addStretch()
+        screen_layout.addLayout(gpu_row)
+        self._screen_total = QLabel()
+        self._screen_total.setObjectName("Muted")
+        self._screen_total.setWordWrap(True)
+        screen_layout.addWidget(self._screen_total)
+        dd_row = QHBoxLayout()
+        self._dd_samples_label = QLabel("DiffDock poses per ligand:")
+        dd_row.addWidget(self._dd_samples_label)
+        self.dd_samples = NoScrollSpinBox()
+        self.dd_samples.setRange(1, 100)
+        self.dd_samples.setValue(10)
+        self.dd_samples.setToolTip(
+            "Poses DiffDock samples for each ligand; the best by confidence is kept. "
+            "More poses = slower but a better top pose.")
+        dd_row.addWidget(self.dd_samples)
+        self._dd_steps_label_s = QLabel("Denoising steps:")
+        dd_row.addWidget(self._dd_steps_label_s)
+        self.dd_steps_s = NoScrollSpinBox()
+        self.dd_steps_s.setRange(1, 200)
+        self.dd_steps_s.setValue(20)
+        self.dd_steps_s.setToolTip(
+            "Reverse-diffusion (denoising) steps per pose (default 20). Fewer = faster, roughly "
+            "linearly, with a small accuracy cost — try 10–15 for a fast first pass.")
+        dd_row.addWidget(self.dd_steps_s)
+        dd_row.addWidget(QLabel("Batch size:"))
+        self.dd_batch_s = NoScrollSpinBox()
+        self.dd_batch_s.setRange(1, 512)
+        self.dd_batch_s.setValue(10)
+        self.dd_batch_s.setToolTip("GPU batch over the poses of ONE ligand (DiffDock default 10). DiffDock always docks ligands one after another, so this does NOT speed up a library; it only matters when poses per ligand exceed it (e.g. 40 poses at batch 10 = 4 GPU passes; batch 40 = 1 pass, more GPU memory).")
+        dd_row.addWidget(self.dd_batch_s)
+        self.dd_traj_s = QCheckBox("Save diffusion trajectory")
+        self.dd_traj_s.setToolTip(
+            "Also save each ligand's BEST-pose diffusion trajectory (multi-frame PDB, ligand only) "
+            "to <job folder>/trajectories/<ligand>.pdb, and list it in the results CSV. Small per "
+            "ligand (tens of KB) but adds up over a big library — leave off for large screens.")
+        dd_row.addWidget(self.dd_traj_s)
+        dd_row.addStretch()
+        self._dd_samples_box = QWidget()
+        self._dd_samples_box.setLayout(dd_row)
+        screen_layout.addWidget(self._dd_samples_box)
+        self.screen_affinity = QCheckBox("Predict affinity (Boltz-2)")
+        self.screen_affinity.setToolTip(
+            "Boltz-2 only. For every ligand also predict binding affinity: "
+            "affinity_probability_binary (binder vs non-binder, 0-1) and affinity_pred_value "
+            "(log10 IC50 in uM; lower = stronger). Adds an extra model pass per ligand, so the "
+            "screen is slower. Results go in the results CSV and ranking.csv.")
+        screen_layout.addWidget(self.screen_affinity)
+        rank_row = QHBoxLayout()
+        rank_row.addWidget(QLabel("Rank hits by:"))
+        self.rank_metric = NoScrollComboBox()
+        self.rank_metric.addItems(["auto", "affinity_probability_binary", "affinity_pred_value",
+                                   "confidence_score", "confidence", "iptm", "complex_plddt"])
+        self.rank_metric.setToolTip(
+            "auto: affinity_pred_value when affinity is on, otherwise confidence_score. "
+            "affinity_probability_binary ranks by binder likelihood (best for hit finding); "
+            "affinity_pred_value ranks by predicted potency (lower = stronger).")
+        rank_row.addWidget(self.rank_metric, 1)
+        screen_layout.addLayout(rank_row)
+        self.cleanup_check = QCheckBox("Delete intermediate files after ranking")
+        self.cleanup_check.setChecked(True)
+        self.cleanup_check.setToolTip(
+            "After Rank, remove the split library and per-shard work folders (shards/) "
+            "if every ligand finished OK. Keeps poses/, results/, ranking.csv and screen.yaml. "
+            "If any ligand failed, nothing is deleted so you can re-run.")
+        screen_layout.addWidget(self.cleanup_check)
         left.addWidget(self._screen_box)
 
+        self.library.currentTextChanged.connect(self._on_library_changed)
+        self.screen_preset.currentTextChanged.connect(self._apply_screen_preset)
+        self.screen_shards.valueChanged.connect(self._update_screen_total)
+        self.screen_gpus.valueChanged.connect(self._update_screen_total)
+        if s_default in s_names:
+            self.screen_preset.setCurrentIndex(s_names.index(s_default))
+        self._apply_screen_preset(self.screen_preset.currentText())
+        self._on_library_changed(self.library.currentText())
+
         # --- Action buttons ---------------------------------------------
-        buttons = QHBoxLayout()
-        self._btn_generate = action_button("Generate config")
+        buttons = QGridLayout()
+        buttons.setHorizontalSpacing(10)
+        buttons.setVerticalSpacing(10)
+        self._btn_generate = action_button("Generate")
         self._btn_validate = action_button("Validate")
         self._btn_stage = action_button("Stage")
+        self._btn_submit = action_button("Submit to SLURM")   # screening only
+        self._btn_queue = action_button("Check queue")        # screening only
         self._btn_action = action_button("Run docking")   # Run (dock) | Rank hits (screen)
-        for btn, slot in [(self._btn_generate, self._generate),
-                          (self._btn_validate, self._validate),
-                          (self._btn_stage, self._stage),
-                          (self._btn_action, self._final_action)]:
+        self._btn_submit.setToolTip(
+            "Run the staged submit_screen.sh: submits the docking array job, then queues "
+            "the ranking job to run after it. Stage first.")
+        self._btn_queue.setToolTip("Show your SLURM jobs (squeue).")
+        for i, (btn, slot) in enumerate([(self._btn_generate, self._generate),
+                                         (self._btn_validate, self._validate),
+                                         (self._btn_stage, self._stage),
+                                         (self._btn_submit, self._submit_screen),
+                                         (self._btn_queue, self._check_queue),
+                                         (self._btn_action, self._final_action)]):
             btn.clicked.connect(slot)
-            buttons.addWidget(btn)
-        buttons.addStretch()
+            btn.setMinimumWidth(130)
+            buttons.addWidget(btn, i // 3, i % 3)
+        for c in range(3):
+            buttons.setColumnStretch(c, 1)
         left.addLayout(buttons)
 
         self.status = QLabel()
@@ -421,18 +720,69 @@ class CofoldScreeningPage(QWidget):
         left.addStretch()
 
         # --- Binding-pose viewer ----------------------------------------
+        # Engines return different objects: Boltz/Chai -> ONE complex file; DiffDock -> a
+        # ligand-only pose (.sdf) + the receptor PDB you docked into (+ an optional diffusion
+        # trajectory). The viewer takes whichever files are given.
+        res_row = QHBoxLayout()
+        res_row.addWidget(QLabel("Result:"))
+        self.result_combo = NoScrollComboBox()
+        self.result_combo.setMinimumWidth(180)
+        self.result_combo.setToolTip(
+            "Poses found in this job folder (best first). Click Find results after a run, then pick one.")
+        res_row.addWidget(self.result_combo, 1)
+        self._btn_scan = action_button("Find results")
+        self._btn_scan.setToolTip("Scan <working dir>/<job name>/ for predicted poses.")
+        self._btn_scan.clicked.connect(lambda _=False: self._scan_results())
+        res_row.addWidget(self._btn_scan)
+        right.addLayout(res_row)
+        self._results: list[dict] = []
+        self.result_combo.activated.connect(self._on_result_selected)
+
         pose_row = QHBoxLayout()
-        pose_row.addWidget(QLabel("Predicted complex:"))
-        self.result_path = PathField("predicted complex (PDB / mmCIF) from docking_output/…",
-                                     mode="file")
+        pose_row.addWidget(QLabel("Pose / complex:"))
+        self.result_path = PathField(
+            "complex (.pdb/.cif: Boltz, Chai) or docked ligand pose (.sdf: DiffDock)", mode="file")
         pose_row.addWidget(self.result_path, 1)
-        self._btn_pose = action_button("Show binding pose")
-        self._btn_pose.clicked.connect(self._show_pose)
-        pose_row.addWidget(self._btn_pose)
         right.addLayout(pose_row)
+
+        rec_row = QHBoxLayout()
+        rec_row.addWidget(QLabel("Receptor:"))
+        self.pose_receptor = PathField(
+            "receptor PDB — needed for ligand-only poses (DiffDock); filled in automatically", mode="file")
+        rec_row.addWidget(self.pose_receptor, 1)
+        right.addLayout(rec_row)
+
+        traj_row = QHBoxLayout()
+        traj_row.addWidget(QLabel("Trajectory:"))
+        self.pose_traj = PathField(
+            "optional multi-frame PDB (DiffDock diffusion trajectory)", mode="file")
+        traj_row.addWidget(self.pose_traj, 1)
+        right.addLayout(traj_row)
+
+        show_row = QHBoxLayout()
+        self._btn_pose = action_button("Show pose")
+        self._btn_pose.clicked.connect(lambda _=False: self._show_pose())
+        show_row.addWidget(self._btn_pose)
+        self._traj_ctl = QWidget()   # shown only when the loaded scene has a trajectory
+        tc = QHBoxLayout(self._traj_ctl)
+        tc.setContentsMargins(0, 0, 0, 0)
+        self._btn_play = action_button("Pause")
+        self._btn_play.clicked.connect(lambda _=False: self._toggle_play())
+        tc.addWidget(self._btn_play)
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(0, 0)
+        self.frame_slider.valueChanged.connect(self._on_frame_slider)
+        tc.addWidget(self.frame_slider, 1)
+        self.frame_label = QLabel()
+        self.frame_label.setObjectName("Muted")
+        tc.addWidget(self.frame_label)
+        self._traj_ctl.setVisible(False)
+        show_row.addWidget(self._traj_ctl, 1)
+        right.addLayout(show_row)
 
         if Molecule3DView is not None:
             self.viewer = Molecule3DView(min_height=340)
+            self.viewer.frames_changed.connect(self._on_frames_changed)
             right.addWidget(self.viewer, 1)
         else:
             self.viewer = None
@@ -441,16 +791,18 @@ class CofoldScreeningPage(QWidget):
             right.addWidget(missing)
             right.addStretch()
 
-        # Binding data (Boltz-2 affinity / confidence) scraped from the pose's
-        # sibling JSON files when a complex is loaded.
+        # Scores of the shown pose: Boltz/Chai affinity + confidence (JSON beside the structure),
+        # or DiffDock's pose confidence (file name / results table).
         right.addWidget(QLabel("Binding data:"))
         self.pose_info = QTextEdit()
         self.pose_info.setReadOnly(True)
         self.pose_info.setFixedHeight(120)
         self.pose_info.setPlaceholderText(
-            "Load a predicted complex to show its Boltz-2 affinity / confidence scores.")
+            "Load a result to show its scores (Boltz / Chai affinity & confidence, or DiffDock pose confidence).")
         right.addWidget(self.pose_info)
 
+        self.workdir_field.edit.textChanged.connect(lambda _t: self._update_cfg_hint())
+        self.jobname.textChanged.connect(lambda _t: self._update_cfg_hint())
         self.mode.currentTextChanged.connect(self._on_mode_changed)
         self.run_on.currentTextChanged.connect(self._on_run_target_changed)
         self.engine.currentTextChanged.connect(self._on_engine_changed)
@@ -476,20 +828,63 @@ class CofoldScreeningPage(QWidget):
         self.predict_affinity.setEnabled(is_boltz)
         if not is_boltz:
             self.predict_affinity.setChecked(False)
+        if hasattr(self, "screen_affinity"):
+            self.screen_affinity.setEnabled(is_boltz)
+            if not is_boltz:
+                self.screen_affinity.setChecked(False)
+        # DiffDock-L: structure-based blind docking in its own env.
+        dd = self.engine.currentText() == "diffdock"
+        if hasattr(self, "_dd_status"):
+            self._dd_status.setVisible(dd)
+            if dd:
+                try:
+                    from chemflow.desktop.diffdock_env import diffdock_status
+
+                    self._dd_status.setText(diffdock_status()[1])
+                except Exception as exc:  # never break the page over a status line
+                    self._dd_status.setText(f"DiffDock status unavailable: {exc}")
+        if hasattr(self, "_receptor_box"):
+            self._receptor_box.setVisible(dd)
+            self._seq_label.setVisible(not dd)
+            self.sequence.setVisible(not dd)
+            self._seqfile_label.setVisible(not dd)
+            self.sequence_file.setVisible(not dd)
+            # Boltz/Chai-only controls are HIDDEN (not just disabled) for DiffDock: pocket
+            # constraint, MSA server / kernels / affinity, recycles / sampling steps, model cache.
+            for w in (self.use_pocket, self._opts_box, self._cache_box, self._param_box):
+                w.setVisible(not dd)
+            self._dd_params_box.setVisible(dd)
+            self._pocket_box.setVisible((not dd) and self.use_pocket.isChecked())
+            if dd:
+                self.use_pocket.setChecked(False)  # blind docking: no pocket constraint
+        if hasattr(self, "_dd_samples_box"):
+            self._dd_samples_box.setVisible(dd)
+            self.screen_affinity.setVisible(not dd)   # Boltz-2 affinity head
+            self.screen_gpus.setEnabled(not dd)
+            if dd:
+                self.screen_gpus.setValue(1)  # DiffDock uses 1 GPU per shard
+                self.rank_metric.setCurrentText("confidence")
+            elif self.rank_metric.currentText() == "confidence":
+                self.rank_metric.setCurrentText("auto")
 
     def _on_mode_changed(self, _text: str) -> None:
         dock = self._is_dock()
         self._dock_box.setVisible(dock)
         self._screen_box.setVisible(not dock)
-        default_cfg = "docking.yaml" if dock else "screen.yaml"
+        self._cfg_box.setVisible(False)      # the config path is derived from working dir + job name
+        self._workdir_box.setVisible(True)
+        if self.jobname.text().strip() in ("", "docking_output", "dock_run", "screen_run"):
+            self.jobname.setText("dock_run" if dock else "screen_run")
         if self.config.text() in ("", "docking.yaml", "screen.yaml"):
-            self.config.setText(default_cfg)
+            self.config.setText("docking.yaml")
+        self._update_cfg_hint()
         if dock:
             self._on_run_target_changed(self.run_on.currentText())
         else:
             self._update_buttons()
-            self.status.setText("Generate a config, add ligand_files + sequence, Validate, "
-                                "Stage (submits the SLURM array), then Rank once it finishes.")
+            self.status.setText("Pick a library (Enamine REAL / ZINC20 / browse your own files), "
+                                "set how many ligands, shards and GPUs, then Generate, Validate, "
+                                "Stage (submits the SLURM array), and Rank once it finishes.")
 
     def _on_run_target_changed(self, _text: str) -> None:
         hpc = self._is_hpc()
@@ -506,27 +901,109 @@ class CofoldScreeningPage(QWidget):
                                     "Generate, Validate, then Run docking.")
 
     def _update_buttons(self) -> None:
-        if not self._is_dock():
-            self._btn_stage.setText("Stage (shard + SLURM array)")
+        screen = not self._is_dock()
+        self._btn_submit.setVisible(screen)
+        self._btn_queue.setVisible(screen)
+        if screen:
+            self._btn_stage.setText("Stage")
+            self._btn_stage.setToolTip("Shard the library and write the SLURM array + ranking jobs.")
             self._btn_action.setText("Rank hits")
         elif self._is_hpc():
             self._btn_stage.setText("Stage (.slurm)")
             self._btn_action.setText("Submit to SLURM")
         else:
-            self._btn_stage.setText("Stage (local runner)")
+            self._btn_stage.setText("Stage (local)")
             self._btn_action.setText("Run docking")
+
+    # -- screening library / HPC helpers ------------------------------------
+    def _browse_ligand_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select ligand library file(s)", "",
+            "Ligand libraries (*.smi *.txt *.csv *.cxsmiles *.smi.bz2 *.smi.gz "
+            "*.csv.gz *.csv.bz2 *.cxsmiles.bz2 *.cxsmiles.gz);;All files (*)")
+        if paths:
+            self.ligand_files.setText(";".join(paths))
+            # Browsed files mean "my own library".
+            self.library.setCurrentText("custom")
+            self._on_library_changed("custom")
+
+    def _ligand_file_list(self) -> list[str]:
+        raw = self.ligand_files.text().strip()
+        return [p.strip() for p in raw.split(";") if p.strip()]
+
+    def _on_library_changed(self, name: str) -> None:
+        catalog = name in ("enamine_real", "zinc20")
+        self.ligand_files.setPlaceholderText(
+            "browse .smi / .csv / .cxsmiles (.bz2/.gz ok), several allowed"
+            + (" — leave empty to use the selected catalog" if catalog else ""))
+        info = ""
+        if catalog:
+            try:
+                from alchemfold.screen_config import find_library_files
+
+                files = find_library_files(name)
+                if files:
+                    total = sum(Path(f).stat().st_size for f in files) / 1e9
+                    info = f"{len(files)} file(s) in screen_db/{name} ({total:.0f} GB compressed)"
+                else:
+                    info = f"screen_db/{name} not found — browse files instead (custom)"
+            except Exception:
+                info = f"uses the established catalog under screen_db/{name}"
+        else:
+            info = "using the files you browse"
+        self.library_info.setText(info)
+        if name == "enamine_real" and self.max_ligands.value() == 0:
+            self.max_ligands.setValue(10000)  # billions of ligands: never "all"
+
+    def _screen_gpu_value(self) -> str:
+        idx = self.screen_gpu_type.currentIndex()
+        if 0 <= idx < len(self._screen_gpu_values):
+            return self._screen_gpu_values[idx]
+        return ""
+
+    def _apply_screen_preset(self, name: str) -> None:
+        try:
+            from alchemfold import hpc_config
+
+            res = hpc_config.preset_resources(name, "screening")
+        except Exception:
+            return
+        if res.get("shards"):
+            self.screen_shards.setValue(int(res["shards"]))
+        self.screen_gpus.setValue(max(1, int(res["gpus_per_node"])))
+        gt = res.get("gpu_type", "")
+        if gt in self._screen_gpu_values:
+            self.screen_gpu_type.setCurrentIndex(self._screen_gpu_values.index(gt))
+        else:
+            self.screen_gpu_type.setCurrentIndex(0)
+        self._update_screen_total()
+
+    def _update_screen_total(self) -> None:
+        shards, gpus = self.screen_shards.value(), self.screen_gpus.value()
+        self._screen_total.setText(
+            f"{shards} shard(s) × {gpus} GPU(s) = up to {shards * gpus} GPU(s) at once.")
 
     # -- helpers ----------------------------------------------------------
     def _cfg(self) -> str:
-        default = "docking.yaml" if self._is_dock() else "screen.yaml"
-        return str(Path(self.config.text().strip() or default).expanduser())
+        """The config always lives INSIDE the job folder: <working dir>/<job name>/<mode>.yaml."""
+        base = Path(self.workdir_field.text().strip() or ".").expanduser()
+        if self._is_dock():
+            job = self.jobname.text().strip() or "dock_run"
+            return str(base / job / "docking.yaml")
+        job = self.jobname.text().strip() or "screen_run"
+        return str(base / job / "screen.yaml")
+
+    def _update_cfg_hint(self) -> None:
+        if hasattr(self, "_cfg_hint"):
+            self._cfg_hint.setText(f"Job folder & config: {self._cfg()}")
 
     def _run(self, argv: list[str]) -> None:
         if self._console is not None:
             # Run in the config's directory so outputs (slurm script,
             # docking_output/, shards) land there, consistent with the sbatch cwd.
-            cwd = str(Path(self._cfg()).expanduser().resolve().parent)
-            self._console.run_alchemfold(argv, cwd=cwd)
+            cwd = Path(self._cfg()).expanduser().resolve().parent
+            cwd.mkdir(parents=True, exist_ok=True)   # first Generate: the job folder is new
+            self._console.run_alchemfold(argv, cwd=str(cwd))
 
     def _noun(self) -> str:
         return "dock" if self._is_dock() else "screen"
@@ -551,7 +1028,20 @@ class CofoldScreeningPage(QWidget):
                 argv += ["--sequence-file", seq_file]
             elif seq:
                 argv += ["--sequence", seq]
-            argv += ["--diffusion-samples", str(self.diffusion_samples.value()),
+            if self.engine.currentText() == "diffdock":
+                rp = self.receptor_pdb.text().strip()
+                if not rp:
+                    self.status.setText("DiffDock needs a receptor PDB — browse for one first.")
+                    return
+                argv += ["--receptor-pdb", rp]
+            if self.engine.currentText() == "diffdock":
+                argv += ["--diffdock-samples", str(self.dd_poses.value()),
+                         "--diffdock-steps", str(self.dd_steps.value()),
+                         "--diffdock-batch-size", str(self.dd_batch.value())]
+                if self.dd_traj.isChecked():
+                    argv.append("--diffdock-trajectory")
+            else:
+                argv += ["--diffusion-samples", str(self.diffusion_samples.value()),
                      "--recycling-steps", str(self.recycling_steps.value()),
                      "--sampling-steps", str(self.sampling_steps.value())]
             argv.append("--use-msa-server" if self.use_msa_server.isChecked()
@@ -586,13 +1076,84 @@ class CofoldScreeningPage(QWidget):
                 argv += ["--sequence-file", seq_file]
             elif seq:
                 argv += ["--sequence", seq]
+            if self.engine.currentText() == "diffdock":
+                rp = self.receptor_pdb.text().strip()
+                if not rp:
+                    self.status.setText("DiffDock needs a receptor PDB — browse for one first.")
+                    return
+                argv += ["--receptor-pdb", rp, "--diffdock-samples", str(self.dd_samples.value()),
+                         "--diffdock-steps", str(self.dd_steps_s.value()),
+                         "--diffdock-batch-size", str(self.dd_batch_s.value())]
+                if self.dd_traj_s.isChecked():
+                    argv.append("--diffdock-trajectory")
+            files = self._ligand_file_list()
+            if files:
+                argv += ["--ligand-files", *files]
+            elif self.library.currentText() == "custom":
+                self.status.setText("Custom library: browse at least one ligand file.")
+                return
+            job = self.jobname.text().strip()
+            if job:
+                argv += ["--jobname", job]
+            argv.append("--cleanup" if self.cleanup_check.isChecked() else "--no-cleanup")
+            if self.screen_affinity.isChecked() and self.engine.currentText() == "boltz":
+                argv.append("--predict-affinity")
+            argv += ["--rank-metric", self.rank_metric.currentText()]
+            argv += ["--max-ligands", str(self.max_ligands.value()),
+                     "--sample", self.sample_mode.currentText(),
+                     "--hpc-preset", self.screen_preset.currentText(),
+                     "--n-shards", str(self.screen_shards.value()),
+                     "--gpus-per-task", str(self.screen_gpus.value()),
+                     "--gpu-type", self._screen_gpu_value()]
             self._run(argv)
-            self.status.setText(f"Writing {cfg} (engine: {self.engine.currentText()}, "
-                                f"library: {self.library.currentText()}). "
-                                "Add ligand_files, then Validate.")
+            self.status.setText(
+                f"Writing {cfg} (engine: {self.engine.currentText()}, library: "
+                f"{self.library.currentText()}, {self.screen_shards.value()} shard(s) x "
+                f"{self.screen_gpus.value()} GPU(s)). Validate, then Stage.")
 
     def _validate(self) -> None:
         self._run([self._noun(), "validate", self._cfg()])
+
+    def _screen_workdir(self) -> Path:
+        """Where `screen stage` wrote its files (the config's `workdir`, default = config dir)."""
+        cfg = Path(self._cfg()).expanduser().resolve()
+        workdir = cfg.parent
+        try:
+            import yaml
+
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+            wd = str(data.get("workdir") or ".").strip()
+            if wd and wd != ".":
+                p = Path(wd).expanduser()
+                workdir = p if p.is_absolute() else (cfg.parent / p).resolve()
+            job = str(data.get("jobname") or "").strip()
+            if job and not (cfg.parent.name == job and wd in ("", ".")):
+                workdir = workdir / job
+        except Exception:
+            pass
+        return workdir
+
+    def _submit_screen(self) -> None:
+        script = self._screen_workdir() / "submit_screen.sh"
+        if not script.is_file():
+            self.status.setText(f"{script.name} not found in {script.parent} — run Stage first.")
+            return
+        if self._console is not None:
+            self._console.run_program("bash", [str(script)], cwd=str(script.parent))
+        self.status.setText(
+            "Submitting the docking array and the dependent ranking job (sbatch). "
+            "Use Check queue to monitor; results appear in poses/ and ranking.csv.")
+
+    def _check_queue(self) -> None:
+        import getpass
+
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = ""
+        if self._console is not None:
+            self._console.run_program(
+                "squeue", (["-u", user] if user else []), cwd=str(self._screen_workdir()))
 
     def _stage(self) -> None:
         if not self._is_dock():
@@ -625,34 +1186,119 @@ class CofoldScreeningPage(QWidget):
         else:
             self._run(["dock", "run", self._cfg()])
             self.status.setText("Running docking in the alchemfold env. When it finishes, "
-                                "load the predicted complex below to see the pose.")
+                                "click Find results below to view the pose.")
 
-    def _show_pose(self) -> None:
-        path = self.result_path.text().strip()
-        if not path:
-            self.status.setText("Choose a predicted complex (PDB / mmCIF) to view its pose.")
+    # -- pose viewer ------------------------------------------------------
+    def _scan_results(self) -> None:
+        job = Path(self._cfg()).expanduser().resolve().parent
+        try:
+            results = pose_scene.scan_results(job)
+        except Exception as exc:  # never break the page over a scan
+            self.status.setText(f"Could not scan {job}: {exc}")
             return
-        if self.viewer is not None:
-            self.viewer.load_structure(path)
-            self.status.setText(f"Showing {Path(path).name} — receptor cartoon + ligand sticks.")
-        self._show_pose_data(path)
+        self._results = results
+        self.result_combo.blockSignals(True)
+        self.result_combo.clear()
+        for r in results:
+            sc = r["scores"]
+            bits = []
+            if sc.get("confidence") is not None:
+                bits.append(f"confidence {sc['confidence']:.2f}")
+            if sc.get("affinity_probability_binary") is not None:
+                bits.append(f"binder p {sc['affinity_probability_binary']:.2f}")
+            if sc.get("affinity_pred_value") is not None:
+                bits.append(f"affinity {sc['affinity_pred_value']:.2f}")
+            elif sc.get("confidence_score") is not None:
+                bits.append(f"conf {sc['confidence_score']:.2f}")
+            self.result_combo.addItem(r["label"] + (f"   ({', '.join(bits)})" if bits else ""))
+        self.result_combo.blockSignals(False)
+        if results:
+            self.status.setText(f"Found {len(results)} result(s) in {job}. Pick one to view it.")
+            self.result_combo.setCurrentIndex(0)
+            self._on_result_selected(0)
+        else:
+            self.status.setText(f"No results found in {job} yet — run docking first.")
 
-    def _show_pose_data(self, path: str) -> None:
-        """Scrape and display the Boltz-2 affinity / confidence scores for a pose."""
+    def _on_result_selected(self, index: int) -> None:
+        if not (0 <= index < len(self._results)):
+            return
+        r = self._results[index]
+        self.result_path.setText(r["pose"])
+        self.pose_receptor.setText(r["receptor"] or self.receptor_pdb.text().strip())
+        self.pose_traj.setText(r["trajectory"])
+        self._show_pose(extra_scores=r["scores"])
+
+    def _show_pose(self, extra_scores: dict | None = None) -> None:
+        pose = self.result_path.text().strip()
+        traj = self.pose_traj.text().strip()
+        receptor = self.pose_receptor.text().strip()
+        if not pose and not traj:
+            self.status.setText("Choose a pose / complex file (or use Find results) to view it.")
+            return
+        if not receptor:
+            # DiffDock poses are ligand-only: fall back to the receptor PDB set on this page.
+            receptor = self.receptor_pdb.text().strip()
+            if receptor:
+                self.pose_receptor.setText(receptor)
+        notes: list[str] = []
+        if self.viewer is not None:
+            notes = self.viewer.load_files(pose or None, receptor or None, traj or None, autoplay=True)
+        shown = Path(pose or traj).name
+        self.status.setText(f"Showing {shown}. " + " ".join(notes))
+        self._show_pose_data(pose or traj, extra_scores)
+
+    def _on_frames_changed(self, n: int) -> None:
+        self._n_frames = n
+        self._traj_ctl.setVisible(n > 1)
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setRange(0, max(0, n - 1))
+        self.frame_slider.setValue(0)
+        self.frame_slider.blockSignals(False)
+        self.frame_label.setText(f"{n} frames" if n > 1 else "")
+        self._btn_play.setText("Pause")   # the scene autoplays
+
+    def _toggle_play(self) -> None:
+        if self.viewer is None:
+            return
+        if self._btn_play.text() == "Pause":
+            self.viewer.pause()
+            self._btn_play.setText("Play")
+        else:
+            self.viewer.play()
+            self._btn_play.setText("Pause")
+
+    def _on_frame_slider(self, value: int) -> None:
+        if self.viewer is None:
+            return
+        self.viewer.set_frame(value)
+        self._btn_play.setText("Play")
+        self.frame_label.setText(f"frame {value + 1}/{getattr(self, '_n_frames', value + 1)}")
+
+    def _show_pose_data(self, path: str, extra_scores: dict | None = None) -> None:
+        """Show the scores of a pose: Boltz/Chai JSONs, DiffDock confidence, results-table values."""
         if not hasattr(self, "pose_info"):
             return
+        extra = {k: v for k, v in (extra_scores or {}).items() if v is not None}
+        lines: list[str] = []
+        conf = extra.get("confidence")
+        if conf is None:
+            conf = pose_scene.confidence_from_name(path)   # rank1_confidence-0.41.sdf
+        if conf is not None:
+            lines.append(pose_scene.diffdock_confidence_text(conf))
         try:
             scores = _scrape_pose_scores(path)
         except Exception as exc:  # pragma: no cover - defensive
             self.pose_info.setPlainText(f"Could not read binding data: {exc}")
             return
-        if not scores:
+        for k in _POSE_SCORE_LABELS:           # fill gaps from the results table (screens)
+            if k not in scores and extra.get(k) is not None:
+                scores[k] = float(extra[k])
+        if not scores and not lines:
             self.pose_info.setPlainText(
-                "No binding/confidence JSON found next to this structure "
-                "(expected affinity_*.json / confidence_*.json in the same folder).")
+                "No scores found for this pose (Boltz / Chai: affinity_*.json / confidence_*.json "
+                "beside the structure; DiffDock: the confidence in the file name or results table).")
             return
         # Show affinity first, then confidence metrics, each on its own line.
-        lines = []
         for k in _POSE_SCORE_LABELS:
             if k not in scores:
                 continue
