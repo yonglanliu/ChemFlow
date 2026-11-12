@@ -146,7 +146,7 @@ DEFAULTS: dict[str, Any] = {
     # --- General ---
     "protocol_repeats": 1,
     "pressure": 1.0,                  # bar
-    "temperature": 310.0,             # kelvin
+    "temperature": 298.15,            # kelvin
     # --- Force field / nonbonded ---
     "nonbonded_cutoff": 1.0,          # nanometer
     "nonbonded_method": "PME",

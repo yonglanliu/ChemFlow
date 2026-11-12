@@ -43,9 +43,10 @@ def _relax_validate(args: argparse.Namespace) -> int:
         load_config, validate_config,
     )
     conf_path = Path(args.config).expanduser().resolve()
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     print(f"Valid membrane-relax configuration: {args.config}")
-    return 0
+    return _preflight(conf, "membrane relax")
 
 
 def _relax_stage(args: argparse.Namespace) -> int:
@@ -66,7 +67,8 @@ def _relax_run(args: argparse.Namespace) -> int:
     from chemflow.fe.openmm_modeling.membrane_relax_config import (
         load_config, validate_config,
     )
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     command = _relax_cmd(conf_path)
     if args.debug_first_step:
         command.append("--debug-first-step")
@@ -83,14 +85,38 @@ def _build_cmd(conf_path: Path) -> list[str]:
             "--config", str(conf_path)]
 
 
+def _preflight(conf, label: str) -> int:
+    """Check the actual structure, not just the YAML. Reports every problem at once."""
+    try:
+        from chemflow.fe.openmm_modeling.membrane_relax import preflight_structure
+    except ImportError as exc:
+        print(f"(structure pre-flight skipped: {exc})")
+        return 0
+    try:
+        problems = preflight_structure(conf)
+    except Exception as exc:  # noqa: BLE001 - never let the check itself abort validate
+        print(f"(structure pre-flight could not run: {exc})")
+        return 0
+    if not problems:
+        print(f"Structure pre-flight: OK — {label} looks runnable.")
+        return 0
+    print(f"\nStructure pre-flight found {len(problems)} issue(s):")
+    for item in problems:
+        print(f"  - {item}")
+    print("\nFix these before `run`; they are reported together so you do not hit "
+          "them one at a time.")
+    return 1
+
+
 def _build_validate(args: argparse.Namespace) -> int:
     from chemflow.fe.openmm_modeling.membrane_build_config import (
         load_config, validate_config,
     )
     conf_path = Path(args.config).expanduser().resolve()
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     print(f"Valid membrane-build configuration: {args.config}")
-    return 0
+    return _preflight(conf, "membrane build")
 
 
 def _build_stage(args: argparse.Namespace) -> int:
@@ -111,7 +137,8 @@ def _build_run(args: argparse.Namespace) -> int:
     from chemflow.fe.openmm_modeling.membrane_build_config import (
         load_config, validate_config,
     )
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     return _run_cmd(_build_cmd(conf_path), dry_run=args.dry_run)
 
 
@@ -130,7 +157,8 @@ def _soluble_validate(args: argparse.Namespace) -> int:
         load_config, validate_config,
     )
     conf_path = Path(args.config).expanduser().resolve()
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     print(f"Valid soluble-build configuration: {args.config}")
     return 0
 
@@ -153,7 +181,8 @@ def _soluble_run(args: argparse.Namespace) -> int:
     from chemflow.fe.openmm_modeling.soluble_build_config import (
         load_config, validate_config,
     )
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     return _run_cmd(_soluble_cmd(conf_path), dry_run=args.dry_run)
 
 
@@ -170,9 +199,10 @@ def _md_cmd(conf_path: Path) -> list[str]:
 def _md_validate(args: argparse.Namespace) -> int:
     from chemflow.fe.openmm_modeling.md_config import load_config, validate_config
     conf_path = Path(args.config).expanduser().resolve()
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     print(f"Valid MD configuration: {args.config}")
-    return 0
+    return _preflight(conf, "MD")
 
 
 def _md_stage(args: argparse.Namespace) -> int:
@@ -191,7 +221,8 @@ def _md_stage(args: argparse.Namespace) -> int:
 def _md_run_handler(args: argparse.Namespace) -> int:
     conf_path = Path(args.config).expanduser().resolve()
     from chemflow.fe.openmm_modeling.md_config import load_config, validate_config
-    validate_config(load_config(conf_path))
+    conf = load_config(conf_path)
+    validate_config(conf)
     return _run_cmd(_md_cmd(conf_path), dry_run=args.dry_run)
 
 

@@ -435,7 +435,9 @@ FEP_ARRAY_MAX=$(( N_FEP_TASKS - 1 ))
 # SLURM array
 # ============================================================
 
-FEP_ARRAY="0-${FEP_ARRAY_MAX}%${MAX_FEP_JOBS}"
+# Plain 0-N: never cap array concurrency with %N — let SLURM decide how many
+# tasks run at once instead of throttling the campaign to a handful.
+FEP_ARRAY="0-${FEP_ARRAY_MAX}"
 
 
 # ============================================================
@@ -505,7 +507,7 @@ echo "    Legs:                    ${N_LEGS}"
 echo "    Tasks / replicate:       ${TASKS_PER_REP}"
 echo "    Tasks / leg:             ${TASKS_PER_LEG}"
 echo "    Total FEP tasks:         ${N_FEP_TASKS}"
-echo "    Maximum simultaneous:    ${MAX_FEP_JOBS}"
+echo "    Max simultaneous (local):${MAX_FEP_JOBS}"
 echo "    Array:                   ${FEP_ARRAY}"
 echo "    Partition:               ${FEP_PARTITION}"
 echo "    Nodes / task:            ${FEP_NODES}"

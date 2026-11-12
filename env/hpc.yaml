@@ -1,175 +1,167 @@
 # ===================================================================
-# AlchemFold HPC run settings (single-ligand docking).
+# ChemFlow HPC settings — SITE overrides for the shared presets.
 #
-# Customize the SLURM walltime PRESETS, selectable GPU TYPES, and the default
-# SLURM resources here — no code changes needed. This file is read by
-# `alchemfold dock stage --target hpc ...` and by the desktop "Run on: HPC"
-# dropdown.
+# Built-in presets ship per MODULE in src/hpc/presets/ :
 #
-# Lookup order (first found wins):
+#     docking.yaml    screening.yaml    openfe.yaml
+#     gromacs.yaml    openmm.yaml       mmgbsa.yaml
+#
+# This file overrides them for your cluster. Lookup order (first found wins):
 #   1. $CHEMFLOW_HPC_CONFIG
 #   2. <repo>/env/hpc.yaml          (this file)
 #   3. ~/.config/chemflow/hpc.yaml  (per-user override)
 #
-# NOTE: AI co-folding / docking (Boltz-2, Chai-1) is GPU-bound. These presets
-# all request one node + one GPU. Running on CPU (the "localhost" target on a
-# machine without a GPU) is only practical for tiny smoke tests, not real jobs.
+# Resolution per module:
+#   src/hpc/presets/_common.yaml
+#     -> this file's top-level `defaults:` / `gpu_types:`   (site-wide)
+#     -> src/hpc/presets/<module>.yaml                      (module intent)
+#     -> this file's `<module>:` section                    (the last word)
+#
+# Module intent deliberately beats the top-level defaults, so a site-wide
+# `partition: gpu` does not turn the CPU-only MM-GBSA preset into a GPU job.
+# To change one module, use its section below.
+#
+# A preset is EITHER a walltime string (single node, single GPU) OR a mapping
+# of any of: time, nodes, ntasks, cpus_per_task, gpus, gpu_type, mem,
+# partition, account, conda_env, constraint, replicates, shards.
+# Aliases are accepted: walltime=time, memory=mem, gpus_per_node=gpus,
+# ntasks_per_node=ntasks, conda_environment=conda_env.
+#
+# SLURM arrays are always plain 0-N — this project never caps concurrency
+# with %N, so the scheduler decides how many tasks run at once.
 # ===================================================================
 
-# Default SLURM resources. Walltime is NOT set here — it comes from the chosen
-# preset below. Leave account "" to omit the #SBATCH --account line.
+# ---- Site-wide defaults (every module, unless its own file says otherwise) ---
 defaults:
   partition: gpu
-  account: ""
-  cpus_per_task: 8
-  mem: 32G
-  conda_env: alchemfold
+  account: ""                # "" -> no #SBATCH --account line
 
-# Selectable GPU types for `--gres=gpu:<type>:1`. "" means no type constraint
-# (any available GPU). Add/remove to match your cluster's gres names.
+# ---- Selectable --gres GPU types. "" = any GPU. ----------------------------
+# ONE list, read by every CLI and desktop dropdown. Match your cluster's gres
+# names (`sinfo -o "%G"` on SLURM).
 gpu_types:
-  - ""        # any GPU
+  - ""          # any GPU
   - a100
+  - a100x
+  - v100
   - v100x
   - p100
-  - v100
   - l40
-  - gpuh200   # H200 nodes (gres name as configured on this cluster)
+  - gpuh200     # H200 nodes
+  - h100
+  - a40
+  - rtx8000
 
-# Which preset is selected by default.
-default_preset: singlenode-singlegpu-day
-
-# Named presets -> SLURM resources. A preset can be EITHER:
-#   * a walltime string  -> single-node, single-GPU (shorthand), or
-#   * a mapping          -> customize any of:
-#         time, nodes, ntasks_per_node, gpus_per_node,
-#         gpu_type, cpus_per_task, mem, partition, account, conda_env
-#     (missing keys fall back to the `defaults` above, then to 1 node / 1 GPU).
-# Add your own presets freely; the names appear in the desktop "Preset" dropdown.
-#
-# NOTE: these top-level presets are SHARED with the OpenFE (RBFE/ABFE/SepTop) Job
-# Settings preset dropdown, so they keep the long FE-style walltimes. The AlchemFold
-# docking page uses the short, docking-tuned presets in the `docking:` section below.
+# ---- Legacy: presets here feed the OpenFE and docking paths ----------------
+# Kept so existing user files keep working. New presets belong in a module
+# section below.
 presets:
-  singlenode-singlegpu-quick: "04:00:00"      # 4 hours
-  singlenode-singlegpu-day: "1-00:00:00"      # 1 day
-  singlenode-singlegpu-long: "4-00:00:00"     # 4 days
-  singlenode-singlegpu-week: "7-00:00:00"     # 7 days
-  singlenode-singlegpu-tendays: "10-00:00:00"  # 10 days
+  singlenode-singlegpu-quick: "04:00:00"
+  singlenode-singlegpu-day: "1-00:00:00"
+  singlenode-singlegpu-long: "4-00:00:00"
+  singlenode-singlegpu-week: "7-00:00:00"
+  singlenode-singlegpu-tendays: "10-00:00:00"
 
 # ------------------------------------------------------------------
-# AlchemFold DOCKING presets (single-ligand co-folding / docking).
-#
-# This section is read ONLY by the AlchemFold docking page / `alchemfold dock
-# stage` and overrides the top-level presets/defaults/gpu_types/default_preset
-# for docking. Co-folding is single-GPU inference and short per complex, so these
-# walltimes are much shorter than the FE presets above. (Throughput over many
-# ligands is the screening path, which is already a SLURM array.)
+# AI docking / co-folding (Boltz-2, Chai-1, DiffDock-L) — one ligand per job.
+# Single-GPU inference, short per complex. Throughput lives in `screening`.
 # ------------------------------------------------------------------
 docking:
   default_preset: docking-standard
-  # defaults:            # optional — override partition/cpus_per_task/mem/conda_env for docking
-  #   cpus_per_task: 8
-  #   mem: 32G
+  defaults:
+    conda_env: chemflow      # env that imports alchemfold; the ENGINE runs from
+                             # its own env (boltz / chai / diffdock), by path
   presets:
-    docking-quick: "01:00:00"       # 1 hour  — small/medium complex, smoke test
-    docking-standard: "04:00:00"    # 4 hours — typical single docking run (default)
-    docking-long: "1-00:00:00"      # 1 day   — large complex / many diffusion samples / MSA build
-    docking-xlong: "2-00:00:00"     # 2 days  — very large complex or a big ligand_file batch
-
-    # Multi-GPU example (rarely needed — a single docking run is single-GPU; use
-    # the screening array for throughput). Match gpu_type/counts to your cluster.
+    docking-quick: "01:00:00"
+    docking-standard: "04:00:00"
+    docking-long: "1-00:00:00"
+    docking-xlong: "2-00:00:00"
     docking-2gpu:
       time: "1-00:00:00"
-      nodes: 1
-      gpus_per_node: 2
+      gpus: 2
       gpu_type: a100
-      cpus_per_task: 8
       mem: 64G
 
 # ------------------------------------------------------------------
-# AlchemFold VIRTUAL SCREENING presets (library -> shards -> SLURM array).
-#
-# Read ONLY by `alchemfold screen ...` and the desktop screening page. Each preset:
-#   time            walltime per array task (one task = one shard)
-#   shards          number of array tasks = GPUs running in parallel (n_shards)
-#   gpus_per_node   GPUs per task (>1 turns on Boltz DDP inside each shard)
-#   gpu_type, cpus_per_task, mem, partition, account, conda_env   (optional)
-# Name format is free; add your own, e.g. a 100-GPU run. The desktop "Preset" +
-# "Shards" + "GPUs/task" boxes can override any of these per run.
+# Virtual screening — library -> shards -> SLURM array (1 task per shard).
+#   shards = array tasks = GPUs in parallel;  gpus > 1 enables Boltz DDP.
 # ------------------------------------------------------------------
 screening:
   default_preset: screen-1gpu-x20
-  # defaults:            # optional — override partition/cpus_per_task/mem/conda_env
-  #   cpus_per_task: 8
-  #   mem: 32G
+  defaults:
+    conda_env: chemflow
   presets:
-    screen-1gpu-x4:
-      time: "1-00:00:00"
-      gpus_per_node: 1
-      shards: 4
-    screen-1gpu-x20:
-      time: "1-00:00:00"
-      gpus_per_node: 1
-      shards: 20
-    screen-1gpu-x50:
-      time: "1-00:00:00"
-      gpus_per_node: 1
-      shards: 50
-    screen-l40-x20:                 # 20 shards on L40 GPUs (1 GPU each)
-      time: "1-00:00:00"
-      gpus_per_node: 1
-      gpu_type: l40
-      shards: 20
-    screen-h200-x10:                # 10 shards on H200 GPUs (1 GPU each)
-      time: "1-00:00:00"
-      gpus_per_node: 1
-      gpu_type: gpuh200
-      shards: 10
-    screen-4gpu-x5:                 # 5 shards x 4 GPUs (DDP) = 20 GPUs
-      time: "1-00:00:00"
-      gpus_per_node: 4
-      shards: 5
-      gpu_type: a100
-      mem: 64G
+    screen-1gpu-x4:   {time: "1-00:00:00", gpus: 1, shards: 4}
+    screen-1gpu-x20:  {time: "1-00:00:00", gpus: 1, shards: 20}
+    screen-1gpu-x50:  {time: "1-00:00:00", gpus: 1, shards: 50}
+    screen-l40-x20:   {time: "1-00:00:00", gpus: 1, gpu_type: l40, shards: 20}
+    screen-h200-x10:  {time: "1-00:00:00", gpus: 1, gpu_type: gpuh200, shards: 10}
+    screen-4gpu-x5:   {time: "1-00:00:00", gpus: 4, gpu_type: a100, shards: 5, mem: 64G}
 
 # ------------------------------------------------------------------
-# OpenFE (RBFE / ABFE / SepTop) SLURM allocation.
-#
-# Per-job resources live in an inline `slurm:` block INSIDE each OpenFE config
-# (alchemfold screen.yaml style) — edit that block to change a specific job.
-# The OPTIONAL block below only sets the site-wide DEFAULTS that seed a newly
-# generated config's `slurm:` block; the inline block always wins. Delete this
-# section to use the built-in defaults.
+# OpenFE binding free energy (RBFE / ABFE / SepTop).
+# Per-job resources also live in an inline `slurm:` block inside each config;
+# that block always wins. The values here seed a newly generated one.
 # ------------------------------------------------------------------
 openfe:
   defaults:
-    partition: gpu
-    account: ""
-    nodes: 1
-    ntasks: 1
     cpus_per_task: 16
-    gpus: 1
-    gpu_type: ""          # e.g. a100 -> --gres=gpu:a100:1
-    memory: 32G
-    walltime: "240:00:00"
-    replicates: 3          # array = N_transformation_json * replicates
-    conda_environment: alchemforge
+    mem: 32G
+    time: "240:00:00"
+    replicates: 3            # array size = N_transformation_json * replicates
+    conda_env: alchemforge
 
+# ------------------------------------------------------------------
+# GROMACS / PMX free energy (RBFE, ABFE, SepTop, resFEP, alanine scan).
+# One array task per lambda window; 1 GPU + 4-8 CPU per window is the useful
+# range. `constraint` maps to #SBATCH --constraint.
+# ------------------------------------------------------------------
+gromacs:
+  default_preset: gmx-1gpu-day
+  defaults:
+    cpus_per_task: 8
+    mem: 16G
+    conda_env: alchemforge
+  presets:
+    gmx-1gpu-short: "08:00:00"
+    gmx-1gpu-day: "24:00:00"
+    gmx-1gpu-long: "2-00:00:00"
+    gmx-hrex-8win:           # HREX: one task per window, MPI across them
+      time: "2-00:00:00"
+      ntasks: 8
+      cpus_per_task: 1
+      mem: 32G
+    gmx-a100-day: {time: "24:00:00", gpu_type: a100}
 
-  # ---- Multi-node / multi-GPU examples (uncomment / edit to use) ----
-  # multinode-2x4-day:              # 2 nodes x 4 GPUs/node
-  #   time: "1-00:00:00"
-  #   nodes: 2
-  #   ntasks_per_node: 4
-  #   gpus_per_node: 4
-  #   gpu_type: a100
-  #   cpus_per_task: 8
-  #   mem: 128G
-  # singlenode-4gpu-long:           # 1 node x 4 GPUs
-  #   time: "4-00:00:00"
-  #   nodes: 1
-  #   ntasks_per_node: 4
-  #   gpus_per_node: 4
-  #   gpu_type: a100
+# ------------------------------------------------------------------
+# OpenMM modeling + MD (build-soluble / build-membrane / relax-membrane / md).
+# One single-GPU job per step, no array.
+# ------------------------------------------------------------------
+openmm:
+  default_preset: openmm-1gpu-2day
+  defaults:
+    cpus_per_task: 8
+    mem: 32G
+    conda_env: alchemforge
+  presets:
+    openmm-build: "04:00:00"
+    openmm-relax: "12:00:00"
+    openmm-1gpu-2day: "48:00:00"
+    openmm-1gpu-week: "7-00:00:00"
+    openmm-a100-2day: {time: "48:00:00", gpu_type: a100}
 
+# ------------------------------------------------------------------
+# MM-GBSA endpoint rescoring — CPU only (gpus: 0 omits the --gres line).
+# ------------------------------------------------------------------
+mmgbsa:
+  default_preset: mmgbsa-cpu-8h
+  defaults:
+    partition: norm
+    cpus_per_task: 4
+    gpus: 0
+    mem: 8G
+    conda_env: alchemforge
+  presets:
+    mmgbsa-cpu-2h: "02:00:00"
+    mmgbsa-cpu-8h: "08:00:00"
+    mmgbsa-cpu-day: "24:00:00"

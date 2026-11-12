@@ -1,0 +1,16 @@
+# MM-GBSA endpoint rescoring. CPU-only: one array task per complex/frame batch.
+
+default_preset: mmgbsa-cpu-8h
+
+defaults:
+  partition: norm
+  cpus_per_task: 4
+  gpus: 0                   # CPU-only -> no --gres line
+  mem: 8G
+  time: "08:00:00"
+  conda_env: alchemforge
+
+presets:
+  mmgbsa-cpu-2h: "02:00:00"
+  mmgbsa-cpu-8h: "08:00:00"
+  mmgbsa-cpu-day: "24:00:00"

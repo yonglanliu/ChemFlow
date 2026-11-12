@@ -349,33 +349,68 @@ def _read_mae(path, np):
             data = json.load(fh)
 
     atoms, bonds, boxv = data["atoms"], data["bonds"], data["box"]
-    top = Topology()
-    atom_objs = []
-    chain = None
-    residue = None
-    prev_chain_id = object()  # sentinel so the first atom always opens a chain
-    prev_res_key = None
-    for elem, name, _x, _y, _z, resn, chid, resnum in atoms:
-        chid = chid or "A"
-        # Start a NEW chain whenever the id changes in atom order — Maestro reuses
-        # chain ids across non-adjacent blocks, but OpenMM needs contiguous chains.
-        if chid != prev_chain_id:
-            chain = top.addChain(chid)
-            prev_chain_id = chid
-            prev_res_key = None
-        res_key = (resnum, resn)
-        if res_key != prev_res_key:
-            residue = top.addResidue(resn, chain, id=str(resnum))
-            prev_res_key = res_key
-        try:
-            element = Element.getBySymbol(elem)
-        except Exception:
-            element = None
-        atom_objs.append(top.addAtom(name, element, residue))
-    for i, j in bonds:
-        top.addBond(atom_objs[i], atom_objs[j])
 
-    pos = np.array([[a[2], a[3], a[4]] for a in atoms], dtype=float) / 10.0  # A -> nm
+    # Group atoms by residue IDENTITY, not by consecutive runs. Maestro/Desmond
+    # commonly store a residue's heavy atoms and its hydrogens in separate blocks,
+    # so a consecutive-run reader splits every residue in two (heavy atoms in one,
+    # H in the other) and template matching then fails with
+    # "No template found ... missing N H atoms".
+    #
+    # Residues are emitted grouped by chain, in first-appearance order, because
+    # OpenMM requires a chain's residues to occupy contiguous indices — so we
+    # cannot simply revisit an earlier chain.
+    chain_order = []
+    chain_residues = {}   # chain id -> [residue key, ...] in first-appearance order
+    residue_atoms = {}    # residue key -> [original atom index, ...]
+    for index, (_elem, _name, _x, _y, _z, resn, chid, resnum) in enumerate(atoms):
+        chid = chid or "A"
+        key = (chid, resnum, resn)
+        if chid not in chain_residues:
+            chain_residues[chid] = []
+            chain_order.append(chid)
+        if key not in residue_atoms:
+            residue_atoms[key] = []
+            chain_residues[chid].append(key)
+        residue_atoms[key].append(index)
+
+    top = Topology()
+    atom_objs = [None] * len(atoms)
+    emit_order = []  # original indices, in the order atoms are added to the topology
+    for chid in chain_order:
+        chain = top.addChain(chid)
+        for key in chain_residues[chid]:
+            _chid, resnum, resn = key
+            residue = top.addResidue(resn, chain, id=str(resnum))
+            for index in residue_atoms[key]:
+                elem, name = atoms[index][0], atoms[index][1]
+                try:
+                    element = Element.getBySymbol(elem)
+                except Exception:
+                    element = None
+                atom_objs[index] = top.addAtom(name, element, residue)
+                emit_order.append(index)
+
+    added_bonds = 0
+    for i, j in bonds:
+        if atom_objs[i] is not None and atom_objs[j] is not None:
+            top.addBond(atom_objs[i], atom_objs[j])
+            added_bonds += 1
+    if added_bonds != len(bonds):
+        print(
+            f"WARNING: {len(bonds) - added_bonds} of {len(bonds)} bonds from the .mae "
+            "could not be added (an endpoint atom was not placed).",
+            file=sys.stderr,
+        )
+    print(
+        f"Read .mae: {len(atoms)} atoms, {len(residue_atoms)} residues, "
+        f"{len(chain_order)} chains, {added_bonds} bonds.",
+        file=sys.stderr,
+    )
+
+    # Positions must follow the TOPOLOGY's atom order, which is emit_order.
+    pos = np.array(
+        [[atoms[i][2], atoms[i][3], atoms[i][4]] for i in emit_order], dtype=float
+    ) / 10.0  # A -> nm
     box_vectors_nm = (
         [[v / 10.0 for v in boxv[k : k + 3]] for k in (0, 3, 6)] if boxv else None
     )
@@ -535,14 +570,34 @@ def wrap_pdb(
                 f"--center {center} selected 0 atoms (residue names did not match). "
                 "Use --center complex (everything except water/ions) or check resnames."
             )
+        # Reassemble the selected group BEFORE measuring its centre. A multi-chain
+        # protein straddling a face has its chains scattered across the box, so a
+        # naive centroid of those scattered chains is meaningless (it averages to
+        # roughly the box middle no matter where the assembly really is).
+        # Anchor on the largest selected component and image the others onto it.
+        sel_components = [c for c in components if sel[np.asarray(c)].any()]
+        if sel_components:
+            anchor = max(sel_components, key=len)
+            anchor_centre = pos[np.asarray(anchor)].mean(0)
+            for component in sel_components:
+                idx = np.asarray(component)
+                pos[idx] -= box * np.round(
+                    (pos[idx].mean(0) - anchor_centre) / box
+                )
+
         group_center = pos[sel].mean(0)
         pos += box / 2.0 - group_center
         centered_on = center
         centered_atoms = int(sel.sum())
 
-    # 2) image each whole molecule so its centroid sits inside the box.
+    # 2) image each whole molecule so its centroid sits inside the box. Components
+    #    belonging to the centered group are skipped: they were reassembled and
+    #    placed together above and must stay together, even if part of the
+    #    assembly pokes through a face.
     for component in components:
         idx = np.asarray(component)
+        if center != "none" and sel[idx].any():
+            continue
         pos[idx] -= np.floor(pos[idx].mean(0) / box) * box
 
     after = float(((pos < 0) | (pos > box)).any(axis=1).mean() * 100)

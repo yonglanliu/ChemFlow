@@ -66,9 +66,13 @@ chemflow-install-ketcher = "chemflow.desktop.install_ketcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["chemflow*", "alchemforge*", "src*"]
+include = ["chemflow*", "alchemforge*", "alchemfold*", "hpc*", "src*"]
 
 [tool.setuptools.package-data]
+"hpc.presets" = ["*.yaml"]
+"alchemfold" = ["*.yaml"]
+"alchemfold.boltz" = ["*.yaml"]
+"alchemfold.diffdock" = ["_shim.py"]
 "chemflow.desktop" = ["*.md", "models/*.pt", "models/*.csv.gz"]
 "chemflow.config" = ["*.toml", "*.yaml"]
 "chemflow.deep_learning.gpt.config" = ["*.toml"]

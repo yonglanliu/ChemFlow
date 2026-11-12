@@ -152,7 +152,7 @@ def _diffdock_example(args) -> bool:
     """Tiny DiffDock-L screen through the real stage -> run -> rank path (1 GPU)."""
     import yaml
 
-    from alchemfold.engines.diffdock import locate
+    from alchemfold.diffdock.engine import locate
     from alchemfold.screen_config import default_yaml_text
 
     python, repo = locate(type("C", (), {})())

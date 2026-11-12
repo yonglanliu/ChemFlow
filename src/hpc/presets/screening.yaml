@@ -1,0 +1,39 @@
+# Virtual screening: library -> shards -> one SLURM array task per shard.
+#   shards  = number of array tasks = GPUs running in parallel
+#   gpus    = GPUs per task (>1 turns on Boltz DDP inside a shard)
+# Arrays are always plain 0-N with no %concurrency cap.
+
+default_preset: screen-1gpu-x20
+
+defaults:
+  conda_env: chemflow
+
+presets:
+  screen-1gpu-x4:
+    time: "1-00:00:00"
+    gpus: 1
+    shards: 4
+  screen-1gpu-x20:
+    time: "1-00:00:00"
+    gpus: 1
+    shards: 20
+  screen-1gpu-x50:
+    time: "1-00:00:00"
+    gpus: 1
+    shards: 50
+  screen-l40-x20:
+    time: "1-00:00:00"
+    gpus: 1
+    gpu_type: l40
+    shards: 20
+  screen-h200-x10:
+    time: "1-00:00:00"
+    gpus: 1
+    gpu_type: gpuh200
+    shards: 10
+  screen-4gpu-x5:                 # 5 shards x 4 GPUs (DDP) = 20 GPUs
+    time: "1-00:00:00"
+    gpus: 4
+    gpu_type: a100
+    shards: 5
+    mem: 64G

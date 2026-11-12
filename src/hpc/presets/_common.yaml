@@ -1,0 +1,32 @@
+# Shared across every module. A per-module file (docking.yaml, openfe.yaml, …)
+# overrides these, and a user file (env/hpc.yaml, $CHEMFLOW_HPC_CONFIG,
+# ~/.config/chemflow/hpc.yaml) overrides that.
+
+defaults:
+  partition: gpu
+  account: ""               # "" -> no #SBATCH --account line
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 8
+  gpus: 1
+  gpu_type: ""              # "" -> --gres=gpu:N with no type constraint
+  mem: 32G
+  time: "1-00:00:00"
+  conda_env: ""             # "" -> no `conda activate` line
+  conda_init: ""
+  modules: ""
+
+# Selectable --gres GPU types. "" = any GPU. Edit to match your cluster's gres
+# names; this is the ONE list the CLI and every desktop dropdown read.
+gpu_types:
+  - ""
+  - a100
+  - a100x
+  - v100
+  - v100x
+  - p100
+  - l40
+  - gpuh200
+  - h100
+  - a40
+  - rtx8000

@@ -111,11 +111,13 @@ class ProcessConsole(QWidget):
         self.run_module("chemflow.cli.main", arguments, python=find_rosetta_python())
 
     def run_alchemfold(self, arguments: list[str], *, cwd: str | None = None) -> None:
-        """Run the ``alchemfold`` CLI through the AlchemFold env's interpreter.
+        """Run the ``alchemfold`` CLI (docking / screening).
 
-        Boltz-2 / Chai-1 co-folding & screening live in the dedicated ``alchemfold``
-        conda env; resolve that interpreter (or fall back to the current one).
-        ``cwd`` sets the working directory so outputs land next to the config.
+        AlchemFold runs in whichever env can import it — normally ``chemflow``,
+        since the shared ``alchemfold`` env is retired. The ENGINES live in
+        their own envs (``boltz``, ``chai``, ``diffdock``) and are resolved per
+        run from the config. ``cwd`` sets the working directory so outputs land
+        next to the config.
         """
         from chemflow.desktop.alchemfold_env import find_alchemfold_python
 

@@ -26,13 +26,16 @@ def build_from_config(config_path):
     conf = load_config(config_path)
     validate_config(conf)
 
-    # Shared ligand template helper (heavy module).
-    from chemflow.fe.openmm_modeling.membrane_relax import _register_small_molecule
+    # Shared ligand template + structure IO helpers (heavy module).
+    from chemflow.fe.openmm_modeling.membrane_relax import (
+        _register_small_molecule,
+        read_structure,
+    )
 
     workdir = Path(conf.workdir).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
 
-    pdb = PDBFile(str(conf.input_pdb))
+    pdb = read_structure(conf.input_pdb)
     modeller = Modeller(pdb.topology, pdb.positions)
 
     forcefield = ForceField(*list(conf.forcefields))
@@ -64,7 +67,7 @@ def build_from_config(config_path):
 
     out_pdb = workdir / conf.output_pdb
     with open(out_pdb, "w") as handle:
-        PDBFile.writeFile(modeller.topology, modeller.positions, handle)
+        PDBFile.writeFile(modeller.topology, modeller.positions, handle, keepIds=True)
     print(f"Wrote soluble complex: {out_pdb}")
     print("Feed this into: chemflow openmm modeling md")
     return out_pdb

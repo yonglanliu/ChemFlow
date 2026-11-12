@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from alchemfold.boltz_config import _deep_merge, _load_yaml, _resolve, _to_namespace
+from alchemfold.utils._config import _deep_merge, _load_yaml, _resolve, _to_namespace
 
 SUPPORTED_ENGINES = {"boltz", "chai", "diffdock"}
 SUPPORTED_OUTPUT_FORMATS = {"pdb", "mmcif"}
@@ -63,7 +63,7 @@ DEFAULTS: dict[str, Any] = {
     "diffdock_trajectory": False,  # save the reverse-diffusion trajectory (multi-frame PDB per pose)
     "trajectories_dir": None,      # screens: one folder for all trajectories (default <workdir>/trajectories)
     "diffdock_batch_size": None,   # GPU batch over the poses of ONE ligand (DiffDock --batch_size, default 10); only helps when poses > batch
-    "diffdock_dedupe_esm": True,   # embed the receptor once per run, not once per ligand (see engines/_diffdock_shim.py)
+    "diffdock_dedupe_esm": True,   # embed the receptor once per run, not once per ligand (see diffdock/_shim.py)
     "diffdock_samples": None,      # poses per ligand (DiffDock --samples_per_complex); null => diffusion_samples if >1 else 10
     "diffdock_inference_steps": 20,
     "diffdock_model_dir": None,
@@ -690,6 +690,8 @@ def default_yaml_text(
     recycling_steps: int = 3,
     sampling_steps: int = 200,
     no_kernels: bool = True,
+    boltz_command: str | None = None,
+    chai_command: str | None = None,
     use_msa_server: bool = True,
     predict_affinity: bool = False,
     affinity_binder: str | None = None,
@@ -797,7 +799,8 @@ def default_yaml_text(
         f"recycling_steps: {int(recycling_steps)}               # chai: --num-trunk-recycles\n"
         f"sampling_steps: {int(sampling_steps)}             # Boltz only\n"
         f"no_kernels: {'true' if no_kernels else 'false'}                # Boltz only: true = pure-PyTorch "
-        "(default; works without cuequivariance/trifast). false only in a boltz-only env with kernels\n"
+        "(default; works without cuequivariance/trifast). false needs the kernels: "
+        "`chemflow boltz-env install` (that env is then used automatically)\n"
         "override: false\n"
         + (f'cache_dir: "{cache_dir}"' + " " * max(1, 10 - len(str(cache_dir)))
            + "# model/CCD weights cache (boltz --cache / chai downloads); avoid HOME quota\n"
@@ -805,9 +808,19 @@ def default_yaml_text(
            '# cache_dir: "/data/$USER/.alchemfold_cache"  # model/CCD weights cache; '
            "use /data or scratch, never HOME (disk quota)\n")
         + f"{affinity_block}"
-        'boltz_command: "boltz"          # used when engine: boltz\n'
-        'chai_command: "chai-lab"        # used when engine: chai\n'
-        "# --- DiffDock (engine: diffdock) docks into a receptor structure ---\n"
+        + (f'boltz_command: "{boltz_command}"'
+           + (" " * max(1, 10 - len(str(boltz_command))))
+           + "# Boltz-2 from its own env\n"
+           if boltz_command else
+           'boltz_command: "boltz"          # engine: boltz — found in the '
+           "sibling conda env named 'boltz'\n")
+        + (f'chai_command: "{chai_command}"'
+           + (" " * max(1, 10 - len(str(chai_command))))
+           + "# Chai-1 from its own env\n"
+           if chai_command else
+           'chai_command: "chai-lab"        # engine: chai — found in the '
+           "sibling conda env named 'chai'\n")
+        + "# --- DiffDock (engine: diffdock) docks into a receptor structure ---\n"
         + (f'receptor_pdb: "{receptor_pdb}"   # receptor structure DiffDock docks into\n'
            if receptor_pdb else
            '# receptor_pdb: "receptor.pdb"  # receptor structure (or omit to fold the sequence via ESMFold)\n')

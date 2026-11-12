@@ -472,7 +472,7 @@ complex_box_size: null     # [x, y, z] nm when membrane_system: true
 solvent_protocol_repeats: 1
 complex_protocol_repeats: 1
 pressure: 1.0              # bar
-temperature: 310.0         # kelvin
+temperature: 298.15        # kelvin
 
 # --- Force field / nonbonded ---
 ff_constraints: hbonds
@@ -580,7 +580,7 @@ complex_box_size: null     # [x, y, z] nm when membrane_system: true
 # --- General ---
 protocol_repeats: 1
 pressure: 1.0              # bar
-temperature: 310.0         # kelvin
+temperature: 298.15        # kelvin
 
 # --- Force field / nonbonded ---
 nonbonded_cutoff: 1.0      # nanometer

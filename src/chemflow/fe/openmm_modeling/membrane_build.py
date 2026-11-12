@@ -70,6 +70,40 @@ class MembraneModeller(Modeller):
             return [n.strip() for n in ref_names.split(",") if n.strip()]
         return [n.strip() for n in ref_names if n.strip()]
 
+    @staticmethod
+    def _align_membrane_normal(pos_nm, p_indices):
+        """Rotate the system so the bilayer normal points along +Z.
+
+        The lipid phosphorus atoms form two parallel planes, so their thinnest
+        principal axis IS the bilayer normal (spread across the membrane is a few
+        nm versus ~12 nm in-plane). Rotate that axis onto Z about the membrane
+        centroid, which leaves the system in place. Returns (positions, tilt_deg).
+        """
+        heads = pos_nm[p_indices]
+        centre = heads.mean(axis=0)
+        # Smallest-variance principal axis of the head-group positions.
+        _vals, vecs = np.linalg.eigh(np.cov((heads - centre).T))
+        normal = vecs[:, 0]
+        if normal[2] < 0:
+            normal = -normal
+
+        target = np.array([0.0, 0.0, 1.0])
+        axis = np.cross(normal, target)
+        sin_a = float(np.linalg.norm(axis))
+        cos_a = float(np.clip(np.dot(normal, target), -1.0, 1.0))
+        tilt_deg = float(np.degrees(np.arccos(cos_a)))
+        if sin_a < 1e-8:
+            return pos_nm, tilt_deg
+        axis = axis / sin_a
+        # Rodrigues' rotation formula.
+        K = np.array([
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ])
+        R = np.eye(3) + sin_a * K + (1.0 - cos_a) * (K @ K)
+        return (pos_nm - centre) @ R.T + centre, tilt_deg
+
     def addSolventWithExistingMembrane(
         self,
         forcefield: ForceField,
@@ -85,6 +119,8 @@ class MembraneModeller(Modeller):
         neutralize=True,
         write_structure=False,
         residueTemplates=dict(),
+        align_membrane=True,
+        water_lipid_cutoff=0.28,   # nm (2.8 A)
     ):
         """
         Add solvent to a system with an existing lipid membrane (and optional pre-existing water).
@@ -118,6 +154,12 @@ class MembraneModeller(Modeller):
             "DPPC", "DLPC", "DLPE", "DPPE", "DOPE", "DSPC", "POP", "DLP",
             "DMP", "DOP", "DPP",
         ]
+        protein_names = {
+            "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+            "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+            "HID", "HIE", "HIP", "HSD", "HSE", "HSP", "CYX", "CYM", "ASH", "GLH",
+            "LYN", "ACE", "NME", "NMA", "NH2",
+        }
         # Save original waters so they are never deleted.
         original_water_keys = {
             self._residue_key(res)
@@ -155,9 +197,49 @@ class MembraneModeller(Modeller):
                 "`lipid_names`."
             )
 
+        # -------------------------------------------------
+        # Align the bilayer normal with Z before anything else.
+        # A Desmond frame is usually expressed in a tilted lab frame, so the
+        # membrane sits at an angle. Everything downstream assumes normal = Z:
+        # the core-water test, the box, and MonteCarloMembraneBarostat (which
+        # scales XY and Z separately). Rotating here fixes all three at once.
+        # -------------------------------------------------
+        if align_membrane:
+            all_pos, tilt_deg = self._align_membrane_normal(
+                all_pos, lipid_atom_indices
+            )
+            if tilt_deg > 0.5:
+                self.positions = all_pos * nanometer
+                sys_min = np.min(all_pos, axis=0)
+                sys_max = np.max(all_pos, axis=0)
+                sys_zmin, sys_zmax = sys_min[2], sys_max[2]
+                print(
+                    f"Aligned the bilayer normal to Z (rotated {tilt_deg:.1f} deg)."
+                )
+            else:
+                print(f"Bilayer normal already along Z ({tilt_deg:.1f} deg tilt).")
+
+        # Use a TRIMMED range (1st-99th percentile), not min-max. In an unwrapped
+        # frame a single lipid straddling the z face sits a whole box length away,
+        # and min-max would then stretch the "membrane core" across nearly the
+        # entire box — so every newly added water would be classed as core water
+        # and deleted, leaving the bulk empty.
         lipid_pos = all_pos[lipid_atom_indices, :]
-        lipid_zmin = float(np.min(lipid_pos[:, 2]))
-        lipid_zmax = float(np.max(lipid_pos[:, 2]))
+        lipid_zmin = float(np.percentile(lipid_pos[:, 2], 1.0))
+        lipid_zmax = float(np.percentile(lipid_pos[:, 2], 99.0))
+        raw_zmin = float(np.min(lipid_pos[:, 2]))
+        raw_zmax = float(np.max(lipid_pos[:, 2]))
+        print(
+            f"Membrane core z-range: {lipid_zmin:.2f} to {lipid_zmax:.2f} nm "
+            f"(trimmed; raw min-max was {raw_zmin:.2f} to {raw_zmax:.2f})"
+        )
+        if (raw_zmax - raw_zmin) > 1.5 * (lipid_zmax - lipid_zmin):
+            print(
+                "WARNING: lipid z min-max is far wider than the trimmed range — the "
+                "frame is UNWRAPPED in z. The trimmed range is used so bulk water is "
+                "not wrongly deleted, but you should wrap the frame or pass a box.",
+                file=sys.stderr,
+            )
 
         # -----------------------------------------------------
         #                   Determine PBC
@@ -198,11 +280,87 @@ class MembraneModeller(Modeller):
             pbc_y_vector = pbc_y_vector.value_in_unit(nanometer) if is_quantity(pbc_y_vector) else pbc_y_vector
             box_x, box_y = pbc_x_vector[0], pbc_y_vector[1]
 
-        # (4) padding is a FALLBACK for z only (when nothing above set it).
-        if box_z is None and padding is not None:
+        # (4) padding is a FALLBACK for z, used only when SOME box info was given
+        # but the z length is still missing.
+        explicit_box = (box_x is not None) or (box_y is not None) or (box_z is not None)
+        if explicit_box and box_z is None and padding is not None:
             padding = padding.value_in_unit(nanometer) if is_quantity(padding) else padding
             box_z = float(sys_zmax - sys_zmin + 2.0 * padding)
             print(f'padding fallback -> box_z={box_z}')
+
+        # (5) GUESS the box when nothing supplied one:
+        #       XY  = min-max of the lipid head groups (phosphorus)
+        #       Z   = min-max of the PROTEIN + 2 * padding (default 1.0 nm)
+        # Phosphorus is found by ELEMENT, not by name: Maestro writes "P1", so an
+        # atom.name == "P" test finds nothing.
+        #
+        # Caveat this prints about: min-max is only correct for a WRAPPED frame. A
+        # raw MD frame is usually unwrapped, and the few lipids straddling a face
+        # inflate it — measured on a 216k-atom POPC system whose true box was
+        # 12.246 x 12.417 nm: P min-max gave 12.92 x 13.11 (+11% area) while the
+        # 1st-99th percentile span gave 12.35 x 12.44 (+1%). So when the two
+        # disagree the frame is unwrapped, and we report the trimmed value too.
+        if box_x is None or box_y is None or box_z is None:
+            head = [
+                atom.index
+                for atom in self.topology.atoms()
+                if atom.residue.name in lipid_names
+                and atom.element is not None
+                and atom.element.symbol == "P"
+            ]
+            if head:
+                ref_xy, xy_source = all_pos[head, :], "lipid head groups (P)"
+            else:
+                lipid_all = [
+                    atom.index
+                    for atom in self.topology.atoms()
+                    if atom.residue.name in lipid_names
+                ]
+                if lipid_all:
+                    ref_xy, xy_source = all_pos[lipid_all, :], "all lipid atoms"
+                else:
+                    ref_xy, xy_source = all_pos, "the whole system"
+
+            protein_idx = [
+                atom.index
+                for atom in self.topology.atoms()
+                if atom.residue.name in protein_names
+            ]
+            if protein_idx:
+                ref_z, z_source = all_pos[protein_idx, 2], "protein"
+            else:
+                ref_z, z_source = all_pos[:, 2], "the whole system"
+
+            pad = padding if padding is not None else 1.0
+            pad = pad.value_in_unit(nanometer) if is_quantity(pad) else float(pad)
+
+            span_xy = ref_xy.max(axis=0) - ref_xy.min(axis=0)
+            if box_x is None:
+                box_x = float(span_xy[0])
+            if box_y is None:
+                box_y = float(span_xy[1])
+            if box_z is None:
+                box_z = float(ref_z.max() - ref_z.min() + 2.0 * pad)
+            print(
+                f"WARNING: no periodic box supplied — GUESSED it: "
+                f"XY from {xy_source} min-max, Z from {z_source} min-max + 2 x {pad} nm "
+                f"-> [{box_x:.3f}, {box_y:.3f}, {box_z:.3f}] nm.",
+                file=sys.stderr,
+            )
+
+            # Unwrapped-frame check: compare min-max against a trimmed span.
+            lo_xy, hi_xy = np.percentile(ref_xy, [1.0, 99.0], axis=0)
+            trimmed = hi_xy - lo_xy
+            if (span_xy[:2] > trimmed[:2] * 1.05).any():
+                print(
+                    "WARNING: the XY min-max exceeds the 1st-99th percentile span "
+                    f"({span_xy[0]:.2f} x {span_xy[1]:.2f} vs "
+                    f"{trimmed[0]:.2f} x {trimmed[1]:.2f} nm), which means this frame "
+                    "is UNWRAPPED — molecules straddling a face inflate min-max, so "
+                    "the guessed box is too large. Wrap the frame first "
+                    "(alchemforge wrap-pbc), or pass the real box via box_vectors.",
+                    file=sys.stderr,
+                )
 
         print(f'box_x: {box_x}, box_y: {box_y}, box_z: {box_z}')
         if (box_x is not None) and (box_y is not None) and (box_z is not None):
@@ -272,37 +430,69 @@ class MembraneModeller(Modeller):
         n_original_atoms = len(all_pos)
 
         to_delete = []
-        kept_original_core = 0
+        # Which newly added waters clash with the membrane? Distance to the nearest
+        # LIPID atom, not a z-band: a z-band also deletes legitimate water at the
+        # head groups and inside protein pores, which empties the bulk. Anything
+        # closer than `water_lipid_cutoff` to a lipid atom is overlapping and goes.
+        lipid_all_indices = [
+            atom.index
+            for atom in modeller.topology.atoms()
+            if atom.residue.name in lipid_names
+        ]
+        lipid_xyz = solv_pos[lipid_all_indices, :] if lipid_all_indices else None
+        cutoff = float(water_lipid_cutoff)
+
+        def _too_close(points):
+            """Boolean mask: point within `cutoff` of any lipid atom."""
+            if lipid_xyz is None or len(points) == 0:
+                return np.zeros(len(points), dtype=bool)
+            try:
+                from scipy.spatial import cKDTree
+
+                tree = cKDTree(lipid_xyz)
+                return np.array([len(h) > 0 for h in tree.query_ball_point(points, cutoff)])
+            except ImportError:
+                from collections import defaultdict
+
+                grid = defaultdict(list)
+                for i, c in enumerate(np.floor(lipid_xyz / cutoff).astype(np.int64)):
+                    grid[tuple(c)].append(i)
+                offs = [(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1)]
+                mask = np.zeros(len(points), dtype=bool)
+                for n, p in enumerate(points):
+                    cx, cy, cz = np.floor(p / cutoff).astype(np.int64)
+                    cand = []
+                    for da, db, dc in offs:
+                        cand.extend(grid.get((cx + da, cy + db, cz + dc), ()))
+                    if cand and (np.linalg.norm(lipid_xyz[cand] - p, axis=1) < cutoff).any():
+                        mask[n] = True
+                return mask
+
+        candidates, cand_pos = [], []
         for residue in modeller.topology.residues():
             if residue.name not in ["HOH", "WAT"]:
                 continue
-
             atom_indices = [atom.index for atom in residue.atoms()]
-            is_original = min(atom_indices) < n_original_atoms
-
-            oxy_index = None
-            for atom in residue.atoms():
-                if atom.element is not None and atom.element.symbol == "O":
-                    oxy_index = atom.index
-                    break
+            if min(atom_indices) < n_original_atoms:
+                continue  # NEVER delete an original water
+            oxy_index = next(
+                (a.index for a in residue.atoms()
+                 if a.element is not None and a.element.symbol == "O"),
+                None,
+            )
             if oxy_index is None:
                 continue
+            candidates.append(residue)
+            cand_pos.append(solv_pos[oxy_index])
 
-            z = solv_pos[oxy_index][2]
-            in_core = lipid_zmin < z < lipid_zmax
-
-            if is_original:
-                if in_core:
-                    kept_original_core += 1
-                continue  # NEVER delete an original water, core or not
-
-            if in_core:
-                to_delete.append(residue)
+        if candidates:
+            clashing = _too_close(np.array(cand_pos))
+            to_delete = [r for r, bad in zip(candidates, clashing) if bad]
 
         print(
-            f'Core-water cleanup: deleting {len(to_delete)} newly-added water(s) '
-            f'inside the membrane; keeping {kept_original_core} ORIGINAL water(s) '
-            f'inside the membrane (never deleted).'
+            f'Water cleanup: {len(candidates)} newly-added water(s) checked; deleting '
+            f'{len(to_delete)} within {cutoff * 10:.1f} A of a lipid atom. Original '
+            'waters are never deleted.'
         )
         if len(to_delete) > 0:
             modeller.delete(to_delete)
@@ -1129,14 +1319,27 @@ def build_from_config(config_path):
     conf = load_config(config_path)
     validate_config(conf)
 
-    # The relax module owns the shared ligand template helper (both are heavy).
-    from chemflow.fe.openmm_modeling.membrane_relax import _register_small_molecule
+    # The relax module owns the shared ligand/IO helpers (both are heavy).
+    from chemflow.fe.openmm_modeling.membrane_relax import (
+        _register_small_molecule,
+        fix_structure,
+        read_structure,
+    )
 
     workdir = Path(conf.workdir).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
 
-    pdb = PDBFile(str(conf.input_pdb))
+    pdb = read_structure(conf.input_pdb)
     modeller = MembraneModeller(pdb.topology, pdb.positions)
+
+    # Repair the usual Maestro->Amber mismatches (HIS naming, missing/terminal H)
+    # before anything tries to match force-field templates.
+    if bool(getattr(conf, "fix_structure", True)):
+        fix_structure(
+            modeller,
+            add_hydrogens=bool(getattr(conf, "add_missing_hydrogens", True)),
+            ph=float(getattr(conf, "ph", 7.0)),
+        )
 
     forcefield = ForceField(*list(conf.forcefields))
     if getattr(conf, "ligand_sdf", None):
@@ -1173,6 +1376,8 @@ def build_from_config(config_path):
             "ionicStrength": ionic,
             "neutralize": bool(conf.neutralize),
             "write_structure": bool(conf.write_intermediates),
+            "align_membrane": bool(getattr(conf, "align_membrane", True)),
+            "water_lipid_cutoff": float(getattr(conf, "water_lipid_cutoff", 0.28)),
         }
         boxsize = getattr(existing, "boxsize", None)
         if boxsize:
@@ -1190,19 +1395,60 @@ def build_from_config(config_path):
         print("Solvating + ionizing an existing-membrane system...")
         modeller.addSolventWithExistingMembrane(forcefield, **kwargs)
 
-    out_pdb = workdir / conf.output_pdb
-    with open(out_pdb, "w") as handle:
-        PDBFile.writeFile(modeller.topology, modeller.positions, handle)
-    # Also write mmCIF (OpenFE-ready; avoids the PDB >99,999-atom serial overflow
-    # that large membrane systems hit).
     from openmm.app import PDBxFile
 
+    n_atoms = modeller.topology.getNumAtoms()
+    out_pdb = workdir / conf.output_pdb
     out_cif = out_pdb.with_suffix(".cif")
+
+    # mmCIF is always written: no serial limit, and it is what OpenFE reads.
     with open(out_cif, "w") as handle:
         PDBxFile.writeFile(modeller.topology, modeller.positions, handle, keepIds=True)
+
+    # A PDB is always written too. Under 99,999 atoms OpenMM's writer is fine;
+    # beyond that its serial column overflows, so use the hybrid-36 writer (the
+    # standard large-system encoding, which VMD and Maestro both read).
+    if n_atoms < 100000:
+        with open(out_pdb, "w") as handle:
+            # keepIds: preserve the input's chain/residue numbering. Without it
+            # OpenMM renumbers every residue sequentially from 1, so ligand and
+            # cofactor resids would no longer match the input structure.
+            PDBFile.writeFile(
+                modeller.topology, modeller.positions, handle, keepIds=True
+            )
+        # OpenMM's PDB writer truncates residue names to 3 columns, turning POPC
+        # into POP so the lipid no longer matches its force-field template.
+        try:
+            from alchemforge.structure.pdbfix import (
+                _restore_four_character_residue_names,
+            )
+
+            _restore_four_character_residue_names(out_pdb, modeller.topology)
+        except Exception as exc:  # noqa: BLE001 - cosmetic, never block the build
+            print(f"(could not restore 4-character residue names: {exc})",
+                  file=sys.stderr)
+    else:
+        from alchemforge.structure.wrap_pbc import _write_pdb_hybrid36
+
+        box = modeller.topology.getPeriodicBoxVectors().value_in_unit(nanometer)
+        _write_pdb_hybrid36(
+            out_pdb,
+            modeller.topology,
+            np.array(modeller.positions.value_in_unit(nanometer)),
+            np.array([box[0][0], box[1][1], box[2][2]]),
+            np,
+        )
+        print(
+            f"NOTE: {n_atoms:,} atoms exceeds the 99,999-atom PDB limit, so the PDB "
+            "was written with hybrid-36 serials (readable by VMD/Maestro, but NOT by "
+            "OpenMM — feed the .cif to the next step).",
+            file=sys.stderr,
+        )
     print(f"Wrote membrane complex: {out_pdb}  and  {out_cif}")
+    result = out_pdb
+
     print("Feed this into: chemflow openmm modeling relax-membrane")
-    return out_pdb
+    return result
 
 
 def main(argv=None):

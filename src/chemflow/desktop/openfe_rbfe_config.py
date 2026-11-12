@@ -38,11 +38,18 @@ DEFAULTS: dict[str, Any] = {
     # --- Membrane ---
     "membrane_system": False,
     "complex_box_size": None,             # [x, y, z] nm, required for membrane PBC
+    # --- Complex-leg pre-equilibration (chemflow addition) ---
+    # openfe's RBFE protocol goes straight from minimisation to NPT; SepTop/ABFE
+    # run an NVT stage first. On a dense bilayer that gap shows up as a step-0
+    # NaN. True swaps in chemflow's EquilibratedRelativeHybridTopologyProtocol.
+    "pre_equilibrate_complex": False,
+    "pre_equilibrate_nvt_ps": 100.0,      # NVT length, ps (0 = skip the MD part)
+    "pre_equilibrate_min_steps": 5000,    # minimisation steps before the NVT
     # --- General ---
     "solvent_protocol_repeats": 1,
     "complex_protocol_repeats": 1,
     "pressure": 1.0,
-    "temperature": 310.0,
+    "temperature": 298.15,
     # --- Force field / nonbonded ---
     "ff_constraints": "hbonds",
     "nonbonded_cutoff": 1.0,
@@ -111,131 +118,90 @@ HPC_DEFAULTS: dict[str, Any] = {
 }
 
 
-def hpc_defaults() -> dict[str, Any]:
-    """HPC_DEFAULTS merged with the ``openfe.defaults`` block of env/hpc.yaml.
+def hpc_defaults(module: str = "openfe") -> dict[str, Any]:
+    """HPC_DEFAULTS merged with the module's defaults from the shared presets.
 
-    Lets a cluster set OpenFE's allocated resources (partition, account, cpus,
-    gpus, gpu_type, memory, walltime, replicates, nodes/ntasks, modules/conda) in
-    one customizable file instead of editing code. Lookup order mirrors the
-    AlchemFold HPC config: ``$CHEMFLOW_HPC_CONFIG`` -> ``<PROJECT_ROOT>/env/hpc.yaml``
-    -> ``~/.config/chemflow/hpc.yaml``. Missing file/keys fall back to built-ins.
+    Resources now come from the top-level :mod:`hpc` package — built-in
+    ``src/hpc/presets/<module>.yaml`` overlaid with the user's override file
+    (``$CHEMFLOW_HPC_CONFIG`` -> ``<PROJECT_ROOT>/env/hpc.yaml`` ->
+    ``~/.config/chemflow/hpc.yaml``). The few keys that are specific to this
+    renderer and have no place in a generic allocation (``array``, ``mpi``,
+    ``mpi_launcher``) still come from :data:`HPC_DEFAULTS`.
     """
-    import os
-    from pathlib import Path as _Path
-
     merged = dict(HPC_DEFAULTS)
-    candidates = []
-    env = os.environ.get("CHEMFLOW_HPC_CONFIG", "").strip()
-    if env:
-        candidates.append(_Path(env).expanduser())
     try:
-        from chemflow.config import PROJECT_ROOT  # noqa: PLC0415
+        from hpc import presets as _presets
 
-        candidates.append(_Path(PROJECT_ROOT) / "env" / "hpc.yaml")
+        merged.update(_presets.defaults(module).as_openfe())
     except Exception:
         pass
-    candidates.append(_Path.home() / ".config" / "chemflow" / "hpc.yaml")
-    for candidate in candidates:
-        try:
-            if candidate and candidate.is_file():
-                import yaml  # noqa: PLC0415
-
-                data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-                block = (data.get("openfe") or {}).get("defaults") or {}
-                for key, value in block.items():
-                    if value is not None:
-                        merged[str(key)] = value
-                break
-        except Exception:
-            continue
     return merged
 
 
-# Embed the HPC allocation as an inline `slurm:` block in the config (alchemfold
-# screen.yaml style), seeded from the file-backed defaults.
 DEFAULTS["slurm"] = dict(hpc_defaults())
 
 
 def _read_hpc_file() -> dict:
-    """Return the parsed env/hpc.yaml (lookup order like hpc_defaults), or {}."""
-    import os
-    from pathlib import Path as _Path
-
-    candidates = []
-    env = os.environ.get("CHEMFLOW_HPC_CONFIG", "").strip()
-    if env:
-        candidates.append(_Path(env).expanduser())
+    """Return the parsed user HPC config file, or {} (kept for callers)."""
     try:
-        from chemflow.config import PROJECT_ROOT  # noqa: PLC0415
+        from hpc import presets as _presets
 
-        candidates.append(_Path(PROJECT_ROOT) / "env" / "hpc.yaml")
+        path = _presets.config_path()
+        if path is None:
+            return {}
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
     except Exception:
-        pass
-    candidates.append(_Path.home() / ".config" / "chemflow" / "hpc.yaml")
-    for candidate in candidates:
-        try:
-            if candidate and candidate.is_file():
-                import yaml  # noqa: PLC0415
-
-                return yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-        except Exception:
-            continue
-    return {}
+        return {}
 
 
-def slurm_preset_names() -> list[str]:
-    """Named presets available in env/hpc.yaml (e.g. singlenode-singlegpu-long)."""
-    return list((_read_hpc_file().get("presets") or {}).keys())
+def slurm_preset_names(module: str = "openfe") -> list[str]:
+    """Named presets for a module (e.g. singlenode-singlegpu-long)."""
+    try:
+        from hpc import presets as _presets
+
+        return _presets.names(module)
+    except Exception:
+        return []
 
 
-def single_gpu_preset_names() -> list[str]:
-    """Preset names that request at most one GPU (for OpenFE, which is single-GPU).
+def single_gpu_preset_names(module: str = "openfe") -> list[str]:
+    """Presets requesting at most one GPU.
 
-    Excludes multi-GPU presets (gpus/gpus_per_node > 1); those are only meaningful
-    for GROMACS HREX, not for OpenFE's single-process ``quickrun``.
+    OpenFE's ``quickrun`` and the OpenMM steps are single-process, so a
+    multi-GPU preset would be silently downgraded; they offer only these.
     """
-    presets = _read_hpc_file().get("presets") or {}
-    out = []
-    for name, value in presets.items():
-        gpus = 1
-        if isinstance(value, dict):
-            gpus = int(value.get("gpus_per_node", value.get("gpus", 1)) or 1)
-        if gpus <= 1:
-            out.append(name)
-    return out
+    try:
+        from hpc import presets as _presets
+
+        return _presets.single_gpu_names(module)
+    except Exception:
+        return []
 
 
-# env/hpc.yaml preset keys -> OpenFE inline `slurm:` block keys.
-_PRESET_KEY_MAP = {
-    "time": "walltime", "walltime": "walltime",
-    "nodes": "nodes",
-    "ntasks_per_node": "ntasks", "ntasks": "ntasks",
-    "gpus_per_node": "gpus", "gpus": "gpus",
-    "gpu_type": "gpu_type",
-    "cpus_per_task": "cpus_per_task",
-    "mem": "memory", "memory": "memory",
-    "mpi": "mpi", "mpi_launcher": "mpi_launcher",
-    "partition": "partition", "account": "account",
-    "conda_environment": "conda_environment", "conda_env": "conda_environment",
-}
+def apply_slurm_preset(slurm: dict[str, Any], name: str,
+                       module: str = "openfe") -> dict[str, Any]:
+    """Overlay a named preset onto an OpenFE-style ``slurm:`` block.
 
-
-def apply_slurm_preset(slurm: dict[str, Any], name: str) -> dict[str, Any]:
-    """Overlay a named env/hpc.yaml preset onto an OpenFE `slurm:` block.
-
-    A preset value may be a plain walltime string (single-node single-GPU) or a
-    mapping of resources. Returns a new dict; raises ValueError for unknown names.
+    Only the keys the preset actually declares are applied, so picking a longer
+    walltime does not reset a hand-edited CPU count. Returns a new dict; raises
+    ValueError for an unknown preset name. Key translation (``time``->
+    ``walltime``, ``mem``->``memory``, ``gpus_per_node``->``gpus``,
+    ``conda_env``->``conda_environment``) lives in :mod:`hpc.resources`.
     """
-    presets = _read_hpc_file().get("presets") or {}
-    if name not in presets:
-        raise ValueError(f"unknown HPC preset {name!r}; choose one of {sorted(presets)}")
-    raw = presets[name]
-    raw = {"time": raw} if not isinstance(raw, dict) else dict(raw)
+    from hpc import presets as _presets
+    from hpc.resources import to_openfe_keys
+
+    try:
+        declared = _presets.declared(module, name)
+    except KeyError:
+        available = sorted(_presets.names(module))
+        raise ValueError(
+            f"unknown HPC preset {name!r}; choose one of {available}") from None
     out = dict(slurm)
-    for key, value in raw.items():
-        mapped = _PRESET_KEY_MAP.get(key)
-        if mapped and value is not None:
-            out[mapped] = value
+    out.update(to_openfe_keys(declared))
     return out
 
 
@@ -442,6 +408,18 @@ def slurm_script(config_path: str | Path, hpc: dict[str, Any] | None = None,
     n_rep = int(hpc.get("replicates", 3))
     gpus = int(hpc.get("gpus", 0))
     gpu_type = str(hpc.get("gpu_type", "")).strip()
+    # chemflow's complex-leg NVT pre-equilibration reads its lengths from the
+    # environment at RUN time (they are not part of gufe's serialised settings),
+    # so the config's values have to be exported here.
+    if conf.get("pre_equilibrate_complex"):
+        preeq_exports = (
+            "\n# chemflow complex-leg NVT pre-equilibration "
+            "(pre_equilibrate_complex: true)\n"
+            f"export CHEMFLOW_RFE_PREEQ_NVT_PS={float(conf.get('pre_equilibrate_nvt_ps', 100.0)):g}\n"
+            f"export CHEMFLOW_RFE_PREEQ_MIN_STEPS={int(conf.get('pre_equilibrate_min_steps', 5000))}\n"
+        )
+    else:
+        preeq_exports = ""
     # OpenFE `quickrun` runs the whole DAG in ONE process on ONE GPU — it is NOT
     # MPI-parallel, so we never wrap it in srun/mpirun (that would just launch N
     # redundant copies of the same edge). Parallelism is across edges/replicates
@@ -503,7 +481,7 @@ for ((i=0; i<N_REP; i++)); do mkdir -p "${{OUT_ROOT}}/replicate_${{i}}"; done
 
 export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 export CUDA_VISIBLE_DEVICES="${{SLURM_LOCALID:-0}}"
-
+{preeq_exports}
 echo "=== GPU check (before quickrun) ==="
 echo "host=$(hostname)  CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-unset}}  SLURM_JOB_GPUS=${{SLURM_JOB_GPUS:-unset}}"
 nvidia-smi -L 2>/dev/null || echo "nvidia-smi: not available on this node"

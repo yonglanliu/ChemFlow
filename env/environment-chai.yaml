@@ -1,0 +1,43 @@
+name: chai
+
+# Chai-1 ONLY, in its own environment.
+#
+# Why separate: each docking engine now gets its own env (boltz, chai,
+# diffdock) instead of one shared "alchemfold" env. Chai-1 pins torch<2.7,
+# which conflicts with the recent PyTorch that Boltz-2's cuEquivariance kernels
+# need — keeping them apart lets each have what it wants.
+#
+# ONE-CLICK (same result; what the desktop Environments page runs):
+#
+#   chemflow chai-env install --cuda 12.6
+#   chemflow chai-env status          # prints the chai-lab path
+#
+# Or by hand:
+#
+#   mamba env create -f env/environment-chai.yaml
+#   conda activate chai
+#   chai-lab --help
+#
+# The AlchemFold CLI resolves `chai-lab` from a sibling conda env named `chai`,
+# so you do not have to activate it. To point at a differently-named env, set
+# it explicitly in the docking / screening config:
+#
+#   chai_command: "/path/to/conda/envs/chai/bin/chai-lab"
+#
+# Chai-1 downloads its weights on first use; set CHAI_DOWNLOADS_DIR to a /data
+# or scratch path so they do not land on your HOME quota.
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+
+  # Keep heavy binaries off pip where conda-forge has them.
+  - rdkit
+  - numpy
+  - scipy
+
+  - pip:
+      # - --extra-index-url https://download.pytorch.org/whl/cu126
+      - chai_lab

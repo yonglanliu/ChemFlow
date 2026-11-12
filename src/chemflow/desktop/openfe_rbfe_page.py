@@ -54,6 +54,16 @@ from chemflow.desktop.widgets.forms import (  # noqa: F811
 )
 
 
+
+def _hpc_gpu_types(module: str) -> list[str]:
+    """Selectable --gres GPU types from the shared hpc presets (one list, repo-wide)."""
+    try:
+        from hpc import presets as _presets
+
+        return _presets.gpu_types(module)
+    except Exception:          # hpc not importable -> a safe built-in list
+        return ["", "a100", "a100x", "v100", "v100x", "h100", "p100", "a40", "rtx8000"]
+
 class _EdgeBridge(QObject):
     edge_clicked = Signal(str, str)
     node_clicked = Signal(str)
@@ -126,7 +136,9 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         self.ligand_sdf = PathField("ligands.sdf (one record per ligand, same frame)")
         self.off_backend = _combo(["ambertools", "openeye", "rdkit"], "ambertools")
         self.charge_method = _combo(["am1bcc", "am1bccelf10", "espaloma", "nagl"], "am1bcc")
-        self.smff = QLineEdit("openff-2.1.0")
+        self.smff = _combo(["openff-2.2.1", "openff-2.1.0", "openff-2.0.0", "gaff-2.11", "gaff-1.81"], "openff-2.1.0")
+        self.smff.setEditable(True)
+        self.smff.setToolTip("Ligand force field (OpenFF/SMIRNOFF or GAFF). Pick one or type a custom version.")
         self.charge_cores = _spin(4, 1, 64)
         self.charged_out = PathField("ligands_charged.sdf (output)", mode="save",
                                      save_filter="SDF (*.sdf)")
@@ -521,6 +533,28 @@ class OpenFERbfeWorkflowPage(QTabWidget):
             "and stripped from the protein before parameterization.")
         self.membrane = QCheckBox("Membrane system (membrane + solvent + ions)")
         self.membrane.toggled.connect(self._on_membrane_toggle)
+        # Complex-leg NVT pre-equilibration (chemflow's protocol subclass).
+        self.pre_equilibrate = QCheckBox("NVT pre-equilibration of the complex leg")
+        self.pre_equilibrate.setToolTip(
+            "openfe's RBFE protocol goes straight from minimisation to NPT "
+            "equilibration; SepTop and ABFE run an NVT stage first. On a dense "
+            "bilayer that gap shows up as a NaN at state 0 before sampling "
+            "starts.\n\nWith this on, chemflow relaxes the hybrid system "
+            "(minimise + NVT at lambda=0) once per repeat and all lambda windows "
+            "start from the result. Look for '[chemflow-preeq]' in the job log.")
+        self.preeq_nvt_ps = QDoubleSpinBox()
+        self.preeq_nvt_ps.setRange(0.0, 10000.0)
+        self.preeq_nvt_ps.setDecimals(0)
+        self.preeq_nvt_ps.setValue(100.0)
+        self.preeq_nvt_ps.setSuffix(" ps")
+        self.preeq_nvt_ps.setToolTip("NVT length. 0 = minimise only.")
+        self.preeq_min_steps = QSpinBox()
+        self.preeq_min_steps.setRange(0, 1000000)
+        self.preeq_min_steps.setSingleStep(1000)
+        self.preeq_min_steps.setValue(5000)
+        self.preeq_min_steps.setToolTip(
+            "Minimisation steps before the NVT stage. 0 = skip.")
+        self.pre_equilibrate.toggled.connect(self._on_pre_equilibrate_toggle)
         self.solvent_box_shape = _combo(["cube", "dodecahedron", "octahedron"], "dodecahedron")
         self.complex_box_shape = _combo(["cube", "dodecahedron", "octahedron"], "dodecahedron")
         self.box_size = PathField(
@@ -545,6 +579,17 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         f.addRow("Cofactor template SDF (optional):", self.cofactor_template_sdf)
         f.addRow("Cofactor resname(s):", self.cofactor_resnames)
         f.addRow("", self.membrane)
+        f.addRow("", self.pre_equilibrate)
+        preeq_row = QWidget()
+        preeq_layout = QHBoxLayout(preeq_row)
+        preeq_layout.setContentsMargins(0, 0, 0, 0)
+        preeq_layout.addWidget(QLabel("NVT:"))
+        preeq_layout.addWidget(self.preeq_nvt_ps)
+        preeq_layout.addWidget(QLabel("minimisation steps:"))
+        preeq_layout.addWidget(self.preeq_min_steps)
+        preeq_layout.addStretch()
+        f.addRow("Pre-equilibration:", preeq_row)
+        self._on_pre_equilibrate_toggle(self.pre_equilibrate.isChecked())
         f.addRow("Solvent-leg box shape:", self.solvent_box_shape)
         f.addRow("Complex-leg box shape:", self.complex_box_shape)
         f.addRow("Complex box size (membrane):", self.box_size)
@@ -591,7 +636,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         self.nb_method = _combo(["PME"], "PME")
         self.nb_cutoff = _dspin(1.0, 0.5, 2.0)
         self.pressure = _dspin(1.0, 0.1, 10.0)
-        self.temperature = _dspin(310.0, 250.0, 400.0, step=1.0, decimals=2)
+        self.temperature = _dspin(298.15, 250.0, 400.0, step=1.0, decimals=2)
         self.platform = _combo(["CUDA", "OpenCL", "CPU"], "CUDA")
 
         def _group(title, rows):
@@ -681,7 +726,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         self.hpc_preset = QComboBox()
         try:
             from chemflow.desktop.openfe_rbfe_config import single_gpu_preset_names
-            _preset_names = single_gpu_preset_names()
+            _preset_names = single_gpu_preset_names("openfe")
         except Exception:
             _preset_names = []
         self.hpc_preset.addItems(["(custom)", *_preset_names])
@@ -696,7 +741,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         # plain --gres=gpu:N; a value => --gres=gpu:<type>:N.
         self.gpu_type = QComboBox()
         self.gpu_type.setEditable(True)
-        self.gpu_type.addItems(["", "a100", "a100x", "v100", "v100x", "h100", "p100", "a40", "rtx8000"])
+        self.gpu_type.addItems(_hpc_gpu_types("openfe"))
         self.gpu_type.setCurrentText("")
         self.gpu_type.setToolTip("GPU type for --gres=gpu:<type>:N (leave blank for any GPU). "
                                  "Editable — type your cluster's name if not listed.")
@@ -764,7 +809,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
             return
         try:
             from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset
-            merged = apply_slurm_preset(self._hpc(), name)
+            merged = apply_slurm_preset(self._hpc(), name, "openfe")
         except Exception:
             return
         self.partition.setText(str(merged.get("partition", "gpu")))
@@ -777,6 +822,11 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         self.walltime.setText(str(merged.get("walltime", "240:00:00")))
         if merged.get("conda_environment"):
             self.conda_env.setText(str(merged["conda_environment"]))
+
+    def _on_pre_equilibrate_toggle(self, on: bool) -> None:
+        """The lengths only matter when the extra stage runs."""
+        self.preeq_nvt_ps.setEnabled(on)
+        self.preeq_min_steps.setEnabled(on)
 
     def _on_membrane_toggle(self, on: bool) -> None:
         self.box_size.setEnabled(on)
@@ -802,7 +852,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
             ),
             "off_toolkit_backend": self.off_backend.currentText(),
             "partial_charge_method": self.charge_method.currentText(),
-            "small_molecule_forcefield": self.smff.text().strip(),
+            "small_molecule_forcefield": self.smff.currentText().strip(),
             "mapper": self.mapper.currentText(),
             "planner": self.planner.currentText(),
             "alchemical_network": alchemical_network,
@@ -810,6 +860,9 @@ class OpenFERbfeWorkflowPage(QTabWidget):
             "skip_charge_assignment": self.skip_charge.isChecked(),
             "protein_pdb": self.protein_pdb.text() or None,
             "membrane_system": self.membrane.isChecked(),
+            "pre_equilibrate_complex": self.pre_equilibrate.isChecked(),
+            "pre_equilibrate_nvt_ps": self.preeq_nvt_ps.value(),
+            "pre_equilibrate_min_steps": self.preeq_min_steps.value(),
             "complex_box_size": parse_box_size(self.box_size.text()),
             "solvent_box_shape": self.solvent_box_shape.currentText(),
             "complex_box_shape": self.complex_box_shape.currentText(),

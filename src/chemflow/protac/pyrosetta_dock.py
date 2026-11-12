@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from alchemfold.boltz_config import _deep_merge, _load_yaml, _resolve, _to_namespace
+from alchemfold.utils._config import _deep_merge, _load_yaml, _resolve, _to_namespace
 
 DEFAULTS: dict[str, Any] = {
     "workdir": ".",

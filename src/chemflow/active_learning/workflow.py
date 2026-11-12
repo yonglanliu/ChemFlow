@@ -23,6 +23,7 @@ import csv
 import random
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 from chemflow.active_learning.acquisition import Candidate, select_batch, top_hits
@@ -540,10 +541,18 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
     smiles_col = int(conf.get("smiles_column", 0))
     id_col = int(conf.get("id_column", 1))
 
-    for rnd in range(int(conf["rounds"])):
+    n_rounds = int(conf["rounds"])
+    _al_start = time.time()
+    for rnd in range(n_rounds):
         rdir = outdir / f"round_{rnd:02d}"
         rdir.mkdir(exist_ok=True)
-        print(f"\n=== Round {rnd} ===")
+        _done = rnd
+        _el = time.time() - _al_start
+        _eta = (_el / _done * (n_rounds - _done)) if _done else 0.0
+        print(f"\n=== Round {rnd + 1}/{n_rounds} "
+              f"({100.0 * _done / n_rounds:.0f}% complete"
+              + (f", ETA {_eta / 60:.0f} min" if _done else "")
+              + ") ===")
 
         # 1. Select this round's batch as (id, smiles) records. RESUME: if this round's batch.smi
         #    already exists, reuse it — re-selecting would pick a different batch (the already-docked
@@ -635,6 +644,8 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
         #    merged into labels.csv (the multitask training targets). Resumable per
         #    oracle: a finished oracle_scores_<name>.csv is reused across <=10-day jobs.
         single = len(oracle_specs) == 1
+        n_batch = sum(1 for _ in open(oracle_batch, encoding="utf-8")) \
+            if (not dry_run and Path(oracle_batch).is_file()) else 0
         for spec in oracle_specs:
             out_name = "oracle_scores.csv" if single else f"oracle_scores_{spec['name']}.csv"
             scores_csv = rdir / out_name
@@ -645,7 +656,16 @@ def run_loop(config_path, *, dry_run: bool = False) -> int:
                     batch=oracle_batch, receptor=spec.get("receptor", ""), out=scores_csv)
                 _run(cmd, dry_run=dry_run, modules=spec.get("modules") or [])
             if not dry_run and scores_csv.exists():
-                for cid, val in _read_scores(scores_csv).items():
+                returned = _read_scores(scores_csv)
+                # How many of the compounds we sent did this oracle actually score?
+                if n_batch:
+                    pct = 100.0 * len(returned) / n_batch
+                    missing = n_batch - len(returned)
+                    print(f"  oracle {spec['name']}: {len(returned)}/{n_batch} "
+                          f"compounds scored ({pct:.1f}%)"
+                          + (f", {missing} missing — check the docking logs"
+                             if missing else ""))
+                for cid, val in returned.items():
                     labels_rows.setdefault(cid, {})[spec["metric"]] = val
         if not dry_run:
             _write_labels_multi(labels_csv, labels_rows, label_metrics)

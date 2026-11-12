@@ -1,16 +1,17 @@
-"""``chemflow alchemfold-env`` — create the AlchemFold co-folding/docking env.
+"""``chemflow alchemfold-env`` — the old SHARED engine env (DEPRECATED).
 
-AlchemFold's structure-prediction engines (Boltz-2, Chai-1) run in their own conda
-env (they pull a heavy Torch stack). This builds that env and links chemflow into
-it so the desktop can drive ``alchemfold dock`` / co-folding through it:
+Superseded by one conda env per docking engine, so each can pin the PyTorch it
+needs without fighting the others:
 
-    chemflow alchemfold-env status                 # env present? boltz/chai importable?
-    chemflow alchemfold-env install                # create 'alchemfold' + boltz + chai + chemflow
-    chemflow alchemfold-env install --cuda 12.4    # GPU Torch build (HPC/GPU)
-    chemflow alchemfold-env install --dry-run      # print the commands only
+    chemflow boltz-env install          # Boltz-2 (+ cuEquivariance kernels)
+    chemflow chai-env install           # Chai-1  (pins torch<2.7)
+    chemflow diffdock-env install       # DiffDock-L (+ its repo)
 
-Boltz-2 (`boltz`) and Chai-1 (`chai_lab`) are installed via pip; both bring Torch.
-For GPU set --cuda to pull a CUDA Torch build.
+AlchemFold itself no longer needs an env of its own: it runs from the
+``chemflow`` env and resolves each engine's executable from the engine's env.
+
+This command is kept so existing ``alchemfold`` environments keep working. It
+prints a deprecation notice; pass ``--quiet-deprecation`` to silence it.
 """
 
 from __future__ import annotations
@@ -26,8 +27,10 @@ _PACKAGES = ("boltz", "chai_lab", "pyarrow")
 # Boltz-2's optimized triangle kernels (cuequivariance/trifast) are intentionally
 # NOT installed here: the current cuequivariance-ops wheels pull a very new PyTorch
 # (2.11+/CUDA 13) that breaks chai_lab's torch<2.7 pin. AlchemFold defaults Boltz to
-# `no_kernels: true` (pure-PyTorch). For max Boltz speed use a separate boltz-only
-# env with `pip install "boltz[cuda]"` and set `no_kernels: false` there.
+# `no_kernels: true` (pure-PyTorch). For max Boltz speed install the separate
+# boltz-only env instead: `chemflow boltz-env install` (env/environment-boltz.yaml),
+# then set `no_kernels: false` — AlchemFold resolves `boltz` from that env
+# automatically when the kernels are enabled.
 # Conda deps that must match env/environment-alchemfold.yaml so the CLI/desktop
 # one-click build the SAME env as `conda env create -f env/environment-alchemfold.yaml`.
 _CONDA_EXTRAS = ("pyyaml", "rdkit>=2024.03", "setuptools>=80", "wheel")
@@ -90,7 +93,23 @@ def _env_exists(tool: str, env: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+_DEPRECATION = (
+    "NOTE: 'alchemfold-env' is deprecated — engines now get one env each:\n"
+    "        chemflow boltz-env install      # Boltz-2 (+ GPU kernels)\n"
+    "        chemflow chai-env install       # Chai-1\n"
+    "        chemflow diffdock-env install   # DiffDock-L\n"
+    "      AlchemFold runs from the chemflow env and calls each engine in its own.\n"
+    "      This command still works for existing setups."
+)
+
+
+def _warn_deprecated(args) -> None:
+    if not getattr(args, "quiet_deprecation", False):
+        print(_DEPRECATION, file=sys.stderr)
+
+
 def _install(args) -> int:
+    _warn_deprecated(args)
     tool = args.tool or _conda_tool()
     if not tool:
         print("error: neither mamba nor conda found on PATH. On HPC, load conda first, "
@@ -147,7 +166,10 @@ def _status(args) -> int:
 
 def add_alchemfold_env_parser(subparsers) -> None:
     parser = subparsers.add_parser(
-        "alchemfold-env", help="Create/link the AlchemFold env (Boltz-2 + Chai-1)")
+        "alchemfold-env",
+        help="DEPRECATED shared engine env — use boltz-env / chai-env / diffdock-env")
+    parser.add_argument("--quiet-deprecation", action="store_true",
+                        help="do not print the deprecation notice")
     commands = parser.add_subparsers(dest="alchemfold_env_command", required=True)
 
     install = commands.add_parser("install", help="Create the env and install Boltz-2 + Chai-1 + chemflow")

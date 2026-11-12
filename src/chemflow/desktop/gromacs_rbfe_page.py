@@ -1180,11 +1180,11 @@ class GromacsRbfePage(QTabWidget):
         self.hpc_preset = QComboBox()
         try:
             from chemflow.desktop.openfe_rbfe_config import slurm_preset_names
-            _preset_names = slurm_preset_names()
+            _preset_names = slurm_preset_names("gromacs")
         except Exception:
             _preset_names = []
         self.hpc_preset.addItems(["(custom)", *_preset_names])
-        self.hpc_preset.setToolTip("Pick a preset from env/hpc.yaml to fill the SLURM fields "
+        self.hpc_preset.setToolTip("Pick a GROMACS preset (src/hpc/presets/gromacs.yaml, or the gromacs: section of env/hpc.yaml) to fill the SLURM fields "
                                    "below; '(custom)' keeps your own values.")
         self.hpc_preset.currentTextChanged.connect(self._apply_hpc_preset)
         self.nodes = _spin(1, 1, 64)
@@ -1238,7 +1238,7 @@ class GromacsRbfePage(QTabWidget):
                 "memory": self.memory.text().strip(),
                 "walltime": self.walltime.text().strip(),
             }
-            merged = apply_slurm_preset(base, name)
+            merged = apply_slurm_preset(base, name, "gromacs")
         except Exception:
             return
         self.partition.setText(str(merged.get("partition", "gpu")))

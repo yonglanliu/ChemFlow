@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from alchemfold.boltz_config import _deep_merge, _load_yaml, _resolve, _to_namespace
+from alchemfold.utils._config import _deep_merge, _load_yaml, _resolve, _to_namespace
 from alchemfold.dock_config import DEFAULTS as _DOCK_DEFAULTS
 
 # Source ligand catalogs the screen can target (DB build is handled elsewhere).
@@ -100,7 +100,7 @@ DEFAULTS.update(
             "cpus_per_task": 8,
             "mem": "32G",
             "time": "24:00:00",
-            "conda_env": "alchemfold",
+            "conda_env": "chemflow",
         },
         "ranking": {
             "metric": "auto",       # auto | confidence | affinity | ptm | iptm | plddt
@@ -270,6 +270,9 @@ def default_yaml_text(
     jobname: str = "",
     cleanup: bool = True,
     predict_affinity: bool = False,
+    no_kernels: bool = True,
+    boltz_command: str | None = None,
+    chai_command: str | None = None,
     rank_metric: str = "auto",
     receptor_pdb: str | None = None,
     diffdock_samples: int = 10,
@@ -280,7 +283,7 @@ def default_yaml_text(
     """Return a commented example screening config."""
     sl = {"partition": "gpu", "account": "", "nodes": 1, "gpus_per_task": 1,
           "gpu_type": "", "cpus_per_task": 8, "mem": "32G", "time": "24:00:00",
-          "conda_env": "alchemfold"}
+          "conda_env": "chemflow"}
     sl.update({k: v for k, v in (slurm or {}).items() if v is not None})
     if ligand_files:
         files_block = "ligand_files:                   # browsed / listed library files\n" + "".join(
@@ -338,7 +341,18 @@ def default_yaml_text(
         'accelerator: "gpu"\n'
         "diffusion_samples: 1\n"
         "seed: 1\n"
-        "\n"
+        + (
+            "no_kernels: false               # Boltz-2 GPU kernels ON: needs the boltz env "
+            "(chemflow boltz-env install)\n"
+            if not no_kernels else
+            "no_kernels: true                # Boltz-2 pure-PyTorch path (works without "
+            "cuequivariance/trifast); false = use the kernels\n"
+        )
+        + (f'boltz_command: "{boltz_command}"   # Boltz-2 from its own env\n'
+           if boltz_command else "")
+        + (f'chai_command: "{chai_command}"   # Chai-1 from its own env\n'
+           if chai_command else "")
+        + "\n"
         + proteins_block
         + "# receptor_pdb: receptor.pdb     # for engine: diffdock\n"
         "\n"
@@ -364,7 +378,8 @@ def default_yaml_text(
         f'  cpus_per_task: {int(sl["cpus_per_task"])}\n'
         f'  mem: "{sl["mem"]}"\n'
         f'  time: "{sl["time"]}"\n'
-        f'  conda_env: "{sl["conda_env"]}"\n'
+        f'  conda_env: "{sl["conda_env"]}"           # env that can import alchemfold; '
+        "the engine (boltz/chai/diffdock) comes from its OWN env\n"
         "\n"
         "ranking:\n"
         f'  metric: "{rank_metric}"                # auto | affinity_probability_binary | affinity_pred_value | confidence_score | confidence (DiffDock) | iptm | complex_plddt\n'

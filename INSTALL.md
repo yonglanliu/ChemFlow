@@ -189,11 +189,31 @@ The desktop buttons call these same commands — run them yourself if you prefer
 
 ```bash
 chemflow fe-env install                 # AlchemForge (OpenFE + GROMACS/PMX)
-chemflow alchemfold-env install         # AlchemFold (Boltz-2 + Chai-1)
+chemflow boltz-env install              # Boltz-2 co-folding / docking (+ GPU kernels)
+chemflow chai-env install               # Chai-1 co-folding / docking
+chemflow diffdock-env install           # DiffDock-L blind docking (+ its repo)
 chemflow rosetta-env install            # Rosetta + PyRosetta
 
-# add --cuda <ver> for a GPU build (AlchemForge / AlchemFold), e.g.:
+# add --cuda <ver> for a GPU build, e.g.:
 chemflow fe-env install --cuda 12.6 --staged
+```
+
+**One env per docking engine.** Boltz-2, Chai-1 and DiffDock-L each get their
+own environment because their PyTorch requirements conflict — Chai-1 pins
+torch<2.7, while Boltz-2's cuEquivariance kernels need a newer one. AlchemFold,
+which writes each engine's input and collects its results, runs from the
+`chemflow` env and resolves the engine executable from the engine's own env, so
+you never have to activate them. The older shared `chemflow alchemfold-env` is
+**deprecated**; it still works for existing setups but should not be used for a
+new install.
+
+After installing Boltz-2, `chemflow boltz-env status` prints the path to put in
+a docking config (or just leave it — the sibling env named `boltz` is found
+automatically):
+
+```yaml
+boltz_command: "/path/to/conda/envs/boltz/bin/boltz"
+no_kernels: false
 ```
 
 Add `--dry-run` to print the commands without running them, and use the `status`

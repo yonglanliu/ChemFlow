@@ -1,0 +1,22 @@
+# OpenMM system modeling and MD (build-soluble, build-membrane,
+# relax-membrane, md). One single-GPU job per step — no array.
+
+default_preset: openmm-1gpu-2day
+
+defaults:
+  cpus_per_task: 8
+  gpus: 1
+  mem: 32G
+  time: "48:00:00"
+  conda_env: alchemforge
+
+presets:
+  openmm-build: "04:00:00"        # build / solvate / assemble only
+  openmm-relax: "12:00:00"        # staged membrane relaxation
+  openmm-1gpu-2day: "48:00:00"    # production MD (default)
+  openmm-1gpu-week: "7-00:00:00"  # long MD
+
+  openmm-a100-2day:
+    time: "48:00:00"
+    gpus: 1
+    gpu_type: a100

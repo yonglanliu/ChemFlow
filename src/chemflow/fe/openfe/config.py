@@ -38,6 +38,14 @@ OPENFE_LIGAND_FEP_CONFIG: dict[str, dict[str, Any]] = {
         "transformation": "both",
         "mapper": "LomapAtomMapper",
         "planner": "minimal_spanning",
+        # Complex leg only: run minimisation + NVT MD on the hybrid system
+        # before alchemical sampling. openfe's RBFE protocol has no NVT stage
+        # (SepTop/ABFE do), which is where a dense bilayer around a freshly
+        # inserted hybrid ligand tends to diverge at state 0.
+        # Lengths: CHEMFLOW_RFE_PREEQ_NVT_PS / CHEMFLOW_RFE_PREEQ_MIN_STEPS.
+        "pre_equilibrate_complex": False,
+        "pre_equilibrate_nvt_ps": 100.0,
+        "pre_equilibrate_min_steps": 5000,
     },
     "alchemical_network_settings": {
         "replicates": 1,

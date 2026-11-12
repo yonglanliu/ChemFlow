@@ -43,6 +43,23 @@ DEFAULTS: dict[str, Any] = {
     "output_pdb": "membrane_complex.pdb",
     "write_intermediates": False,
     "workdir": ".",
+    "job_name": "",
+    # Ligand/cofactor parameterization (used only when ligand_sdf is set).
+    "small_molecule_forcefield": "gaff-2.11",
+    # auto = AM1-BCC if AmberTools/OpenEye is available, else the NAGL GNN
+    # surrogate. Charges already present in the ligand SDF always win.
+    "partial_charge_method": "auto",   # auto | am1bcc | nagl
+    # Auto-repair the structure before template matching: rename HIS by its
+    # protonation state (ff14SB needs HID/HIE/HIP) and add missing hydrogens,
+    # including the extra N-terminal ones.
+    "fix_structure": True,
+    "add_missing_hydrogens": True,
+    "ph": 7.0,
+    # Rotate the bilayer normal onto Z (Desmond frames are often tilted; the
+    # core test, the box and the membrane barostat all assume normal = Z).
+    "align_membrane": True,
+    # Newly added water closer than this (nm) to a lipid atom is removed.
+    "water_lipid_cutoff": 0.28,
     # Optional: "ligand_sdf" + "small_molecule_forcefield" to parameterize a
     # ligand carried inside the input protein PDB.
     "solvent_model": "tip3p",
@@ -85,7 +102,17 @@ def load_config(path: str | Path) -> SimpleNamespace:
         conf.workdir = str(base_dir)
     else:
         conf.workdir = _resolve(base_dir, workdir)
+    # Job-name layout: everything for a run goes under <workdir>/<job_name>/.
+    conf.job_name = str(getattr(conf, "job_name", "") or "").strip()
+    if conf.job_name:
+        conf.workdir = str(Path(conf.workdir) / conf.job_name)
     return conf
+
+
+# Accepted structure formats. mmCIF is required for systems over 99,999 atoms:
+# PDB overflows its serial column and Maestro then writes hybrid-36 ("A000G"),
+# which OpenMM's PDB reader cannot parse.
+_STRUCTURE_SUFFIXES = {".pdb", ".cif", ".pdbx", ".mmcif"}
 
 
 def validate_config(conf: SimpleNamespace) -> None:
@@ -94,8 +121,11 @@ def validate_config(conf: SimpleNamespace) -> None:
     if not input_pdb:
         raise ValueError("Membrane-build config requires 'input_pdb'")
     pdb_path = Path(input_pdb)
-    if not pdb_path.is_file() or pdb_path.suffix.lower() != ".pdb":
-        raise ValueError(f"input_pdb must be an existing .pdb file: {input_pdb}")
+    if not pdb_path.is_file() or pdb_path.suffix.lower() not in _STRUCTURE_SUFFIXES:
+        raise ValueError(
+            "input_pdb must be an existing .pdb or .cif/.mmcif file "
+            f"(use mmCIF for systems over 99,999 atoms): {input_pdb}"
+        )
 
     mode = str(getattr(conf, "mode", "build"))
     if mode not in SUPPORTED_MODES:
@@ -158,6 +188,10 @@ def stage(config_path: str | Path, task_directory: str | Path) -> tuple[Path, Pa
         "set -euo pipefail\n"
         'trap \'echo "[FAILED] line $LINENO: $BASH_COMMAND (exit $?)" >&2\' ERR\n'
         'CONFIG="${1:?Usage: $0 membrane_build.yaml}"\n'
+        # Put the interpreter's bin/ on PATH: OpenFF finds AmberTools by
+        # locating the sqm EXECUTABLE, so calling python by absolute path
+        # without an activated env makes AM1-BCC silently unavailable.
+        f'export PATH="{shlex.quote(str(Path(sys.executable).parent))}:$PATH"\n'
         f"exec {shlex.quote(sys.executable)} -m chemflow.fe.openmm_modeling.membrane_build "
         '--config "$CONFIG"\n',
         encoding="utf-8",
@@ -199,6 +233,8 @@ def default_yaml_text(
         "\n"
         f'input_pdb: "{input_pdb}"      # OPM-oriented protein (optionally with a ligand)\n'
         f"{ligand_block}"
+        'job_name: ""                    # if set, ALL outputs go to <workdir>/<job_name>/\n'
+        '# workdir: "."                  # base dir (default: this config\'s folder)\n'
         'mode: "build"                   # build | existing\n'
         f'platform: "{platform}"           # CUDA | OpenCL | CPU\n'
         f'output_pdb: "membrane_complex.pdb"\n'

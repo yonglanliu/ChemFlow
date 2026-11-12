@@ -130,6 +130,16 @@ def stylesheet() -> str:
         border-color: {COLORS['accent']};
     }}
     QComboBox::drop-down {{ border: 0; width: 24px; }}
+    /* Draw the dropdown caret with a CSS triangle. Styling ::drop-down suppresses
+       Qt's built-in arrow, which made combo boxes look like plain text fields. */
+    QComboBox::down-arrow {{
+        width: 0; height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid {COLORS['muted']};
+        margin-right: 9px;
+    }}
+    QComboBox::down-arrow:hover {{ border-top-color: {COLORS['text']}; }}
     QComboBox:on {{
         border-color: {COLORS['accent']};
         background: #0b1b2c;

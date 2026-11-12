@@ -1,0 +1,55 @@
+name: boltz
+
+# Boltz-2 ONLY, with the optimized GPU kernels (cuequivariance + trifast).
+#
+# Why a separate environment: the kernels need a recent PyTorch (trifast pins
+# torch>=2.6 and uses torch.library.wrap_triton), while `chai_lab` in
+# env/environment-alchemfold.yaml pins torch<2.7. Installing the kernels into
+# the shared alchemfold env upgrades torch and breaks Chai-1. Keeping Boltz on
+# its own means both can have what they need.
+#
+# ONE-CLICK (same result as this file, and what the desktop Environments page
+# "Boltz-2 + GPU kernels" card runs):
+#
+#   chemflow boltz-env install --cuda 12.6
+#   chemflow boltz-env status          # prints the boltz path + whether kernels import
+#
+# Or by hand:
+#
+#   mamba env create -f env/environment-boltz.yaml
+#   conda activate boltz
+#   boltz --help            # note this path:  $(which boltz)
+#
+# Using it from AlchemFold WITHOUT switching environments: set `no_kernels: false`
+# in the docking / screening config (or tick "Use Boltz GPU kernels" on the
+# desktop docking page). AlchemFold then resolves `boltz` from a sibling conda env
+# named `boltz` in preference to `alchemfold`, so no path is needed. To point at a
+# differently-named env, set it explicitly:
+#
+#   boltz_command: "/path/to/conda/envs/boltz/bin/boltz"
+#   no_kernels: false        # use the kernels (this env has them)
+#
+# Verify the kernels actually import before a long run:
+#   python -c "import cuequivariance_torch, trifast; print('kernels OK')"
+#
+# CUDA build: the default PyPI torch wheel targets a recent CUDA. If the cluster
+# driver is older, uncomment the extra index below and pick the matching cuXXX
+# tag (cu121, cu124, cu126, cu128). trifast needs torch>=2.6, so do NOT pin
+# below that — torch 2.5 installs but fails at predict time with an ImportError
+# about `wrap_triton`.
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+
+  # Keep heavy binaries off pip where conda-forge has them.
+  - rdkit
+  - numpy
+  - scipy
+
+  - pip:
+      # - --extra-index-url https://download.pytorch.org/whl/cu126
+      # - torch>=2.6
+      - "boltz[cuda]"     # Boltz-2 + cuequivariance-torch + trifast kernels

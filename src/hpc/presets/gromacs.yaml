@@ -1,0 +1,31 @@
+# GROMACS / PMX free energy (RBFE, ABFE, SepTop, resFEP, alanine scan).
+#
+# One array task per lambda window (or per window-group for HREX). Shorter per
+# task than OpenFE because the ladder is split across the array rather than run
+# inside one job. `constraint` is GROMACS-specific (#SBATCH --constraint).
+
+default_preset: gmx-1gpu-day
+
+defaults:
+  cpus_per_task: 8          # 4-8 CPU per GPU is the useful range for mdrun
+  gpus: 1
+  mem: 16G
+  time: "24:00:00"
+  conda_env: alchemforge
+
+presets:
+  gmx-1gpu-short: "08:00:00"      # equilibration / short windows
+  gmx-1gpu-day: "24:00:00"        # typical production window
+  gmx-1gpu-long: "2-00:00:00"     # slow systems (membrane, large complex)
+
+  gmx-hrex-8win:                  # HREX: one task per window, MPI across them
+    time: "2-00:00:00"
+    ntasks: 8
+    cpus_per_task: 1
+    gpus: 1
+    mem: 32G
+
+  gmx-a100-day:
+    time: "24:00:00"
+    gpus: 1
+    gpu_type: a100

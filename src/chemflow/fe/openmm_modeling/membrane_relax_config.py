@@ -67,6 +67,24 @@ DEFAULTS: dict[str, Any] = {
     "friction": 1.0,        # Langevin collision rate (1/ps)
     "seed": 1,
     "workdir": ".",
+    "job_name": "",
+    # Ligand/cofactor parameterization (used only when ligand_sdf is set).
+    "small_molecule_forcefield": "gaff-2.11",
+    # auto = AM1-BCC if AmberTools/OpenEye is available, else the NAGL GNN
+    # surrogate. Charges already present in the ligand SDF always win.
+    "partial_charge_method": "auto",   # auto | am1bcc | nagl
+    # Auto-repair the structure before template matching: rename HIS by its
+    # protonation state (ff14SB needs HID/HIE/HIP) and add missing hydrogens,
+    # including the extra N-terminal ones.
+    "fix_structure": True,
+    "add_missing_hydrogens": True,
+    "ph": 7.0,
+    # Protocol selector:
+    #   full         -> the 6-stage cold-start ladder below (for a freshly BUILT membrane)
+    #   equilibrated -> minimization -> equil_nvt -> equil_nprt only (for an ALREADY
+    #                   equilibrated membrane that just needs to re-settle, e.g. after
+    #                   re-solvation or wrapping). Uses the equil_nvt / equil_nprt blocks.
+    "protocol": "full",
     "forcefields": list(DEFAULT_FORCEFIELDS),
     # Optional: "ligand_sdf" and "small_molecule_forcefield" (e.g. "gaff-2.11"
     # or "openff-2.1.0") to parameterize ligand atoms present in the complex.
@@ -185,6 +203,48 @@ DEFAULTS: dict[str, Any] = {
         "chk": "relaxed_production.chk",
         "restraints": False,
     },
+    # --- protocol: equilibrated (NVT + NPgT) — used only when protocol == "equilibrated".
+    # For a membrane that is ALREADY equilibrated: no cold-start/heating ladder, just a
+    # short NVT to settle velocities/water around the (lightly restrained) solute, then a
+    # tensionless NPgT to let the box/area re-settle. Edit times/restraints as needed.
+    "equil_nvt": {
+        "name": "equil_nvt",
+        "title": "Equilibrated-system Stage 1 - NVT (300 K)",
+        "ensemble": "NVT",
+        "timestep": 0.002,
+        "temperature": 300.0,
+        "simulation_time": 250.0,
+        "out_pdb": "equil_nvt.pdb",
+        # Light protein-backbone + ligand anchor holds the pose while fresh water/box
+        # settle; set to false for a fully unrestrained NVT.
+        "restraints": {
+            "backbone": {"force_constants": _K_0_5},
+            "ligand": {"force_constants": _K_0_5},
+        },
+    },
+    "equil_nprt": {
+        "name": "equil_nprt",
+        "title": "Equilibrated-system Stage 2 - NPgT (300 K, tensionless)",
+        "ensemble": "NPGT",
+        "timestep": 0.004,
+        "temperature": 300.0,
+        "simulation_time": 2000.0,
+        "pressure": _PRESSURE,
+        "surface_tension": _SURFACE_TENSION,
+        "out_pdb": "equil_nprt.pdb",
+        "out_state": "equil_nprt.xml",
+        "chk": "equil_nprt.chk",
+        # A WEAK backbone + ligand anchor (0.1 kcal/mol/A^2), weaker than the NVT
+        # stage: it stops the solute drifting while the cell re-equilibrates, but
+        # positional restraints hold atoms in absolute space while the barostat
+        # rescales the box, so a stiff restraint would fight the volume change and
+        # bias the membrane area. Set to false for a fully unrestrained NPgT; the
+        # downstream `md` production stage is unrestrained either way.
+        "restraints": {
+            "backbone": {"force_constants": _K_0_1},
+            "ligand": {"force_constants": _K_0_1},
+        },
+    },
 }
 
 _STAGE_KEYS = (
@@ -266,7 +326,16 @@ def load_config(path: str | Path) -> SimpleNamespace:
         conf.workdir = str(base_dir)
     else:
         conf.workdir = _resolve(base_dir, workdir)
+    conf.job_name = str(getattr(conf, "job_name", "") or "").strip()
+    if conf.job_name:
+        conf.workdir = str(Path(conf.workdir) / conf.job_name)
     return conf
+
+
+# Accepted structure formats. mmCIF is required for systems over 99,999 atoms:
+# PDB overflows its serial column and Maestro then writes hybrid-36 ("A000G"),
+# which OpenMM's PDB reader cannot parse.
+_STRUCTURE_SUFFIXES = {".pdb", ".cif", ".pdbx", ".mmcif"}
 
 
 def validate_config(conf: SimpleNamespace) -> None:
@@ -275,8 +344,11 @@ def validate_config(conf: SimpleNamespace) -> None:
     if not input_pdb:
         raise ValueError("Membrane-relax config requires 'input_pdb'")
     pdb_path = Path(input_pdb)
-    if not pdb_path.is_file() or pdb_path.suffix.lower() != ".pdb":
-        raise ValueError(f"input_pdb must be an existing .pdb file: {input_pdb}")
+    if not pdb_path.is_file() or pdb_path.suffix.lower() not in _STRUCTURE_SUFFIXES:
+        raise ValueError(
+            "input_pdb must be an existing .pdb or .cif/.mmcif file "
+            f"(use mmCIF for systems over 99,999 atoms): {input_pdb}"
+        )
 
     forcefields = getattr(conf, "forcefields", None)
     if not forcefields or any(not str(item).strip() for item in forcefields):
@@ -339,6 +411,10 @@ def stage(config_path: str | Path, task_directory: str | Path) -> tuple[Path, Pa
         "set -euo pipefail\n"
         'trap \'echo "[FAILED] line $LINENO: $BASH_COMMAND (exit $?)" >&2\' ERR\n'
         'CONFIG="${1:?Usage: $0 membrane_relax.yaml}"\n'
+        # Put the interpreter's bin/ on PATH: OpenFF finds AmberTools by
+        # locating the sqm EXECUTABLE, so calling python by absolute path
+        # without an activated env makes AM1-BCC silently unavailable.
+        f'export PATH="{shlex.quote(str(Path(sys.executable).parent))}:$PATH"\n'
         f"exec {shlex.quote(sys.executable)} -m chemflow.fe.openmm_modeling.membrane_relax "
         '--config "$CONFIG"\n',
         encoding="utf-8",
@@ -386,6 +462,11 @@ def default_yaml_text(
         "# ===================================================================\n"
         "\n"
         f'input_pdb: "{input_pdb}"      # prepared complex with a CRYST1 box line\n'
+        'job_name: ""                    # if set, ALL outputs go to <workdir>/<job_name>/\n'
+        'protocol: "full"                # full = 6-stage cold-start ladder (freshly BUILT\n'
+        '                                #   membrane). equilibrated = minimization -> NVT ->\n'
+        '                                #   NPgT only, for an ALREADY equilibrated membrane\n'
+        '                                #   (uses the equil_nvt / equil_nprt blocks below).\n'
         f"{ligand_block}"
         f'platform: "{platform}"           # CUDA | OpenCL | CPU\n'
         "friction: 1.0                   # Langevin collision rate (1/ps)\n"
@@ -470,4 +551,28 @@ def default_yaml_text(
         "  pressure: 1.0\n"
         "  surface_tension: 0.0\n"
         "  restraints: false\n"
+        "\n"
+        "# -------------------------------------------------------------------\n"
+        "# Used ONLY when protocol: equilibrated (2-stage, for a pre-equilibrated\n"
+        "# membrane). The 6-stage ladder above is skipped.\n"
+        "# -------------------------------------------------------------------\n"
+        "equil_nvt:                      # Stage 1 - NVT (settle water around the solute)\n"
+        "  temperature: 300.0\n"
+        "  timestep: 0.002\n"
+        "  simulation_time: 250.0\n"
+        "  restraints:                   # light anchor; set to false for unrestrained\n"
+        "    backbone: {force_constants: 209.2}   # 0.5 kcal/mol/A^2\n"
+        "    ligand:   {force_constants: 209.2}\n"
+        "equil_nprt:                     # Stage 2 - NPgT (tensionless; box/area re-settles)\n"
+        "  temperature: 300.0\n"
+        "  timestep: 0.004\n"
+        "  simulation_time: 2000.0\n"
+        "  pressure: 1.0\n"
+        "  surface_tension: 0.0\n"
+        "  restraints:                   # WEAK anchor (0.1 kcal/mol/A^2): keeps the\n"
+        "    backbone: {force_constants: 41.84}    # solute from drifting while the\n"
+        "    ligand:   {force_constants: 41.84}    # cell relaxes. Do NOT stiffen it —\n"
+        "                                          # positional restraints fight the\n"
+        "                                          # barostat and bias the area.\n"
+        "                                          # Use `restraints: false` for none.\n"
     )

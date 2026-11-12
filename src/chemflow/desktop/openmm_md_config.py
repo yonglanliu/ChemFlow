@@ -111,8 +111,22 @@ def _emit(obj: Any, indent: int, lines: list[str]) -> None:
 
 def _emit_list(key: str, value, indent: int, lines: list[str]) -> None:
     pad = "  " * indent
+    if any(isinstance(v, dict) for v in value):
+        # List of mappings (e.g. stage4.temperature_schedule). These MUST be
+        # emitted as real YAML mappings — passing a dict through _yaml_scalar
+        # stringifies it ("{'temperature': 250.0, ...}"), and it then reloads as
+        # a str, so validation fails with "needs a positive 'duration'".
+        lines.append(f"{pad}{key}:")
+        for item in value:
+            if isinstance(item, dict):
+                inner = ", ".join(
+                    f"{k}: {_yaml_scalar(v)}" for k, v in item.items()
+                )
+                lines.append(f"{pad}  - {{{inner}}}")
+            else:
+                lines.append(f"{pad}  - {_yaml_scalar(item)}")
     # Nested list (e.g. box vectors) -> inline flow; list of scalars -> block.
-    if any(isinstance(v, (list, tuple, dict)) for v in value):
+    elif any(isinstance(v, (list, tuple)) for v in value):
         inline = "[" + ", ".join(
             ("[" + ", ".join(_yaml_scalar(x) for x in v) + "]") if isinstance(v, (list, tuple))
             else _yaml_scalar(v)

@@ -1,0 +1,37 @@
+# OpenFE binding free energy (RBFE / ABFE / SepTop).
+#
+# One array task per transformation x replicate, each a single-GPU `openfe
+# quickrun`. Walltimes are long because a full lambda ladder runs inside one
+# task. `replicates` multiplies the array size.
+
+default_preset: singlenode-singlegpu-day
+
+defaults:
+  cpus_per_task: 16
+  mem: 32G
+  time: "240:00:00"
+  replicates: 3
+  conda_env: alchemforge
+
+presets:
+  singlenode-singlegpu-quick: "04:00:00"
+  singlenode-singlegpu-day: "1-00:00:00"
+  singlenode-singlegpu-long: "4-00:00:00"
+  singlenode-singlegpu-week: "7-00:00:00"
+  singlenode-singlegpu-tendays: "10-00:00:00"
+
+  # Multi-GPU examples. NOTE: the OpenFE renderer runs one quickrun per array
+  # task and clamps to a single GPU, so these only make sense once that path
+  # grows real multi-GPU support.
+  # singlenode-4gpu-long:
+  #   time: "4-00:00:00"
+  #   gpus: 4
+  #   gpu_type: a100
+  # multinode-2x4-day:
+  #   time: "1-00:00:00"
+  #   nodes: 2
+  #   ntasks: 4
+  #   gpus: 4
+  #   gpu_type: a100
+  #   cpus_per_task: 8
+  #   mem: 128G

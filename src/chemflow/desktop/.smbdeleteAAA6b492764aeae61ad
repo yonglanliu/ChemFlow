@@ -1,0 +1,1055 @@
+"""OpenFE RBFE workflow page for ChemFlow Studio — the five-step setup, same as
+AlchemForge's OpenFE dialog, driving the ``alchemforge openfe rbfe`` CLI.
+
+Sub-tabs: Ligand Preparation (charge) → Network Creation (planner/mapping) →
+System (soluble or membrane; membrane needs a valid PBC box) → FEP simulation
+→ Job Setting (HPC) → Execution. The form writes one create_json YAML; Execution
+runs validate / setup-FEP (create_json) / local submit through the shared Activity
+console, or writes a SLURM submit script with the HPC parameters.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import QFile, QObject, Qt, QUrl, Signal, Slot
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from chemflow.desktop.network_edit import connectivity_issue, ligand_names, read_network
+from chemflow.desktop.openfe_rbfe_config import (
+    HPC_JOB_HELP_HTML,
+    build_config,
+    parse_box_size,
+    slurm_script,
+    to_yaml,
+    validate_setup,
+)
+from chemflow.desktop.widgets.forms import (  # noqa: F811
+    NoScrollComboBox as QComboBox,
+    NoScrollDoubleSpinBox as QDoubleSpinBox,
+    NoScrollSpinBox as QSpinBox,
+    PageHeader,
+    PathField,
+    action_button,
+    with_help,
+)
+
+
+
+def _hpc_gpu_types(module: str) -> list[str]:
+    """Selectable --gres GPU types from the shared hpc presets (one list, repo-wide)."""
+    try:
+        from hpc import presets as _presets
+
+        return _presets.gpu_types(module)
+    except Exception:          # hpc not importable -> a safe built-in list
+        return ["", "a100", "a100x", "v100", "v100x", "h100", "p100", "a40", "rtx8000"]
+
+class _EdgeBridge(QObject):
+    edge_clicked = Signal(str, str)
+    node_clicked = Signal(str)
+
+    @Slot(str, str)
+    def on_edge_clicked(self, a: str, b: str) -> None:
+        self.edge_clicked.emit(a, b)
+
+    @Slot(str)
+    def on_node_clicked(self, name: str) -> None:
+        self.node_clicked.emit(name)
+
+
+def _web_view():
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    return QWebEngineView()
+
+
+def _combo(items, current):
+    box = QComboBox()
+    box.addItems(items)
+    if current in items:
+        box.setCurrentText(current)
+    return box
+
+
+def _dspin(value, lo, hi, step=0.1, decimals=3):
+    s = QDoubleSpinBox()
+    s.setRange(lo, hi)
+    s.setDecimals(decimals)
+    s.setSingleStep(step)
+    s.setValue(value)
+    return s
+
+
+def _spin(value, lo, hi):
+    s = QSpinBox()
+    s.setRange(lo, hi)
+    s.setValue(value)
+    return s
+
+
+class OpenFERbfeWorkflowPage(QTabWidget):
+    """Five-step OpenFE RBFE setup (charge → network → system → FEP → job)."""
+
+    def __init__(self, console=None, parent=None):
+        super().__init__(parent)
+        self._console = console
+        self.setDocumentMode(True)
+        self.addTab(self._ligand_tab(), "1 · Ligand Prep")
+        self.addTab(self._network_tab(), "2 · Network")
+        self.addTab(self._system_tab(), "3 · System")
+        self.addTab(self._fep_tab(), "4 · FEP simulation")
+        self.addTab(self._job_tab(), "5 · Job (HPC)")
+        self.addTab(self._exec_tab(), "Execution")
+
+    # -- tabs --------------------------------------------------------------
+    def _wrap(self, header, form_widget):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(header)
+        layout.addWidget(form_widget)
+        layout.addStretch()
+        return page
+
+    def _ligand_tab(self):
+        form = QWidget()
+        f = QFormLayout(form)
+        self.ligand_sdf = PathField("ligands.sdf (one record per ligand, same frame)")
+        self.off_backend = _combo(["ambertools", "openeye", "rdkit"], "ambertools")
+        self.charge_method = _combo(["am1bcc", "am1bccelf10", "espaloma", "nagl"], "am1bcc")
+        self.smff = _combo(["openff-2.2.1", "openff-2.1.0", "openff-2.0.0", "gaff-2.11", "gaff-1.81"], "openff-2.1.0")
+        self.smff.setEditable(True)
+        self.smff.setToolTip("Ligand force field (OpenFF/SMIRNOFF or GAFF). Pick one or type a custom version.")
+        self.charge_cores = _spin(4, 1, 64)
+        self.charged_out = PathField("ligands_charged.sdf (output)", mode="save",
+                                     save_filter="SDF (*.sdf)")
+        self.overwrite_charges = QCheckBox("Overwrite existing partial charges")
+        self.overwrite_charges.setChecked(True)
+        self.overwrite_charges.setToolTip("Recompute charges even if the SDF already has them; "
+                                          "uncheck to keep any charges already present")
+        f.addRow("Ligand SDF:", self.ligand_sdf)
+        f.addRow("Charge toolkit backend:", self.off_backend)
+        f.addRow("Partial charge method:", self.charge_method)
+        f.addRow("Charging processes:", self.charge_cores)
+        f.addRow("Charged SDF output:", self.charged_out)
+        f.addRow("", self.overwrite_charges)
+        f.addRow("Small-molecule force field:", self.smff)
+
+        row = QHBoxLayout()
+        calc = action_button("Calculate charges")
+        calc.setToolTip("Run openfe charge-molecules now; the charged SDF is used downstream")
+        calc.clicked.connect(self._calc_charges)
+        refresh = action_button("Refresh table")
+        refresh.clicked.connect(self._refresh_ligand_table)
+        row.addWidget(calc)
+        row.addWidget(refresh)
+        row.addStretch()
+
+        # Ligand table + per-molecule structure view (click a row to depict it).
+        self.ligand_table = QTableWidget(0, 3)
+        self.ligand_table.setHorizontalHeaderLabels(["Ligand", "Charge (before)", "Charge (after)"])
+        self.ligand_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.ligand_table.setMinimumWidth(460)
+        _hdr = self.ligand_table.horizontalHeader()
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        _hdr.setMinimumSectionSize(120)
+        self.ligand_table.itemSelectionChanged.connect(self._on_ligand_selected)
+        self.ligand_sdf.edit.textChanged.connect(self._on_ligand_sdf_changed)
+
+        self.structure_view = _web_view()
+        self.structure_view.setMinimumWidth(360)
+
+        split = QHBoxLayout()
+        left = QVBoxLayout()
+        left.addWidget(form)
+        left.addLayout(row)
+        left.addWidget(self.ligand_table, 1)
+        split.addLayout(left, 1)
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Structure:"))
+        right.addWidget(self.structure_view, 1)
+        split.addLayout(right, 1)
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(PageHeader("OpenFE RBFE", "1 · Ligand preparation",
+                                    "Charge the ligands (and cofactor if present) — run it directly here. "
+                                    "Click a ligand to see its structure."))
+        layout.addLayout(split, 1)
+        self.charge_status = QLabel("Set the ligand SDF, choose a method, then Calculate charges.")
+        self.charge_status.setObjectName("Muted")
+        self.charge_status.setWordWrap(True)
+        layout.addWidget(self.charge_status)
+        self._refresh_ligand_table()
+        return page
+
+    def _on_ligand_sdf_changed(self, _text=None) -> None:
+        """When a new ligand SDF is picked, auto-set the charged output name to
+        ``<stem>_charged.sdf`` (always overwrite) and refresh the ligand table."""
+        src = self.ligand_sdf.text().strip()
+        if src:
+            self.charged_out.setText(str(Path(src).with_name(Path(src).stem + "_charged.sdf")))
+        self._refresh_ligand_table()
+
+    def _on_ligand_selected(self) -> None:
+        rows = self.ligand_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        item = self.ligand_table.item(rows[0].row(), 0)
+        if item is None:
+            return
+        name = item.text()
+        source = self._active_ligand_sdf()
+        if not source:
+            return
+        try:
+            from chemflow.fe.openfe.charge_report import molecule_svg
+            svg = molecule_svg(source, name)
+        except Exception as exc:
+            self.charge_status.setText(f"Could not draw {name}: {exc}")
+            return
+        body = svg or f"<p style='color:#888'>No depiction for {name}</p>"
+        self.structure_view.setHtml(
+            f"<html><body style='margin:0;display:flex;align-items:center;"
+            f"justify-content:center;height:100%'>{body}</body></html>")
+        return
+
+    def _calc_charges(self) -> None:
+        source = self.ligand_sdf.text()
+        if not source:
+            self.charge_status.setText("Set the ligand SDF first.")
+            return
+        out = self.charged_out.text()
+        if not out:
+            out = str(Path(source).expanduser().with_name(Path(source).stem + "_charged.sdf"))
+            self.charged_out.setText(out)
+        argv = ["openfe", "charge", "--ligands", source,
+                "--method", self.charge_method.currentText(),
+                "--backend", self.off_backend.currentText(),
+                "--cores", str(self.charge_cores.value())]
+        if not self.overwrite_charges.isChecked():
+            argv.append("--keep-charges")
+        argv += ["--out", out]
+        self._run(argv)
+        self._refresh_ligand_table()
+        self.charge_status.setText(
+            "Charging ligands… when it finishes, click “Refresh table” to see the "
+            "after-charges. Downstream steps use the charged SDF.")
+
+    def _active_ligand_sdf(self) -> str:
+        """The ligand SDF to use downstream.
+
+        Prefers the System tab's charged-ligands field, then the charged output
+        from Ligand Prep, then the original ligand SDF.
+        """
+        system = getattr(self, "system_ligand_sdf", None)
+        if system is not None and system.text():
+            return system.text()
+        charged = self.charged_out.text()
+        if charged and Path(charged).expanduser().is_file():
+            return charged
+        return self.ligand_sdf.text()
+
+    def _refresh_ligand_table(self) -> None:
+        src = self.ligand_sdf.text()
+        if not src or not Path(src).expanduser().is_file():
+            return
+        try:
+            from chemflow.fe.openfe.charge_report import formal_charges, partial_charge_sums
+            before = formal_charges(src)
+            charged = self.charged_out.text()
+            after = (partial_charge_sums(charged)
+                     if charged and Path(charged).expanduser().is_file() else {})
+        except Exception as exc:
+            self.charge_status.setText(f"Could not read ligands: {exc}")
+            return
+        self.ligand_table.setRowCount(len(before))
+        for r, (name, formal) in enumerate(before):
+            aft = after.get(name)
+            self.ligand_table.setItem(r, 0, QTableWidgetItem(name))
+            self.ligand_table.setItem(r, 1, QTableWidgetItem(f"{formal:+d}"))
+            self.ligand_table.setItem(r, 2, QTableWidgetItem("—" if aft is None else f"{aft:+.3f}"))
+
+    def _network_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(PageHeader("OpenFE RBFE", "2 · Network creation",
+                                    "Plan the perturbation network and choose the atom mapping, "
+                                    "then review it and add/remove edges."))
+
+        form = QWidget()
+        f = QFormLayout(form)
+        self.mapper = _combo(["KartografAtomMapper", "LomapAtomMapper"], "KartografAtomMapper")
+        self.planner = _combo(["minimal_redundant", "minimal_spanning", "radial"], "minimal_redundant")
+        self.network = QLineEdit("all")
+        self.network.setToolTip("'all' for the full planned network, or comma-separated ligand names")
+        self.transformation = _combo(["both", "complex", "solvent"], "both")
+        self.skip_charge = QCheckBox("Skip charge assignment (use stored SDF charges — faster)")
+        self.skip_charge.setToolTip("When your ligand/cofactor SDFs already carry partial charges, "
+                                    "skip the charge check/generation at Setup FEP (create_json).")
+        f.addRow("Atom mapper:", self.mapper)
+        f.addRow("Network planner:", self.planner)
+        f.addRow("Alchemical network:", self.network)
+        f.addRow("Transformation legs:", self.transformation)
+        f.addRow("", self.skip_charge)
+        layout.addWidget(form)
+
+        # --- plan the network from a ligands SDF ---
+        layout.addWidget(QLabel("Plan the network (loads the ligands SDF):"))
+        plan_row = QHBoxLayout()
+        self.network_sdf = PathField("ligands SDF (charged, with hydrogens)")
+        plan_btn = QPushButton("Plan network")
+        plan_btn.clicked.connect(self._plan_network)
+        plan_row.addWidget(self.network_sdf, 1)
+        plan_row.addWidget(plan_btn)
+        layout.addLayout(plan_row)
+
+        # --- network viewer / editor ---
+        layout.addWidget(QLabel("Review / edit the planned network:"))
+        dir_row = QHBoxLayout()
+        self.network_dir = PathField("network bundle dir (holds edges.csv + ligand_network.graphml)",
+                                     mode="directory")
+        load_btn = QPushButton("Load edges")
+        load_btn.clicked.connect(self._load_edges)
+        graph_btn = QPushButton("Show network graph")
+        graph_btn.setToolTip("Draw the network; click an edge to see its atom mapping")
+        graph_btn.clicked.connect(self._show_graph)
+        dir_row.addWidget(self.network_dir, 1)
+        dir_row.addWidget(load_btn)
+        dir_row.addWidget(graph_btn)
+        layout.addLayout(dir_row)
+
+        self.edge_table = QTableWidget(0, 3)
+        self.edge_table.setHorizontalHeaderLabels(["Ligand A", "Ligand B", "Score"])
+        self.edge_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.edge_table.setMinimumHeight(150)
+        layout.addWidget(self.edge_table)
+
+        edit_row = QHBoxLayout()
+        self.edge_a = QComboBox()
+        self.edge_a.setEditable(True)
+        self.edge_b = QComboBox()
+        self.edge_b.setEditable(True)
+        add_edge_btn = QPushButton("Add edge")
+        add_edge_btn.clicked.connect(self._add_edge)
+        remove_edge_btn = QPushButton("Remove selected")
+        remove_edge_btn.clicked.connect(self._remove_edges)
+        edit_row.addWidget(QLabel("A:"))
+        edit_row.addWidget(self.edge_a, 1)
+        edit_row.addWidget(QLabel("B:"))
+        edit_row.addWidget(self.edge_b, 1)
+        edit_row.addWidget(add_edge_btn)
+        edit_row.addWidget(remove_edge_btn)
+        layout.addLayout(edit_row)
+
+        self._graph_layout = QVBoxLayout()   # graph QWebEngineView is added here on demand
+        layout.addLayout(self._graph_layout)
+
+        self.network_status = QLabel("Load a planned network to review its edges. "
+                                     "Add/remove run in the Activity console; click Load edges again to refresh.")
+        self.network_status.setObjectName("Muted")
+        self.network_status.setWordWrap(True)
+        layout.addWidget(self.network_status)
+        layout.addStretch()
+        return page
+
+    def _plan_network(self) -> None:
+        sdf = self.network_sdf.text() or self.ligand_sdf.text()
+        if not sdf:
+            self.network_status.setText("Choose a ligands SDF to plan the network from.")
+            return
+        out = self.network_dir.text()
+        if not out:
+            out = str(Path(sdf).expanduser().with_name("network"))
+            self.network_dir.setText(out)
+        mapper = "kartograf" if "Kartograf" in self.mapper.currentText() else "lomap"
+        self._run(["network", "plan", "--ligands", sdf, "--out", out,
+                   "--mapper", mapper, "--planner", self.planner.currentText()])
+        self.network_status.setText("Planning network in the Activity console… click Load edges "
+                                    "when it finishes.")
+
+    def _show_graph(self) -> None:
+        directory = self.network_dir.text()
+        if not directory:
+            self.network_status.setText("Choose the network bundle directory first.")
+            return
+        try:
+            from chemflow.fe.openfe.network_view import render_network_html
+            html = render_network_html(directory)
+        except Exception as exc:
+            self.network_status.setText(f"Could not draw network: {exc}")
+            return
+        if not hasattr(self, "_graph_view"):
+            self._init_graph_view()
+        self._graph_view.setHtml(html, QUrl("about:blank"))
+        self.network_status.setText("Network drawn — click an edge to see its atom mapping.")
+
+    def _init_graph_view(self) -> None:
+        from PySide6.QtWebChannel import QWebChannel
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+
+        self._graph_view = QWebEngineView()
+        self._graph_view.setMinimumHeight(360)
+        self._edge_bridge = _EdgeBridge()
+        self._edge_bridge.edge_clicked.connect(self._on_edge_clicked)
+        self._edge_bridge.node_clicked.connect(self._on_node_clicked)
+        channel = QWebChannel(self._graph_view.page())
+        channel.registerObject("bridge", self._edge_bridge)
+        self._graph_view.page().setWebChannel(channel)
+        self._graph_view.loadFinished.connect(self._inject_graph_bridge)
+        self._graph_layout.addWidget(self._graph_view)
+
+    def _inject_graph_bridge(self, ok: bool) -> None:
+        if not ok:
+            return
+        resource = QFile(":/qtwebchannel/qwebchannel.js")
+        if not resource.open(QFile.OpenModeFlag.ReadOnly):
+            return
+        library = bytes(resource.readAll()).decode("utf-8")
+        resource.close()
+        self._graph_view.page().runJavaScript(
+            library + "\nnew QWebChannel(qt.webChannelTransport, function(c){window.bridge=c.objects.bridge;});")
+
+    def _on_node_clicked(self, name: str) -> None:
+        # Toggling nodes in the graph fills the add-edge combos (first -> A, second -> B).
+        picks = getattr(self, "_node_picks", [])
+        if name in picks:
+            picks.remove(name)
+        else:
+            picks.append(name)
+            picks = picks[-2:]
+        self._node_picks = picks
+        if picks:
+            self.edge_a.setCurrentText(picks[0])
+        if len(picks) > 1:
+            self.edge_b.setCurrentText(picks[1])
+        self.network_status.setText("Selected: " + " , ".join(picks) +
+                                    ("  — click Add edge" if len(picks) == 2 else ""))
+
+    def _on_edge_clicked(self, a: str, b: str) -> None:
+        directory = self.network_dir.text()
+        try:
+            from chemflow.fe.openfe.network_view import render_atom_mapping_html
+            html = render_atom_mapping_html(directory, a, b)
+        except Exception as exc:
+            self.network_status.setText(f"Mapping unavailable for {a}–{b}: {exc}")
+            return
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Atom mapping: {a} ↔ {b}")
+        dialog.resize(900, 560)
+        lay = QVBoxLayout(dialog)
+        view = QWebEngineView()
+        view.setHtml(html, QUrl("about:blank"))
+        lay.addWidget(view)
+        dialog.show()
+        self._mapping_dialog = dialog     # keep a reference
+
+    def _load_edges(self) -> None:
+        directory = self.network_dir.text()
+        if not directory:
+            self.network_status.setText("Choose the network bundle directory first.")
+            return
+        try:
+            edges = read_network(directory)
+        except (FileNotFoundError, ValueError) as exc:
+            self.network_status.setText(f"Could not load network: {exc}")
+            return
+        self.edge_table.setRowCount(len(edges))
+        for r, e in enumerate(edges):
+            self.edge_table.setItem(r, 0, QTableWidgetItem(e.ligand_a))
+            self.edge_table.setItem(r, 1, QTableWidgetItem(e.ligand_b))
+            self.edge_table.setItem(r, 2, QTableWidgetItem(e.score))
+        names = ligand_names(edges)
+        for combo in (self.edge_a, self.edge_b):
+            combo.clear()
+            combo.addItems(names)
+        issue = connectivity_issue(edges)
+        self.network_status.setText(
+            f"{len(edges)} edges over {len(names)} ligands." + (f"  ⚠ {issue}" if issue else " Connected."))
+
+    def _add_edge(self) -> None:
+        directory = self.network_dir.text()
+        a, b = self.edge_a.currentText().strip(), self.edge_b.currentText().strip()
+        if not directory or not a or not b or a == b:
+            self.network_status.setText("Pick a network dir and two different ligands to add an edge.")
+            return
+        argv = ["network", "add", directory, "--a", a, "--b", b]
+        sdf = self.network_sdf.text() or self.ligand_sdf.text()
+        if sdf:
+            argv += ["--ligand-sdf", sdf]
+        self._run(argv)
+        self.network_status.setText(f"Adding edge {a}–{b}… click Load edges to refresh when it finishes.")
+
+    def _remove_edges(self) -> None:
+        directory = self.network_dir.text()
+        rows = self.edge_table.selectionModel().selectedRows() if directory else []
+        if not rows:
+            self.network_status.setText("Select one or more edge rows to remove (and set the network dir).")
+            return
+        argv = ["network", "remove", directory]
+        for idx in rows:
+            a = self.edge_table.item(idx.row(), 0).text()
+            b = self.edge_table.item(idx.row(), 1).text()
+            argv += ["--drop", f"{a}:{b}"]
+        self._run(argv)
+        self.network_status.setText("Removing selected edges… click Load edges to refresh when it finishes.")
+
+    def _system_tab(self):
+        form = QWidget()
+        f = QFormLayout(form)
+        self.protein_pdb = PathField("protein.pdb (receptor / complex)")
+        self.system_ligand_sdf = PathField("charged_ligands.sdf (defaults to Ligand Prep output)")
+        self.cofactor_sdf = PathField("cofactor.sdf (optional)")
+        # Cofactor-from-template: one charged template SDF placed on every matching
+        # residue in the (complex) protein PDB. When set, cofactor_sdf is ignored.
+        self.cofactor_template_sdf = PathField(
+            "cofactor_template.sdf (optional; one charged copy, placed from the complex PDB)")
+        self.cofactor_resnames = QLineEdit()
+        self.cofactor_resnames.setPlaceholderText("cofactor PDB resname(s), e.g. 4DY  (comma-separated)")
+        self.cofactor_resnames.setToolTip(
+            "PDB residue name(s) of the cofactor in the protein PDB. With a template "
+            "SDF, each matching residue is built from the template (identical charges) "
+            "and stripped from the protein before parameterization.")
+        self.membrane = QCheckBox("Membrane system (membrane + solvent + ions)")
+        self.membrane.toggled.connect(self._on_membrane_toggle)
+        # Complex-leg NVT pre-equilibration (chemflow's protocol subclass).
+        self.pre_equilibrate = QCheckBox("NVT pre-equilibration of the complex leg")
+        self.pre_equilibrate.setToolTip(
+            "openfe's RBFE protocol goes straight from minimisation to NPT "
+            "equilibration; SepTop and ABFE run an NVT stage first. On a dense "
+            "bilayer that gap shows up as a NaN at state 0 before sampling "
+            "starts.\n\nWith this on, chemflow relaxes the hybrid system "
+            "(minimise + NVT at lambda=0) once per repeat and all lambda windows "
+            "start from the result. Look for '[chemflow-preeq]' in the job log.")
+        self.preeq_nvt_ps = QDoubleSpinBox()
+        self.preeq_nvt_ps.setRange(0.0, 10000.0)
+        self.preeq_nvt_ps.setDecimals(0)
+        self.preeq_nvt_ps.setValue(100.0)
+        self.preeq_nvt_ps.setSuffix(" ps")
+        self.preeq_nvt_ps.setToolTip("NVT length. 0 = minimise only.")
+        self.preeq_min_steps = QSpinBox()
+        self.preeq_min_steps.setRange(0, 1000000)
+        self.preeq_min_steps.setSingleStep(1000)
+        self.preeq_min_steps.setValue(5000)
+        self.preeq_min_steps.setToolTip(
+            "Minimisation steps before the NVT stage. 0 = skip.")
+        self.pre_equilibrate.toggled.connect(self._on_pre_equilibrate_toggle)
+        self.solvent_box_shape = _combo(["cube", "dodecahedron", "octahedron"], "dodecahedron")
+        self.complex_box_shape = _combo(["cube", "dodecahedron", "octahedron"], "dodecahedron")
+        self.box_size = PathField(
+            "x, y, z (nm), 9 values (3x3), or Browse a .txt file (comma-separated) — membrane PBC",
+            mode="file",
+        )
+        self.box_size.setEnabled(False)
+        self.complex_pad = _dspin(1.5, 0.5, 5.0)
+        self.solvent_pad = _dspin(1.5, 0.5, 5.0)
+        self.solvent_model = QLineEdit("tip3p")
+        self.ion_conc = _dspin(0.15, 0.0, 2.0, 0.01, 3)
+        self.pos_ion = QLineEdit("Na+")
+        self.neg_ion = QLineEdit("Cl-")
+        self.neutralize = QCheckBox("Neutralize net charge with counter-ions")
+        self.neutralize.setChecked(True)
+        self.pbc_note = QLabel("Soluble system: box is padded automatically.")
+        self.pbc_note.setObjectName("Muted")
+        self.pbc_note.setWordWrap(True)
+        f.addRow("Protein PDB:", self.protein_pdb)
+        f.addRow("Charged ligands SDF:", self.system_ligand_sdf)
+        f.addRow("Cofactor SDF (optional):", self.cofactor_sdf)
+        f.addRow("Cofactor template SDF (optional):", self.cofactor_template_sdf)
+        f.addRow("Cofactor resname(s):", self.cofactor_resnames)
+        f.addRow("", self.membrane)
+        f.addRow("Solvent-leg box shape:", self.solvent_box_shape)
+        f.addRow("Complex-leg box shape:", self.complex_box_shape)
+        f.addRow("Complex box size (membrane):", self.box_size)
+        f.addRow("Complex solvation padding (nm):", self.complex_pad)
+        f.addRow("Solvent solvation padding (nm):", self.solvent_pad)
+        f.addRow("Solvent model:", self.solvent_model)
+        f.addRow("Ionic strength (M):", self.ion_conc)
+        f.addRow("Positive ion:", self.pos_ion)
+        f.addRow("Negative ion:", self.neg_ion)
+        f.addRow("", self.neutralize)
+        f.addRow("", self.pbc_note)
+        return self._wrap(PageHeader("OpenFE RBFE", "3 · System",
+                                     "Build the protein (or protein+membrane) complex with solvent and ions."), form)
+
+    def _fep_tab(self):
+        self.lw_complex = _spin(15, 2, 100)
+        self.lw_solvent = _spin(15, 2, 100)
+        self.rep_complex = _spin(1, 1, 10)
+        self.rep_solvent = _spin(1, 1, 10)
+        self.prod_complex = _dspin(15.0, 0.1, 500.0, step=1.0, decimals=1)
+        self.prod_solvent = _dspin(15.0, 0.1, 500.0, step=1.0, decimals=1)
+        self.equil_complex = _dspin(1.0, 0.0, 100.0, step=0.5, decimals=1)
+        self.equil_solvent = _dspin(1.0, 0.0, 100.0, step=0.5, decimals=1)
+        self.mini_complex = _spin(5000, 0, 1000000)
+        self.mini_solvent = _spin(5000, 0, 1000000)
+        self.early_termination = _dspin(0.0, 0.0, 10.0, step=0.1, decimals=2)
+        self.complex_timestep = _dspin(4.0, 0.5, 4.0, step=0.5, decimals=1)
+        self.solvent_timestep = _dspin(4.0, 0.5, 4.0, step=0.5, decimals=1)
+        self.barostat_freq = _dspin(25.0, 1.0, 1000.0, step=1.0, decimals=1)
+        self.surface_tension = _dspin(0.0, 0.0, 2000.0, step=10.0, decimals=1)
+        self.hmass = _dspin(3.0, 1.0, 4.0, step=0.5, decimals=1)
+        self.softcore = _combo(["gapsys", "beutler"], "gapsys")
+        self.softcore_alpha = _dspin(0.85, 0.0, 1.0, step=0.05, decimals=2)
+        self.charge_correction = QCheckBox("Explicit charge correction (for net-charge changes)")
+        self.charge_correction.setChecked(True)
+        self.charge_correction_cutoff = _dspin(0.8, 0.1, 2.0, step=0.1, decimals=2)
+        self.endstate_dispersion = QCheckBox("Endstate dispersion correction")
+        self.endstate_dispersion.setChecked(False)
+        self.use_dispersion = QCheckBox("Use dispersion correction")
+        self.use_dispersion.setChecked(True)
+        self.turn_off_core_exceptions = QCheckBox("Turn off core unique exceptions")
+        self.turn_off_core_exceptions.setChecked(False)
+        # Moved here from the System tab:
+        self.nb_method = _combo(["PME"], "PME")
+        self.nb_cutoff = _dspin(1.0, 0.5, 2.0)
+        self.pressure = _dspin(1.0, 0.1, 10.0)
+        self.temperature = _dspin(298.15, 250.0, 400.0, step=1.0, decimals=2)
+        self.platform = _combo(["CUDA", "OpenCL", "CPU"], "CUDA")
+
+        def _group(title, rows):
+            box = QGroupBox(title)
+            gf = QFormLayout(box)
+            gf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+            for label, w in rows:
+                gf.addRow(label, w)
+            return box
+
+        sampling = _group("λ schedule & sampling", [
+            ("λ windows — complex:", self.lw_complex),
+            ("λ windows — solvent:", self.lw_solvent),
+            ("Protocol repeats — complex:", self.rep_complex),
+            ("Protocol repeats — solvent:", self.rep_solvent),
+            ("Production — complex (ns):", self.prod_complex),
+            ("Production — solvent (ns):", self.prod_solvent),
+            ("Equilibration — complex (ns):", self.equil_complex),
+            ("Equilibration — solvent (ns):", self.equil_solvent),
+            ("Minimization — complex:", self.mini_complex),
+            ("Minimization — solvent:", self.mini_solvent),
+            ("Early-termination error (kcal/mol):", self.early_termination),
+        ])
+        integrator = _group("Integrator", [
+            ("Timestep — complex (fs):", self.complex_timestep),
+            ("Timestep — solvent (fs):", self.solvent_timestep),
+            ("Barostat frequency (steps):", self.barostat_freq),
+            ("Surface tension (bar·nm):", self.surface_tension),
+            ("Hydrogen mass (amu):", self.hmass),
+        ])
+        alchemical = _group("Alchemical / corrections", [
+            ("Softcore LJ:", self.softcore),
+            ("Softcore alpha:", self.softcore_alpha),
+            ("", self.charge_correction),
+            ("Charge correction cutoff (nm):", self.charge_correction_cutoff),
+            ("", self.endstate_dispersion),
+            ("", self.use_dispersion),
+            ("", self.turn_off_core_exceptions),
+        ])
+        nonbonded = _group("Nonbonded & thermodynamics", [
+            ("Nonbonded method:", self.nb_method),
+            ("Nonbonded cutoff (nm):", self.nb_cutoff),
+            ("Pressure (bar):", self.pressure),
+            ("Temperature (K):", self.temperature),
+            ("Platform:", self.platform),
+        ])
+
+        cols = QHBoxLayout()
+        left = QVBoxLayout()
+        left.addWidget(sampling)
+        left.addWidget(integrator)
+        left.addStretch()
+        right = QVBoxLayout()
+        right.addWidget(alchemical)
+        right.addWidget(nonbonded)
+        right.addStretch()
+        cols.addLayout(left)
+        cols.addLayout(right)
+
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.addWidget(PageHeader("OpenFE RBFE", "4 · FEP simulation",
+                                          "Lambda schedule, sampling, integrator, alchemical and "
+                                          "nonbonded/thermodynamic settings."))
+        inner_layout.addLayout(cols)
+        inner_layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(inner)
+        return scroll
+
+    def _job_tab(self):
+        form = QWidget()
+        f = QFormLayout(form)
+        self.config_path = PathField("rbfe.yaml (written into <workdir>/<jobname>/)", mode="save",
+                                     save_filter="YAML (*.yaml *.yml)")
+        self.config_path.setText("rbfe.yaml")
+        self.workdir = PathField("base dir — project goes to <workdir>/<jobname>/",
+                                 mode="directory")
+        self.workdir.setText(".")
+        self.jobname = QLineEdit("rbfe")
+        self.jobname.setToolTip("Project folder name. The config, inputs/, json/ and "
+                                "results/ all live under <workdir>/<jobname>/.")
+        self.partition = QLineEdit("gpu")
+        # Named HPC preset (from env/hpc.yaml); selecting one fills the fields below.
+        self.hpc_preset = QComboBox()
+        try:
+            from chemflow.desktop.openfe_rbfe_config import single_gpu_preset_names
+            _preset_names = single_gpu_preset_names("openfe")
+        except Exception:
+            _preset_names = []
+        self.hpc_preset.addItems(["(custom)", *_preset_names])
+        self.hpc_preset.setToolTip("Pick a preset from env/hpc.yaml (e.g. singlenode-singlegpu-long) "
+                                   "to fill the SLURM fields below; '(custom)' keeps your own values.")
+        self.hpc_preset.currentTextChanged.connect(self._apply_hpc_preset)
+        self.nodes = _spin(1, 1, 64)
+        self.ntasks = _spin(1, 1, 256)
+        self.cpus = _spin(16, 1, 128)
+        self.gpus = _spin(1, 0, 16)
+        # GPU type is selectable (and editable for site-specific names). Blank =>
+        # plain --gres=gpu:N; a value => --gres=gpu:<type>:N.
+        self.gpu_type = QComboBox()
+        self.gpu_type.setEditable(True)
+        self.gpu_type.addItems(_hpc_gpu_types("openfe"))
+        self.gpu_type.setCurrentText("")
+        self.gpu_type.setToolTip("GPU type for --gres=gpu:<type>:N (leave blank for any GPU). "
+                                 "Editable — type your cluster's name if not listed.")
+        self.replicates = _spin(3, 1, 64)
+        self.replicates.setToolTip("Repeats per transformation. Array size = N_transformations × replicates.")
+        self.array = QLineEdit("")
+        self.array.setPlaceholderText("auto: transformations × replicates (override only if needed)")
+        self.array.setToolTip("Left blank, --array is auto-set when writing the SLURM script from the "
+                              "number of transformation JSONs × replicates. Enter a range to override.")
+        self.memory = QLineEdit("32G")
+        self.walltime = QLineEdit("240:00:00")
+        self.modules = QLineEdit("")
+        self.modules.setPlaceholderText("module load names, e.g. cuda/12.4 gcc (HPC)")
+        self.conda_init = QLineEdit("")
+        self.conda_init.setPlaceholderText("<conda-prefix>/etc/profile.d/conda.sh")
+        self.conda_env = QLineEdit("")
+        self.conda_env.setPlaceholderText("alchemforge")
+        for label, w in [("Config file name:", self.config_path),
+                         ("Work dir (base):", self.workdir), ("Job name:", self.jobname),
+                         ("HPC preset:", self.hpc_preset),
+                         ("SLURM partition:", self.partition),
+                         ("Nodes:", self.nodes), ("Tasks:", self.ntasks),
+                         ("CPUs per task:", self.cpus), ("GPUs:", self.gpus),
+                         ("GPU type (--gres):", self.gpu_type),
+                         ("Replicates per edge:", self.replicates),
+                         ("Array range (--array):", self.array),
+                         ("Memory:", self.memory), ("Walltime:", self.walltime),
+                         ("Modules (module load):", self.modules),
+                         ("conda init script:", self.conda_init),
+                         ("conda environment:", self.conda_env)]:
+            f.addRow(label, w)
+        return self._wrap(PageHeader("OpenFE RBFE", "5 · Job settings (HPC)",
+                                     "Output locations and the SLURM parameters for submission."),
+                          with_help(form, HPC_JOB_HELP_HTML))
+
+    def _exec_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(PageHeader("OpenFE RBFE", "Execution",
+                                    "Write the config, validate, set up the FEP, then submit."))
+        row = QHBoxLayout()
+        for label, slot in [("Write config", self._write_config),
+                            ("Validate", self._validate),
+                            ("Setup FEP (create_json)", self._setup_fep),
+                            ("Write SLURM script", self._write_slurm),
+                            ("Submit (sbatch)", self._submit_slurm),
+                            ("Submit (local)", self._submit_local)]:
+            btn = action_button(label)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        row.addStretch()
+        layout.addLayout(row)
+        self.status = QLabel("Fill in the tabs, then Write config → Validate → Setup FEP → Submit. "
+                             "Output appears in the Activity console below.")
+        self.status.setObjectName("Muted")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        layout.addStretch()
+        return page
+
+    # -- behaviour ---------------------------------------------------------
+    def _apply_hpc_preset(self, name: str) -> None:
+        """Fill the SLURM fields from a named env/hpc.yaml preset ('(custom)' = no-op)."""
+        if not name or name == "(custom)":
+            return
+        try:
+            from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset
+            merged = apply_slurm_preset(self._hpc(), name, "openfe")
+        except Exception:
+            return
+        self.partition.setText(str(merged.get("partition", "gpu")))
+        self.nodes.setValue(int(merged.get("nodes", 1) or 1))
+        self.ntasks.setValue(int(merged.get("ntasks", 1) or 1))
+        self.cpus.setValue(int(merged.get("cpus_per_task", 16) or 16))
+        self.gpus.setValue(int(merged.get("gpus", 1) or 0))
+        self.gpu_type.setCurrentText(str(merged.get("gpu_type", "") or ""))
+        self.memory.setText(str(merged.get("memory", "32G")))
+        self.walltime.setText(str(merged.get("walltime", "240:00:00")))
+        if merged.get("conda_environment"):
+            self.conda_env.setText(str(merged["conda_environment"]))
+
+    def _on_membrane_toggle(self, on: bool) -> None:
+        self.box_size.setEnabled(on)
+        # Membrane complex uses explicit box vectors, so the complex box shape is unused.
+        self.complex_box_shape.setEnabled(not on)
+        self.pbc_note.setText(
+            "Membrane system: set a complex box size x, y, z (nm) so the periodic box is valid. "
+            "Complex box shape is ignored (box vectors are used)."
+            if on else "Soluble system: box is padded automatically.")
+
+    def _overrides(self) -> dict:
+        network = self.network.text().strip()
+        alchemical_network = "all"
+        if network and network != "all":
+            alchemical_network = [n.strip() for n in network.split(",") if n.strip()]
+        return {
+            "ligand_sdf": self._active_ligand_sdf() or None,
+            "cofactor_sdf": self.cofactor_sdf.text() or None,
+            "cofactor_template_sdf": self.cofactor_template_sdf.text() or None,
+            "cofactor_resnames": (
+                [r.strip() for r in self.cofactor_resnames.text().replace(",", " ").split() if r.strip()]
+                or None
+            ),
+            "off_toolkit_backend": self.off_backend.currentText(),
+            "partial_charge_method": self.charge_method.currentText(),
+            "small_molecule_forcefield": self.smff.currentText().strip(),
+            "mapper": self.mapper.currentText(),
+            "planner": self.planner.currentText(),
+            "alchemical_network": alchemical_network,
+            "transformation": self.transformation.currentText(),
+            "skip_charge_assignment": self.skip_charge.isChecked(),
+            "protein_pdb": self.protein_pdb.text() or None,
+            "membrane_system": self.membrane.isChecked(),
+            "complex_box_size": parse_box_size(self.box_size.text()),
+            "solvent_box_shape": self.solvent_box_shape.currentText(),
+            "complex_box_shape": self.complex_box_shape.currentText(),
+            "box_shape": self.complex_box_shape.currentText(),
+            "complex_solvation_padding": self.complex_pad.value(),
+            "solvent_solvation_padding": self.solvent_pad.value(),
+            "solvent_model": self.solvent_model.text().strip(),
+            "ion_concentration": self.ion_conc.value(),
+            "positive_ion": self.pos_ion.text().strip() or "Na+",
+            "negative_ion": self.neg_ion.text().strip() or "Cl-",
+            "neutralize": self.neutralize.isChecked(),
+            "nonbonded_method": self.nb_method.currentText(),
+            "nonbonded_cutoff": self.nb_cutoff.value(),
+            "pressure": self.pressure.value(),
+            "temperature": self.temperature.value(),
+            "platform": self.platform.currentText(),
+            "n_lambda_windows_complex_leg": self.lw_complex.value(),
+            "n_lambda_windows_solvent_leg": self.lw_solvent.value(),
+            "complex_protocol_repeats": self.rep_complex.value(),
+            "solvent_protocol_repeats": self.rep_solvent.value(),
+            "complex_sim_prod_length": self.prod_complex.value(),
+            "solvent_sim_prod_length": self.prod_solvent.value(),
+            "complex_sim_equil_length": self.equil_complex.value(),
+            "solvent_sim_equil_length": self.equil_solvent.value(),
+            "complex_sim_mini_step": self.mini_complex.value(),
+            "solvent_sim_mini_step": self.mini_solvent.value(),
+            "early_termination_target_error": self.early_termination.value(),
+            "complex_timestep": self.complex_timestep.value(),
+            "solvent_timestep": self.solvent_timestep.value(),
+            "barostat_frequency": self.barostat_freq.value(),
+            "surface_tension": self.surface_tension.value(),
+            "hydrogen_mass": self.hmass.value(),
+            "softcore_LJ": self.softcore.currentText(),
+            "softcore_alpha": self.softcore_alpha.value(),
+            "explicit_charge_correction": self.charge_correction.isChecked(),
+            "explicit_charge_correction_cutoff": self.charge_correction_cutoff.value(),
+            "endstate_dispersion_correction": self.endstate_dispersion.isChecked(),
+            "use_dispersion_correction": self.use_dispersion.isChecked(),
+            "turn_off_core_unique_exceptions": self.turn_off_core_exceptions.isChecked(),
+            "workdir": self.workdir.text().strip() or ".",
+            "jobname": self.jobname.text().strip() or "rbfe",
+            "result_dir": self._result_dir(),
+            "json_dir": self._json_dir(),
+        }
+
+    def _root(self) -> str:
+        """Project folder: <workdir>/<jobname>."""
+        base = self.workdir.text().strip() or "."
+        job = self.jobname.text().strip() or "rbfe"
+        return str(Path(base) / job)
+
+    def _workdir(self) -> str:
+        return self.workdir.text().strip() or "."
+
+    def _result_dir(self) -> str:
+        """Results live under <workdir>/<jobname>/results."""
+        return str(Path(self._root()) / "results")
+
+    def _json_dir(self) -> str:
+        """Transformation JSONs live under <workdir>/<jobname>/json (created by create_json)."""
+        return str(Path(self._root()) / "json")
+
+    def _hpc(self) -> dict:
+        return {
+            "partition": self.partition.text().strip(),
+            "nodes": self.nodes.value(),
+            "ntasks": self.ntasks.value(),
+            "cpus_per_task": self.cpus.value(),
+            "gpus": self.gpus.value(),
+            "gpu_type": self.gpu_type.currentText().strip(),
+            "replicates": self.replicates.value(),
+            "array": self.array.text().strip(),
+            "memory": self.memory.text().strip(),
+            "walltime": self.walltime.text().strip(),
+            "modules": self.modules.text().strip(),
+            "conda_init": self.conda_init.text().strip(),
+            "conda_environment": self.conda_env.text().strip(),
+        }
+
+    def _config_path(self) -> str | None:
+        name = self.config_path.text().strip()
+        if not name:
+            self.status.setText("Set a config file name on the Job settings tab first.")
+            return None
+        # The config always lives inside the project folder (<workdir>/<jobname>/),
+        # alongside inputs/, json/ and results/. Only the file name is taken from the
+        # field; the directory is the project root. Absolute so the (separate-env)
+        # command finds the same file regardless of the console's working directory.
+        return str((Path(self._root()) / Path(name).name).expanduser().resolve())
+
+    def _write_config(self) -> str | None:
+        try:
+            conf = build_config(self._overrides())
+        except ValueError as exc:
+            self.status.setText(f"Cannot build config: {exc}")
+            return None
+        # Resolve the base workdir to an absolute path so copied inputs and the
+        # json/results dirs resolve the same from the separate-env console's cwd.
+        conf["workdir"] = str(Path(self._workdir()).expanduser().resolve())
+        issues = validate_setup(conf)
+        path = self._config_path()
+        if path is None:
+            return None
+        # Create the job folder and copy the input files into <jobdir>/inputs/,
+        # repoint the config at the copies, and set json_dir/result_dir to the job
+        # dir. Inputs are optional here so a partially-filled form can still save.
+        try:
+            from chemflow.fe.openfe.workflow_defaults import prepare_project
+            prepare_project(
+                conf,
+                default_jobname=self.jobname.text().strip() or "rbfe",
+                optional_file_attrs=[
+                    ("protein_pdb", "protein PDB"),
+                    ("ligand_sdf", "ligand"),
+                    ("cofactor_sdf", "cofactor"),
+                    ("cofactor_template_sdf", "cofactor template"),
+                ],
+            )
+        except (OSError, ValueError) as exc:
+            self.status.setText(f"Could not stage inputs: {exc}")
+            return None
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(to_yaml(conf), encoding="utf-8")
+        if issues:
+            self.status.setText("Wrote config with warnings: " + "; ".join(issues))
+        else:
+            self.status.setText(f"Wrote config + staged inputs under: {Path(path).parent}")
+        return path
+
+    def _run(self, argv: list[str]) -> None:
+        if self._console is not None:
+            self._console.run_chemflow_fe(argv)
+
+    def _validate(self) -> None:
+        conf = build_config(self._overrides())
+        issues = validate_setup(conf)
+        if issues:
+            self.status.setText("Fix before running: " + "; ".join(issues))
+            return
+        path = self._write_config()
+        if path:
+            self._run(["openfe", "rbfe", "validate", path])
+
+    def _setup_fep(self) -> None:
+        path = self._write_config()
+        if path:
+            self._run(["openfe", "rbfe", "generate", path])
+
+    def _submit_local(self) -> None:
+        path = self._write_config()
+        if path:
+            self._run(["openfe", "rbfe", "run", path])
+
+    def _write_slurm(self) -> str | None:
+        path = self._write_config()
+        if not path:
+            return None
+        conf = build_config(self._overrides())
+        # Use the same absolute job-dir paths _write_config staged, so the script's
+        # JSON_DIR / OUT_ROOT resolve correctly no matter where sbatch is launched.
+        conf["workdir"] = str(Path(self._workdir()).expanduser().resolve())
+        from chemflow.fe.openfe.workflow_defaults import resolve_layout
+        layout = resolve_layout(conf, default_jobname=self.jobname.text().strip() or "rbfe")
+        conf["json_dir"] = str(layout["json"])
+        conf["result_dir"] = str(layout["results"])
+        hpc = self._hpc()
+        # Auto-size the array from the actual transformations: one task per
+        # (transformation JSON × replicate). If the JSONs don't exist yet
+        # (create_json not run), fall back to any manually entered range.
+        replicates = max(1, int(hpc.get("replicates", 1)))
+        n_json = self._count_json_files()
+        if n_json > 0:
+            total = n_json * replicates
+            hpc["array"] = f"0-{total - 1}"
+            note = (f"--array auto-set to 0-{total - 1} "
+                    f"({n_json} transformations × {replicates} replicates = {total} tasks).")
+        elif hpc.get("array"):
+            note = f"--array kept as {hpc['array']} (no JSONs found yet to auto-size)."
+        else:
+            hpc["array"] = "0-0"
+            note = ("No transformation JSONs found yet — run Setup FEP (create_json) first, "
+                    "then re-write the SLURM script to auto-size --array "
+                    "(= transformations × replicates).")
+        script = slurm_script(path, hpc, conf)
+        script_path = Path(path).expanduser().with_suffix(".slurm")
+        script_path.write_text(script, encoding="utf-8")
+        self.status.setText(f"Wrote SLURM array script: {script_path}. {note} "
+                            f"Submit: sbatch {script_path}")
+        return str(script_path)
+
+    def _submit_slurm(self) -> None:
+        """Write the SLURM script into the job dir and sbatch it from there."""
+        script_path = self._write_slurm()
+        if not script_path:
+            return
+        if self._console is None:
+            return
+        job_dir = str(Path(script_path).parent)
+        self._console.run_program("sbatch", [Path(script_path).name], cwd=job_dir)
+
+    def _count_json_files(self) -> int:
+        """Count transformation JSONs in the (derived) json dir, if it exists."""
+        try:
+            json_dir = Path(self._json_dir()).expanduser()
+            if not json_dir.is_absolute():
+                json_dir = Path.cwd() / json_dir
+            return len(list(json_dir.glob("*.json"))) if json_dir.is_dir() else 0
+        except OSError:
+            return 0

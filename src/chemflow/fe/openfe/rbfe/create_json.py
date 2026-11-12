@@ -493,7 +493,28 @@ def _create_complex_leg_protocol(conf):
             conf.surface_tension * offunit.bar * offunit.nanometer
         )
 
-    return RelativeHybridTopologyProtocol(settings=settings)
+    # The complex leg is where the membrane has to relax around the hybrid
+    # ligand, and where openfe's RBFE protocol goes straight from minimisation
+    # to NPT equilibration with no NVT stage (SepTop/ABFE have one). Opt in to
+    # our subclass that adds it.
+    from chemflow.fe.openfe.rbfe.equilibrated_protocol import get_protocol_class
+
+    protocol_cls = get_protocol_class(
+        equilibrated=bool(getattr(conf, "pre_equilibrate_complex", False))
+    )
+    if getattr(conf, "pre_equilibrate_complex", False):
+        print(f"Complex leg protocol: {protocol_cls.__name__}\n"
+              "  -> NVT pre-equilibration of the hybrid system is ON "
+              "(pre_equilibrate_complex: true).\n"
+              "  -> Lengths: CHEMFLOW_RFE_PREEQ_NVT_PS (default 100 ps), "
+              "CHEMFLOW_RFE_PREEQ_MIN_STEPS (default 5000).\n"
+              "  -> In the job log, grep for '[chemflow-preeq]' to confirm it ran.",
+              flush=True)
+    else:
+        print(f"Complex leg protocol: {protocol_cls.__name__} (stock openfe; set "
+              "pre_equilibrate_complex: true for the NVT pre-equilibration stage)",
+              flush=True)
+    return protocol_cls(settings=settings)
 
 
 def dict_to_namespace(d):

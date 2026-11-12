@@ -45,7 +45,7 @@ def _run_cmd(command: list[str], *, dry_run: bool) -> int:
 
 
 def _boltz_validate(args: argparse.Namespace) -> int:
-    from alchemfold.boltz_config import load_config, validate_config
+    from alchemfold.boltz.config import load_config, validate_config
 
     conf_path = Path(args.config).expanduser().resolve()
     validate_config(load_config(conf_path))
@@ -54,7 +54,7 @@ def _boltz_validate(args: argparse.Namespace) -> int:
 
 
 def _boltz_stage(args: argparse.Namespace) -> int:
-    from alchemfold.boltz_config import (
+    from alchemfold.boltz.config import (
         load_config, stage as stage_boltz, validate_config,
     )
     conf_path = Path(args.config).expanduser().resolve()
@@ -69,17 +69,17 @@ def _boltz_stage(args: argparse.Namespace) -> int:
 def _boltz_run(args: argparse.Namespace) -> int:
     conf_path = Path(args.config).expanduser().resolve()
     # Validate with the light config layer before importing the Boltz backend.
-    from alchemfold.boltz_config import load_config, validate_config
+    from alchemfold.boltz.config import load_config, validate_config
 
     validate_config(load_config(conf_path))
-    command = [sys.executable, "-m", "alchemfold.boltz_run", "--config", str(conf_path)]
+    command = [sys.executable, "-m", "alchemfold.boltz.run", "--config", str(conf_path)]
     if args.dry_run:
         command.append("--dry-run")
     return _run_cmd(command, dry_run=False)
 
 
 def _generate(args: argparse.Namespace) -> int:
-    from alchemfold.boltz_config import default_yaml_text
+    from alchemfold.boltz.config import default_yaml_text
 
     text = default_yaml_text(
         protein_id=args.protein_id,
@@ -150,6 +150,41 @@ def _dock_run(args: argparse.Namespace) -> int:
     return _run_cmd(command, dry_run=False)
 
 
+_ENGINE_EXECUTABLES = {"boltz": "boltz", "chai": "chai-lab"}
+
+
+def _resolve_engine_command(args, engine: str) -> str | None:
+    """Turn --<engine>-command / --<engine>-env into an absolute path (or None).
+
+    One conda env per engine now (``boltz``, ``chai``, ``diffdock``), so the
+    name the user types is resolved here to the executable inside that env.
+    None means "leave the default": the runner then resolves the bare name
+    itself, preferring the sibling env named after the engine.
+    """
+    executable = _ENGINE_EXECUTABLES.get(engine)
+    if not executable:
+        return None
+    explicit = getattr(args, f"{engine}_command", None)
+    if explicit:
+        return str(Path(explicit).expanduser())
+    env_name = getattr(args, f"{engine}_env", None)
+    if not env_name:
+        return None
+
+    from alchemfold._exec import conda_env_executable
+
+    path = conda_env_executable(env_name, executable)
+    if path:
+        return path
+    # Writing a guessed path would fail confusingly at run time; say so and let
+    # the sibling-env search handle it.
+    print(f"Note: no {executable} found in a conda env named '{env_name}' from "
+          f"here. Leaving {engine}_command at the default — if the env exists on "
+          f"the compute node it will still be found, otherwise install it with "
+          f"`chemflow {engine}-env install`.", file=sys.stderr)
+    return None
+
+
 def _dock_generate(args: argparse.Namespace) -> int:
     from alchemfold.dock_config import (
         default_cache_dir,
@@ -195,6 +230,8 @@ def _dock_generate(args: argparse.Namespace) -> int:
         recycling_steps=args.recycling_steps,
         sampling_steps=args.sampling_steps,
         no_kernels=not args.kernels,
+        boltz_command=_resolve_engine_command(args, "boltz"),
+        chai_command=_resolve_engine_command(args, "chai"),
         use_msa_server=args.use_msa_server,
         predict_affinity=args.predict_affinity,
         affinity_binder=args.affinity_binder,
@@ -254,6 +291,10 @@ def _screen_generate(args: argparse.Namespace) -> int:
         slurm["gpus_per_task"] = args.gpus_per_task
     if args.gpu_type is not None:
         slurm["gpu_type"] = args.gpu_type
+    # Shard jobs activate slurm.conda_env and run `python -m alchemfold...`, so
+    # that env must be the one holding ChemFlow/AlchemFold — NOT the engine env.
+    # Each engine's executable is resolved by absolute path from its own env
+    # (boltz / chai / diffdock), so nothing here needs to change per engine.
     n_shards = args.n_shards if args.n_shards is not None else res["shards"]
     lig_files = [str(Path(f).expanduser().resolve()) for f in (args.ligand_files or [])] or None
     if args.library == "custom" and not lig_files:
@@ -277,6 +318,9 @@ def _screen_generate(args: argparse.Namespace) -> int:
         jobname=args.jobname or "",
         cleanup=args.cleanup,
         predict_affinity=args.predict_affinity and args.engine == "boltz",
+        no_kernels=not (args.kernels and args.engine == "boltz"),
+        boltz_command=(_resolve_engine_command(args, "boltz") if args.engine == "boltz" else None),
+        chai_command=(_resolve_engine_command(args, "chai") if args.engine == "chai" else None),
         rank_metric=args.rank_metric,
         receptor_pdb=(str(Path(args.receptor_pdb).expanduser().resolve()) if args.receptor_pdb else None),
         diffdock_samples=args.diffdock_samples,
@@ -320,7 +364,7 @@ def _screen_stage(args: argparse.Namespace) -> int:
 
 
 def _trajectory_fix(args: argparse.Namespace) -> int:
-    from alchemfold.diffdock_traj import clean_file
+    from alchemfold.diffdock.traj import clean_file
 
     dst, info = clean_file(args.trajectory.expanduser(), args.output.expanduser() if args.output else None)
     print(f"Wrote {dst}: {info['frames_out']} frame(s) (from {info['frames_in']}), "
@@ -339,6 +383,12 @@ def _screen_clean(args: argparse.Namespace) -> int:
     from alchemfold.screen import cleanup
 
     return cleanup(args.config, force=args.force)
+
+
+def _screen_status(args: argparse.Namespace) -> int:
+    from alchemfold.screen import status
+
+    return status(args.config)
 
 
 def _screen_rank(args: argparse.Namespace) -> int:
@@ -450,8 +500,21 @@ def build_parser() -> argparse.ArgumentParser:
     dgen.add_argument("--sampling-steps", type=int, default=200, help="boltz only")
     dgen.add_argument("--kernels", action=argparse.BooleanOptionalAction, default=False,
                       help="Enable Boltz-2's cuequivariance/trifast GPU kernels (default: off "
-                           "→ pure-PyTorch; only turn on in a boltz-only env that has the "
-                           "kernels installed, since they conflict with chai's torch<2.7)")
+                           "→ pure-PyTorch). They live in their own env — install it with "
+                           "`chemflow boltz-env install` — because they conflict with chai's "
+                           "torch<2.7 pin. With --kernels, a sibling conda env named 'boltz' "
+                           "is preferred automatically; use --boltz-env to name another one.")
+    dgen.add_argument("--boltz-env", default=None, metavar="NAME",
+                      help="Conda env that holds Boltz-2 (default: the sibling env "
+                           "named 'boltz', from `chemflow boltz-env install`). Resolved "
+                           "to an absolute boltz_command in the config.")
+    dgen.add_argument("--boltz-command", default=None, metavar="PATH",
+                      help="Explicit path to the boltz executable (overrides --boltz-env)")
+    dgen.add_argument("--chai-env", default=None, metavar="NAME",
+                      help="Conda env that holds Chai-1 (default: the sibling env "
+                           "named 'chai', from `chemflow chai-env install`)")
+    dgen.add_argument("--chai-command", default=None, metavar="PATH",
+                      help="Explicit path to the chai-lab executable (overrides --chai-env)")
     dgen.add_argument("--predict-affinity", action="store_true",
                       help="Boltz-2 only: predict binding affinity (pIC50 = 6 - affinity_pred_value)")
     dgen.add_argument("--affinity-binder", default=None,
@@ -526,6 +589,20 @@ def build_parser() -> argparse.ArgumentParser:
     sgen.add_argument("--predict-affinity", action=argparse.BooleanOptionalAction, default=False,
                       help="Boltz-2 only: predict binding affinity for every ligand "
                            "(adds affinity_pred_value + affinity_probability_binary)")
+    sgen.add_argument("--kernels", action=argparse.BooleanOptionalAction, default=False,
+                      help="Boltz-2 only: enable the cuequivariance/trifast GPU kernels "
+                           "(default: off → pure-PyTorch). Needs the separate env from "
+                           "`chemflow boltz-env install`; pass --boltz-env so the SLURM "
+                           "tasks activate it.")
+    sgen.add_argument("--boltz-env", default=None, metavar="NAME",
+                      help="Conda env holding Boltz-2 (default: the sibling env 'boltz'); "
+                           "resolves boltz_command for the shard jobs")
+    sgen.add_argument("--boltz-command", default=None, metavar="PATH",
+                      help="Explicit path to the boltz executable (overrides --boltz-env)")
+    sgen.add_argument("--chai-env", default=None, metavar="NAME",
+                      help="Conda env that holds Chai-1 (default: the sibling env 'chai')")
+    sgen.add_argument("--chai-command", default=None, metavar="PATH",
+                      help="Explicit path to the chai-lab executable (overrides --chai-env)")
     sgen.add_argument("--rank-metric", default="auto",
                       choices=["auto", "affinity_probability_binary", "affinity_pred_value",
                                "confidence_score", "confidence", "iptm", "ptm", "complex_plddt"],
@@ -580,6 +657,12 @@ def build_parser() -> argparse.ArgumentParser:
     sclean.add_argument("--force", action="store_true",
                         help="Clean even if some ligands failed / are missing")
     sclean.set_defaults(func=_screen_clean)
+
+    sstatus = screen_commands.add_parser(
+        "status", help="How many compounds have finished, out of the total staged"
+    )
+    sstatus.add_argument("config", type=Path, help="Screening YAML config")
+    sstatus.set_defaults(func=_screen_status)
 
     srank = screen_commands.add_parser(
         "rank", help="Rank completed screening results and keep the top hits"

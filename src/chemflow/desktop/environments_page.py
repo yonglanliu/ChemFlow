@@ -58,10 +58,18 @@ ENVIRONMENTS = [
         "RBFE pipeline. Includes RDKit, Open Babel, ACPYPE, AmberTools, GROMACS (+ PMX).",
         default_env="alchemforge", gpu=True, recreate=True),
     _EnvSpec(
-        "alchemfold-env", "AlchemFold — Boltz-2 + Chai-1",
-        "Co-folding / docking structure prediction (Boltz-2 and Chai-1). Pulls a Torch "
-        "stack; set GPU for a CUDA build.",
-        default_env="alchemfold", gpu=True, recreate=True),
+        "boltz-env", "Boltz-2 — co-folding / docking (own env)",
+        "Boltz-2 with the optimized cuEquivariance triangle kernels: faster and much "
+        "lighter on memory for big complexes. Its own env because the kernels need a "
+        "recent PyTorch that Chai-1 forbids. Check prints the boltz path and whether "
+        "the kernels import; the docking page finds this env automatically.",
+        default_env="boltz", gpu=True, recreate=True),
+    _EnvSpec(
+        "chai-env", "Chai-1 — co-folding / docking (own env)",
+        "Chai-1 in its own env (it pins torch<2.7, so it cannot share with Boltz-2). "
+        "Point CHAI_DOWNLOADS_DIR at /data or scratch — the weights are large and "
+        "download on first use.",
+        default_env="chai", gpu=True, recreate=True),
     _EnvSpec(
         "diffdock-env", "DiffDock-L — blind docking (own env)",
         "DiffDock-L (gcorso/DiffDock) in its OWN env, separate from AlchemFold: creates the conda "
@@ -79,6 +87,13 @@ ENVIRONMENTS = [
         "AND PyRosetta, from the RosettaCommons conda channel — one-click, no license tarball. "
         "Used for PROTAC ternary docking and KIC loop building.",
         default_env="rosetta", gpu=False, recreate=False, status_env=False),
+    _EnvSpec(
+        "alchemfold-env", "AlchemFold — Boltz-2 + Chai-1  (DEPRECATED)",
+        "The old SHARED engine env. Superseded by one env per engine: Boltz-2, Chai-1 and "
+        "DiffDock-L above. AlchemFold itself now runs from the chemflow env and calls each "
+        "engine in its own env, so you no longer need this. Kept so existing installs keep "
+        "working — do not create it for a new setup.",
+        default_env="alchemfold", gpu=True, recreate=True),
     _EnvSpec(
         "reinvent-env", "REINVENT4 — generative design",
         "REINVENT4 for generative molecule / linker design.",

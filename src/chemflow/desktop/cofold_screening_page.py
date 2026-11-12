@@ -9,8 +9,9 @@ Two modes on one page:
   ranked. Pick the source catalog (ZINC20 / Enamine REAL). Drives
   ``alchemfold screen {generate,validate,stage,rank}``.
 
-A 3Dmol.js panel renders the predicted complex / binding pose. Everything runs
-through the dedicated ``alchemfold`` conda env.
+A 3Dmol.js panel renders the predicted complex / binding pose. The AlchemFold
+CLI runs in this (chemflow) env; each ENGINE runs in its own conda env —
+``boltz``, ``chai``, ``diffdock`` — resolved per run from the config.
 """
 
 from __future__ import annotations
@@ -185,9 +186,9 @@ class CofoldScreeningPage(QWidget):
             "AI docking & screening", "Docking & virtual screening (Boltz-2 / Chai-1 / DiffDock-L)",
             "Dock a single ligand, or screen a whole library on a SLURM array, with an AI "
             "engine: Boltz-2 / Chai-1 (co-folding from a sequence) or DiffDock-L (fast blind "
-            "docking into a receptor PDB). View the predicted binding pose below. Boltz / Chai "
-            "run in the 'alchemfold' environment and DiffDock-L in its own 'diffdock' "
-            "environment — install them from the Environments page."))
+            "docking into a receptor PDB). View the predicted binding pose below. Each engine "
+            "runs in its own environment ('boltz', 'chai', 'diffdock') — install them from "
+            "the Environments page."))
 
         # Two columns: form controls on the left, binding-pose viewer on the right,
         # so the page uses the width instead of growing very tall.
@@ -217,12 +218,15 @@ class CofoldScreeningPage(QWidget):
         row.addWidget(self.mode, 1)
         row.addWidget(QLabel("Engine:"))
         self.engine = NoScrollComboBox()
-        self.engine.addItems(["boltz", "chai", "diffdock"])
+        # Display the model names; the CLI still gets boltz / chai / diffdock.
+        for label, value in (("Boltz-2", "boltz"), ("Chai-1", "chai"),
+                             ("DiffDock-L", "diffdock")):
+            self.engine.addItem(label, value)
         self.engine.setToolTip(
             "Boltz-2 / Chai-1: co-folding from sequence (slower, Boltz-2 can predict affinity). "
             "DiffDock-L: fast blind docking into a receptor PDB (own env — install it on the "
             "Environments page; gives a pose confidence, no affinity).")
-        self.engine.setMinimumWidth(90)
+        self.engine.setMinimumWidth(110)
         row.addWidget(self.engine)
         left.addLayout(row)
 
@@ -334,7 +338,7 @@ class CofoldScreeningPage(QWidget):
         self.use_pocket = QCheckBox("Constrain binding pocket (steer the ligand to a known site)")
         self.use_pocket.setToolTip(
             "Bias the model to dock the ligand against specific receptor residues "
-            "(Boltz pocket constraint / Chai contact restraints). Leave off to let the "
+            "(Boltz-2 pocket constraint / Chai-1 contact restraints). Leave off to let the "
             "model place the ligand freely.")
         dock_layout.addWidget(self.use_pocket)
         self._pocket_box = QWidget()
@@ -355,7 +359,7 @@ class CofoldScreeningPage(QWidget):
         pk_row.addWidget(QLabel("Max dist (Å):"))
         self.pocket_max_distance = QLineEdit("6.0")
         self.pocket_max_distance.setFixedWidth(52)
-        self.pocket_max_distance.setToolTip("Pocket contact max distance in Angstrom (Boltz).")
+        self.pocket_max_distance.setToolTip("Pocket contact max distance in Angstrom (Boltz-2).")
         pk_row.addWidget(self.pocket_max_distance)
         dock_layout.addWidget(self._pocket_box)
         self._pocket_box.setVisible(False)
@@ -385,7 +389,7 @@ class CofoldScreeningPage(QWidget):
         self.sampling_steps = NoScrollSpinBox()
         self.sampling_steps.setRange(1, 2000)
         self.sampling_steps.setValue(200)
-        self.sampling_steps.setToolTip("sampling_steps (Boltz only)")
+        self.sampling_steps.setToolTip("sampling_steps (Boltz-2 only)")
         self.sampling_steps.setMinimumWidth(80)
         param_row.addWidget(self.sampling_steps)
         param_row.addStretch()
@@ -438,14 +442,28 @@ class CofoldScreeningPage(QWidget):
         self.use_msa_server.setToolTip("Compute MSAs via the model's server (needs internet; "
                                        "uncheck on offline compute nodes).")
         opts_row.addWidget(self.use_msa_server)
-        self.use_kernels = QCheckBox("Use Boltz GPU kernels")
+        self.use_kernels = QCheckBox("Use Boltz-2 GPU kernels")
         self.use_kernels.setChecked(False)
         self.use_kernels.setToolTip(
             "Boltz-2 only: use the optimized cuequivariance/trifast triangle kernels. "
-            "OFF by default (pure-PyTorch path — works everywhere). Only turn on in a "
-            "boltz-only env that has the kernels installed; they conflict with chai's "
-            "torch<2.7 pin, so they are not installed in the default AlchemFold env.")
+            "Faster and lighter on memory for big complexes (triangle attention is the "
+            "bottleneck). OFF by default (pure-PyTorch path — works everywhere). They "
+            "conflict with chai's torch<2.7 pin, so Boltz-2 has its OWN env: "
+            "install it from Environments -> 'Boltz-2 — co-folding / docking' "
+            "(chemflow boltz-env install).")
         opts_row.addWidget(self.use_kernels)
+        self._boltz_env_label = QLabel("engine env:")
+        self.boltz_env = QLineEdit("boltz")
+        self.boltz_env.setMaximumWidth(110)
+        self.boltz_env.setToolTip(
+            "Conda env holding the selected engine — one env per engine now: "
+            "'boltz' (Environments -> Boltz-2), 'chai' (-> Chai-1), 'diffdock' "
+            "(-> DiffDock-L). The generated config gets that env's executable as "
+            "boltz_command / chai_command, so nothing needs activating. Leave as "
+            "the default unless you named the env differently.")
+        opts_row.addWidget(self._boltz_env_label)
+        opts_row.addWidget(self.boltz_env)
+        self.use_kernels.toggled.connect(self._on_kernels_toggled)
         self.predict_affinity = QCheckBox("Predict affinity")
         self.predict_affinity.setToolTip(
             "Boltz-2 only: predict binding affinity. The pose panel then shows "
@@ -472,7 +490,7 @@ class CofoldScreeningPage(QWidget):
         rt_row.addWidget(QLabel("Run on:"))
         self.run_on = NoScrollComboBox()
         self.run_on.addItems(["localhost", "HPC (SLURM)"])
-        self.run_on.setToolTip("localhost: run now in the alchemfold env. "
+        self.run_on.setToolTip("localhost: run now (the engine runs in its own env). "
                                "HPC: write a SLURM submit script and sbatch it.")
         self.run_on.setMinimumWidth(130)
         rt_row.addWidget(self.run_on)
@@ -598,7 +616,7 @@ class CofoldScreeningPage(QWidget):
         self.screen_gpus.setValue(1)
         self.screen_gpus.setMinimumWidth(90)
         self.screen_gpus.setToolTip(
-            "GPUs per shard task. 1 is simplest and most robust; >1 makes Boltz use "
+            "GPUs per shard task. 1 is simplest and most robust; >1 makes Boltz-2 use "
             "multi-GPU (DDP) inside each shard.")
         self.screen_gpu_type = NoScrollComboBox()
         self.screen_gpu_type.addItems([(g or "any") for g in s_gpus])
@@ -741,7 +759,7 @@ class CofoldScreeningPage(QWidget):
         pose_row = QHBoxLayout()
         pose_row.addWidget(QLabel("Pose / complex:"))
         self.result_path = PathField(
-            "complex (.pdb/.cif: Boltz, Chai) or docked ligand pose (.sdf: DiffDock)", mode="file")
+            "complex (.pdb/.cif: Boltz-2, Chai-1) or docked ligand pose (.sdf: DiffDock-L)", mode="file")
         pose_row.addWidget(self.result_path, 1)
         right.addLayout(pose_row)
 
@@ -798,18 +816,26 @@ class CofoldScreeningPage(QWidget):
         self.pose_info.setReadOnly(True)
         self.pose_info.setFixedHeight(120)
         self.pose_info.setPlaceholderText(
-            "Load a result to show its scores (Boltz / Chai affinity & confidence, or DiffDock pose confidence).")
+            "Load a result to show its scores (Boltz-2 / Chai-1 affinity & confidence, or DiffDock-L pose confidence).")
         right.addWidget(self.pose_info)
 
         self.workdir_field.edit.textChanged.connect(lambda _t: self._update_cfg_hint())
         self.jobname.textChanged.connect(lambda _t: self._update_cfg_hint())
         self.mode.currentTextChanged.connect(self._on_mode_changed)
         self.run_on.currentTextChanged.connect(self._on_run_target_changed)
-        self.engine.currentTextChanged.connect(self._on_engine_changed)
-        self._on_engine_changed(self.engine.currentText())
+        self.engine.currentIndexChanged.connect(lambda _i: self._on_engine_changed(self._engine()))
+        self._on_engine_changed(self._engine())
         self._on_mode_changed(self.mode.currentText())
 
     # -- mode handling ----------------------------------------------------
+    def _engine(self) -> str:
+        """CLI value of the selected engine (boltz | chai | diffdock).
+
+        The combo DISPLAYS model names (Boltz-2, Chai-1, DiffDock-L), so never
+        compare against currentText() — the data role holds the CLI value.
+        """
+        return str(self.engine.currentData() or "boltz")
+
     def _is_dock(self) -> bool:
         return self.mode.currentText() == _MODE_DOCK
 
@@ -822,9 +848,39 @@ class CofoldScreeningPage(QWidget):
             return self._gpu_values[idx]
         return ""
 
+    def _on_kernels_toggled(self, on: bool) -> None:
+        """Kept for the checkbox signal; the env field follows the ENGINE now."""
+        self._sync_engine_env()
+
+    def _sync_engine_env(self) -> None:
+        """Show the engine-env field for Boltz-2 / Chai-1 and default its name.
+
+        DiffDock-L finds its own env (and repo) through the Environments page,
+        so it has no field here.
+        """
+        engine = self._engine()
+        show = engine in ("boltz", "chai")
+        self._boltz_env_label.setVisible(show)
+        self.boltz_env.setVisible(show)
+        if show and self.boltz_env.text().strip() in ("", "boltz", "chai"):
+            self.boltz_env.setText(engine)   # follow the engine unless renamed
+
+    def _engine_env_argv(self) -> list[str]:
+        """``--boltz-env NAME`` / ``--chai-env NAME`` for the selected engine."""
+        engine = self._engine()
+        name = self.boltz_env.text().strip()
+        if engine in ("boltz", "chai") and name:
+            return [f"--{engine}-env", name]
+        return []
+
     def _on_engine_changed(self, _text: str) -> None:
         # Affinity prediction is a Boltz-2-only head; disable it for Chai-1.
-        is_boltz = self.engine.currentText() == "boltz"
+        is_boltz = self._engine() == "boltz"
+        # The kernels are a Boltz-2 feature too (Chai-1 has no such path).
+        self.use_kernels.setEnabled(is_boltz)
+        if not is_boltz:
+            self.use_kernels.setChecked(False)
+        self._sync_engine_env()
         self.predict_affinity.setEnabled(is_boltz)
         if not is_boltz:
             self.predict_affinity.setChecked(False)
@@ -833,7 +889,7 @@ class CofoldScreeningPage(QWidget):
             if not is_boltz:
                 self.screen_affinity.setChecked(False)
         # DiffDock-L: structure-based blind docking in its own env.
-        dd = self.engine.currentText() == "diffdock"
+        dd = self._engine() == "diffdock"
         if hasattr(self, "_dd_status"):
             self._dd_status.setVisible(dd)
             if dd:
@@ -1014,7 +1070,7 @@ class CofoldScreeningPage(QWidget):
         seq = self.sequence.toPlainText().strip()
         seq_file = self.sequence_file.text().strip()
         if self._is_dock():
-            argv = ["dock", "generate", "--engine", self.engine.currentText(), "-o", cfg, "--force"]
+            argv = ["dock", "generate", "--engine", self._engine(), "-o", cfg, "--force"]
             jobname = self.jobname.text().strip()
             if jobname:
                 argv += ["--jobname", jobname]
@@ -1028,13 +1084,13 @@ class CofoldScreeningPage(QWidget):
                 argv += ["--sequence-file", seq_file]
             elif seq:
                 argv += ["--sequence", seq]
-            if self.engine.currentText() == "diffdock":
+            if self._engine() == "diffdock":
                 rp = self.receptor_pdb.text().strip()
                 if not rp:
                     self.status.setText("DiffDock needs a receptor PDB — browse for one first.")
                     return
                 argv += ["--receptor-pdb", rp]
-            if self.engine.currentText() == "diffdock":
+            if self._engine() == "diffdock":
                 argv += ["--diffdock-samples", str(self.dd_poses.value()),
                          "--diffdock-steps", str(self.dd_steps.value()),
                          "--diffdock-batch-size", str(self.dd_batch.value())]
@@ -1047,7 +1103,8 @@ class CofoldScreeningPage(QWidget):
             argv.append("--use-msa-server" if self.use_msa_server.isChecked()
                         else "--no-use-msa-server")
             argv.append("--kernels" if self.use_kernels.isChecked() else "--no-kernels")
-            if self.predict_affinity.isChecked() and self.engine.currentText() == "boltz":
+            argv += self._engine_env_argv()
+            if self.predict_affinity.isChecked() and self._engine() == "boltz":
                 argv.append("--predict-affinity")
             if self.use_pocket.isChecked():
                 contacts = self.pocket_contacts.text().strip()
@@ -1070,13 +1127,13 @@ class CofoldScreeningPage(QWidget):
             self.status.setText(f"Writing {cfg} (engine: {self.engine.currentText()}, "
                                 f"ligand: {src}). Review it, then Validate.")
         else:
-            argv = ["screen", "generate", "--engine", self.engine.currentText(),
+            argv = ["screen", "generate", "--engine", self._engine(),
                     "--library", self.library.currentText(), "-o", cfg, "--force"]
             if seq_file:
                 argv += ["--sequence-file", seq_file]
             elif seq:
                 argv += ["--sequence", seq]
-            if self.engine.currentText() == "diffdock":
+            if self._engine() == "diffdock":
                 rp = self.receptor_pdb.text().strip()
                 if not rp:
                     self.status.setText("DiffDock needs a receptor PDB — browse for one first.")
@@ -1096,8 +1153,11 @@ class CofoldScreeningPage(QWidget):
             if job:
                 argv += ["--jobname", job]
             argv.append("--cleanup" if self.cleanup_check.isChecked() else "--no-cleanup")
-            if self.screen_affinity.isChecked() and self.engine.currentText() == "boltz":
+            if self.screen_affinity.isChecked() and self._engine() == "boltz":
                 argv.append("--predict-affinity")
+            if self._engine() == "boltz":
+                argv.append("--kernels" if self.use_kernels.isChecked() else "--no-kernels")
+            argv += self._engine_env_argv()
             argv += ["--rank-metric", self.rank_metric.currentText()]
             argv += ["--max-ligands", str(self.max_ligands.value()),
                      "--sample", self.sample_mode.currentText(),
@@ -1185,7 +1245,7 @@ class CofoldScreeningPage(QWidget):
                                 "complex below once the job finishes.")
         else:
             self._run(["dock", "run", self._cfg()])
-            self.status.setText("Running docking in the alchemfold env. When it finishes, "
+            self.status.setText("Running docking (engine in its own env). When it finishes, "
                                 "click Find results below to view the pose.")
 
     # -- pose viewer ------------------------------------------------------
@@ -1295,7 +1355,7 @@ class CofoldScreeningPage(QWidget):
                 scores[k] = float(extra[k])
         if not scores and not lines:
             self.pose_info.setPlainText(
-                "No scores found for this pose (Boltz / Chai: affinity_*.json / confidence_*.json "
+                "No scores found for this pose (Boltz-2 / Chai-1: affinity_*.json / confidence_*.json "
                 "beside the structure; DiffDock: the confidence in the file name or results table).")
             return
         # Show affinity first, then confidence metrics, each on its own line.

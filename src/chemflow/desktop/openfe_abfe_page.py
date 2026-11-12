@@ -58,6 +58,16 @@ from chemflow.desktop.widgets.forms import (  # noqa: F811
 )
 
 
+
+def _hpc_gpu_types(module: str) -> list[str]:
+    """Selectable --gres GPU types from the shared hpc presets (one list, repo-wide)."""
+    try:
+        from hpc import presets as _presets
+
+        return _presets.gpu_types(module)
+    except Exception:          # hpc not importable -> a safe built-in list
+        return ["", "a100", "a100x", "v100", "v100x", "h100", "p100", "a40", "rtx8000"]
+
 def _web_view():
     from PySide6.QtWebEngineWidgets import QWebEngineView
 
@@ -133,7 +143,9 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
                                               mode="save", save_filter="SDF (*.sdf)")
         self.overwrite_charges = QCheckBox("Overwrite existing partial charges")
         self.overwrite_charges.setChecked(True)
-        self.smff = QLineEdit("openff-2.1.0")
+        self.smff = _combo(["openff-2.2.1", "openff-2.1.0", "openff-2.0.0", "gaff-2.11", "gaff-1.81"], "openff-2.1.0")
+        self.smff.setEditable(True)
+        self.smff.setToolTip("Ligand force field (OpenFF/SMIRNOFF or GAFF). Pick one or type a custom version.")
         f.addRow("Ligand SDF:", self.ligand_sdf)
         f.addRow("Cofactor SDF:", self.cofactor_sdf)
         f.addRow("Charge toolkit backend:", self.off_backend)
@@ -372,7 +384,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
             return
         try:
             from chemflow.desktop.openfe_rbfe_config import apply_slurm_preset
-            merged = apply_slurm_preset(self._hpc(), name)
+            merged = apply_slurm_preset(self._hpc(), name, "openfe")
         except Exception:
             return
         self.partition.setText(str(merged.get("partition", "gpu")))
@@ -443,7 +455,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         # General / thermodynamics + force field
         self.protocol_repeats = _spin(1, 1, 50)
         self.pressure = _dspin(1.0, 0.0, 1000.0, 0.5, 2)
-        self.temperature = _dspin(310.0, 0.0, 1000.0, 1.0, 1)
+        self.temperature = _dspin(298.15, 0.0, 1000.0, 2.0, 2)
         self.platform = _combo(["CUDA", "OpenCL", "CPU"], "CUDA")
         self.nb_method = _combo(["PME", "CutoffPeriodic", "CutoffNonPeriodic"], "PME")
         self.nb_cutoff = _dspin(1.0, 0.5, 2.0, 0.1, 2)
@@ -644,7 +656,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         self.hpc_preset = QComboBox()
         try:
             from chemflow.desktop.openfe_rbfe_config import single_gpu_preset_names
-            _preset_names = single_gpu_preset_names()
+            _preset_names = single_gpu_preset_names("openfe")
         except Exception:
             _preset_names = []
         self.hpc_preset.addItems(["(custom)", *_preset_names])
@@ -657,7 +669,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         self.gpus = _spin(1, 0, 16)
         self.gpu_type = QComboBox()
         self.gpu_type.setEditable(True)
-        self.gpu_type.addItems(["", "a100", "a100x", "v100", "v100x", "h100", "p100", "a40", "rtx8000"])
+        self.gpu_type.addItems(_hpc_gpu_types("openfe"))
         self.gpu_type.setCurrentText("")
         self.gpu_type.setToolTip("GPU type for --gres=gpu:<type>:N (leave blank for any GPU). "
                                  "Editable — type your cluster's name if not listed.")

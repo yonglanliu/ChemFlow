@@ -119,10 +119,21 @@ def diffdock_chronological(pdb_text: str) -> tuple[str, str]:
 
 
 def _load_cleaner():
-    """alchemfold's trajectory cleaner, loaded by file path (works in any env with this repo layout)."""
+    """alchemfold's trajectory cleaner.
+
+    Imported normally when alchemfold is on the path, else loaded by file path
+    so the viewer still works from a bare repo checkout.
+    """
     import importlib.util
 
-    src = Path(__file__).resolve().parents[2] / "alchemfold" / "diffdock_traj.py"
+    try:
+        from alchemfold.diffdock.traj import clean_trajectory
+
+        return clean_trajectory
+    except Exception:
+        pass
+
+    src = Path(__file__).resolve().parents[2] / "alchemfold" / "diffdock" / "traj.py"
     if not src.is_file():
         return None
     spec = importlib.util.spec_from_file_location("_alchemfold_diffdock_traj", src)

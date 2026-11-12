@@ -39,6 +39,8 @@ _SUBCOMMANDS = [
     ("chemflow.cli.protac", "add_protac_parser"),
     ("chemflow.cli.fe_env", "add_fe_env_parser"),
     ("chemflow.cli.alchemfold_env", "add_alchemfold_env_parser"),
+    ("chemflow.cli.boltz_env", "add_boltz_env_parser"),
+    ("chemflow.cli.chai_env", "add_chai_env_parser"),
     ("chemflow.cli.diffdock_env", "add_diffdock_env_parser"),
     ("chemflow.cli.alchemfold", "add_alchemfold_parser"),
     ("chemflow.cli.gmx_env", "add_gmx_env_parser"),

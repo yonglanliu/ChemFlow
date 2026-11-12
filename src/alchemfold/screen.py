@@ -350,7 +350,7 @@ def stage(config_path) -> int:
     submit_sh.chmod(submit_sh.stat().st_mode | 0o100)
 
     if str(conf.engine) == "diffdock":
-        from alchemfold.engines.diffdock import preflight
+        from alchemfold.diffdock.engine import preflight
 
         for w in preflight(conf):
             print(f"WARNING (before you submit): {w}")
@@ -496,6 +496,66 @@ def cleanup(config_path, *, force: bool = False) -> int:
     shutil.rmtree(shard_dir, ignore_errors=True)
     print(f"Removed intermediate files: {shard_dir} ({size / 1e6:.1f} MB). "
           "Kept poses/, results/, ranking.csv, screen.yaml.")
+    return 0
+
+
+def status(config_path) -> int:
+    """Report how many compounds have finished, out of the total staged.
+
+    A screen runs asynchronously as a SLURM array, so this scans the shard work
+    folders and counts ligands that produced a usable score. Safe to run at any
+    time, including while the array is still going.
+    """
+    from chemflow.utils.progress import Progress, format_clock
+
+    conf = load_config(config_path)
+    validate_config(conf)
+    workdir = Path(conf.workdir).expanduser().resolve()
+    shard_dir = workdir / "shards"
+
+    # Batched engines keep one results.csv instead of per-ligand folders.
+    results_csv = workdir / "results.csv"
+    if results_csv.is_file():
+        import csv as _csv
+
+        with results_csv.open(encoding="utf-8") as fh:
+            rows = list(_csv.DictReader(fh))
+        ok = sum(1 for r in rows if (r.get("status") or "").lower() == "ok")
+        print(f"{results_csv}: {len(rows)} compound(s) recorded, {ok} ok, "
+              f"{len(rows) - ok} failed")
+        return 0
+
+    staged = scored = failed = 0
+    per_shard = []
+    for ligands_root in sorted(shard_dir.glob("work_*/ligands")):
+        dirs = [p for p in ligands_root.iterdir() if p.is_dir()]
+        shard_ok = 0
+        for ligand_dir in dirs:
+            scores = _scrape_json_scores(ligand_dir)
+            dd_conf, _ = _parse_diffdock_confidence(ligand_dir)
+            _metric, value = _pick_metric(conf, scores, dd_conf)
+            shard_ok += value is not None
+        staged += len(dirs)
+        scored += shard_ok
+        failed += len(dirs) - shard_ok
+        per_shard.append((ligands_root.parent.name, shard_ok, len(dirs)))
+
+    if not staged:
+        print(f"No staged ligands found under {shard_dir}. "
+              "Has `alchemfold screen stage` run?", file=sys.stderr)
+        return 1
+
+    for name, ok, total in per_shard:
+        bar_len = 20
+        filled = int(bar_len * ok / total) if total else 0
+        print(f"  {name:<14} [{'#' * filled}{'.' * (bar_len - filled)}] "
+              f"{ok}/{total}")
+    pct = 100.0 * scored / staged
+    print(f"\nFinished {scored}/{staged} compounds ({pct:.1f}%); "
+          f"{staged - scored} still running or failed.")
+    if scored == staged:
+        print("All compounds complete — rank them with: "
+              f"alchemfold screen rank {config_path}")
     return 0
 
 

@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 from alchemfold.dock_config import load_config, load_ligands_from_file, validate_config
 from alchemfold.engines import get_engine
-from alchemfold._exec import resolve_command
+from alchemfold._exec import prefer_envs_for, resolve_command
 
 
 def _screen_chain_id(conf) -> str:
@@ -42,7 +42,8 @@ def _run_one(engine, conf, workdir: Path, *, dry_run: bool) -> int:
     devices = 1 if str(getattr(conf, "engine", "")) == "diffdock" else int(getattr(conf, "devices", 1) or 1)
     for w in (engine.preflight(conf) if hasattr(engine, "preflight") else []):
         print(f"WARNING (first-run start-up): {w}", flush=True)
-    command = wrap_srun(resolve_command(engine.build_command(conf, inputs, out_dir)), devices)
+    command = wrap_srun(resolve_command(engine.build_command(conf, inputs, out_dir),
+                                        prefer_envs_for(conf)), devices)
     cwd = engine.build_cwd(conf) if hasattr(engine, "build_cwd") else None
     env = os.environ.copy()
     if hasattr(engine, "build_env"):
@@ -82,12 +83,12 @@ def run_from_config(config_path, *, dry_run: bool = False) -> int:
         if str(conf.engine) == "boltz":
             # Batched: one boltz call per library, one shared MSA, all poses in
             # one folder and all scores in one CSV (no per-ligand folders).
-            from alchemfold.boltz_batch import run_library
+            from alchemfold.boltz.batch import run_library
 
             return run_library(conf, library, dry_run=dry_run)
         if str(conf.engine) == "diffdock":
             # Batched too: one DiffDock call, all poses in poses/, scores in one CSV.
-            from alchemfold.diffdock_batch import run_library as run_diffdock_library
+            from alchemfold.diffdock.batch import run_library as run_diffdock_library
 
             return run_diffdock_library(conf, library, dry_run=dry_run)
         print(f"Engine: {conf.engine}; screening {len(library)} ligand(s) from {ligand_file}")

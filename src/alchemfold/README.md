@@ -42,6 +42,28 @@ alchemfold dock run docking.yaml            # --dry-run prints the engine comman
 | `chai` (Chai-1) | `chai-lab` | open weights, local; pocket via a restraints file (best-effort) |
 | `diffdock` (DiffDock-L) | **own conda env** + GitHub repo (`chemflow diffdock-env install`) | fast diffusion **docking into a receptor PDB**; blind — no pocket/affinity; gives pose *confidence* only |
 
+**Boltz-2 GPU kernels.** Boltz's triangle kernels (cuEquivariance) speed up — and
+shrink the memory of — the triangle attention/multiplicative update that dominates
+large complexes. They need a recent PyTorch, which Chai-1's `torch<2.7` pin forbids,
+which is why each engine has its own env:
+
+```bash
+chemflow boltz-env install --cuda 12.6      # or the Environments page in the desktop app
+chemflow chai-env install                   # Chai-1, separate env
+chemflow diffdock-env install               # DiffDock-L, separate env + repo
+
+python -m alchemfold dock generate --engine boltz --kernels ...
+```
+
+**One env per engine.** AlchemFold itself runs from the `chemflow` env; it resolves
+`boltz` / `chai-lab` / DiffDock from the sibling conda env named after the engine,
+so nothing needs activating. `--boltz-env NAME` / `--chai-env NAME` name a
+differently-titled env (resolved into `boltz_command` / `chai_command`), and
+`--boltz-command` / `--chai-command` take an explicit path. For HPC screening,
+`slurm.conda_env` is the env that can import AlchemFold — `chemflow` — **not** an
+engine env; the shards call each engine by absolute path. The old shared
+`alchemfold` env is deprecated.
+
 **Job folder:** pass `--jobname NAME` to `dock generate` and EVERYTHING for the run — the config
 (`NAME/docking.yaml`), the engine inputs, `run_docking.slurm`, logs and `predictions/` — goes under
 `<workdir>/NAME/`. (`screen`, `gpu-test` and the `diffdock-env` tests follow the same rule.)
@@ -170,13 +192,28 @@ chain is plain structure prediction and is rejected.
 
 ---
 
-## Files
+## Layout
+
+One folder per engine — everything only that engine needs lives inside it:
+
+| Path | Role |
+|---|---|
+| `boltz/` | Boltz-2: `engine.py` (adapter), `run.py` (input YAML + `boltz predict`), `batch.py` (library screening), `config.py` (standalone co-folding config) |
+| `chai/` | Chai-1: `engine.py` |
+| `diffdock/` | DiffDock-L: `engine.py`, `batch.py`, `traj.py` (trajectory cleanup), `_shim.py` (embeds each receptor once per run) |
+| `engines/__init__.py` | registry mapping `engine:` → the three adapters |
+
+Shared across engines, at the top level:
 
 | File | Role |
 |---|---|
-| `boltz_config.py` | light config layer (load/validate/stage/generate) |
-| `boltz_run.py` | builds the Boltz input YAML + `boltz predict` command, runs it |
 | `cli.py` / `__main__.py` | the `alchemfold` CLI |
+| `dock_config.py` / `dock_run.py` / `dock_batch.py` | docking config, dispatch, per-ligand batching |
+| `screen.py` / `screen_config.py` | library screening: shard, submit, rank |
+| `hpc_config.py` | SLURM presets (`env/hpc.yaml`) |
+| `_config.py` | YAML/namespace helpers used by every config module |
+| `_exec.py` | resolves each engine's executable from its own conda env |
+| `gpu_test.py` / `_gpuinfo.py` / `_ddp_probe.py` | GPU checks |
 
 ---
 
@@ -289,7 +326,7 @@ A screen runs **one DiffDock call per shard**, so the model loads once per shard
   tens of KB, so leave it off for very large screens.
 - **Big libraries:** DiffDock embeds the receptor with ESM2 once per ligand row, so one process with
   10,000 ligands does ~10,000 identical embeddings and holds ~19 GB of them (367-residue receptor).
-  AlchemFold runs DiffDock through `engines/_diffdock_shim.py`, which embeds each unique sequence once
+  AlchemFold runs DiffDock through `diffdock/_shim.py`, which embeds each unique sequence once
   (`diffdock_dedupe_esm: false` turns this off). Still prefer `alchemfold screen` (shards of ~500) over
   one huge `dock run`: shards run in parallel on many GPUs and resume per shard.
 - With `cleanup: true` (default) the split library and shard work folders are deleted after ranking when every

@@ -44,7 +44,7 @@ SBATCH_ARGS=(
     --cpus-per-task="${ABFE_CPUS_PER_TASK}"
     --mem="${ABFE_MEMORY}"
     --time="${ABFE_WALLTIME}"
-    --array="0-$((N_ABFE_TASKS - 1))%${MAX_ABFE_JOBS}"
+    --array="0-$((N_ABFE_TASKS - 1))"
     --dependency="afterok:${SETUP_JOB}"
     --export="ALL,CONFIG_FILE=${CONFIG_FILE}"
 )

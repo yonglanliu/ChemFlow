@@ -1,0 +1,20 @@
+# AI docking / co-folding (Boltz-2, Chai-1, DiffDock-L): one ligand per job.
+# Single-GPU inference, short per complex — throughput lives in screening.yaml.
+
+default_preset: docking-standard
+
+defaults:
+  conda_env: chemflow       # env that imports alchemfold; the ENGINE runs from
+                            # its own env (boltz / chai / diffdock), by path
+
+presets:
+  docking-quick: "01:00:00"       # small/medium complex, smoke test
+  docking-standard: "04:00:00"    # typical single docking run
+  docking-long: "1-00:00:00"      # large complex / many samples / MSA build
+  docking-xlong: "2-00:00:00"     # very large complex or a big ligand_file batch
+
+  docking-2gpu:                   # rarely needed; a single run is single-GPU
+    time: "1-00:00:00"
+    gpus: 2
+    gpu_type: a100
+    mem: 64G

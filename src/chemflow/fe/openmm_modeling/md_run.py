@@ -36,6 +36,8 @@ from chemflow.fe.openmm_modeling.membrane_relax import (
     logger,
     make_integrator,
     make_minimization_integrator,
+    _output_positions,
+    read_structure,
     report_state_diagnostics,
     setup_logger,
     write_pdb,
@@ -91,10 +93,11 @@ def run_from_config(config_path):
     logger.info("MD working directory: %s", workdir)
     logger.info("System type: %s", conf.system_type)
 
-    pdb = PDBFile(str(conf.input_pdb))
+    pdb = read_structure(conf.input_pdb)
     if pdb.topology.getPeriodicBoxVectors() is None:
         raise ValueError(
-            f"Input PDB has no periodic box (missing CRYST1): {conf.input_pdb}. "
+            f"Input structure has no periodic box (missing CRYST1 / _cell): "
+            f"{conf.input_pdb}. "
             "Solvate/build the system first (build-soluble or build-membrane)."
         )
     modeller = Modeller(pdb.topology, pdb.positions)
@@ -126,7 +129,7 @@ def run_from_config(config_path):
     state = simulation.context.getState(getPositions=True)
     positions = state.getPositions()
     report_state_diagnostics(simulation, "After minimization")
-    write_pdb(simulation.topology, positions, workdir / f"{prefix}_minimized.pdb")
+    write_pdb(simulation.topology, _output_positions(simulation), workdir / f"{prefix}_minimized.pdb")
 
     # -------------------------------------------------- NVT equilibration
     stage = conf.nvt
@@ -159,7 +162,7 @@ def run_from_config(config_path):
     simulation.step(steps)
     state = simulation.context.getState(getPositions=True, getVelocities=True)
     positions, velocities = state.getPositions(), state.getVelocities()
-    write_pdb(simulation.topology, positions, workdir / f"{prefix}_equilibrated.pdb")
+    write_pdb(simulation.topology, _output_positions(simulation), workdir / f"{prefix}_equilibrated.pdb")
 
     # -------------------------------------------------- production
     stage = conf.production
@@ -176,7 +179,7 @@ def run_from_config(config_path):
     final = simulation.context.getState(getPositions=True, getVelocities=True)
 
     production_pdb = workdir / f"{prefix}_production.pdb"
-    write_pdb(simulation.topology, final.getPositions(), production_pdb)
+    write_pdb(simulation.topology, _output_positions(simulation), production_pdb)
     simulation.saveState(str(workdir / f"{prefix}_production.xml"))
     simulation.saveCheckpoint(str(workdir / f"{prefix}_production.chk"))
     logger.info("Saved production PDB: %s", production_pdb)

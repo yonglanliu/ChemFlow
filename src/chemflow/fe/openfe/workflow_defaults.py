@@ -273,6 +273,9 @@ def _rbfe_defaults() -> dict[str, Any]:
             "transformation": "both",
             "mapper": "LomapAtomMapper",
             "planner": "minimal_spanning",
+            "pre_equilibrate_complex": False,
+            "pre_equilibrate_nvt_ps": 100.0,
+            "pre_equilibrate_min_steps": 5000,
         }
     )
     return result
@@ -387,6 +390,9 @@ def _absolute_defaults(workflow: str) -> dict[str, Any]:
                 ),
                 "mapper": "LomapAtomMapper",
                 "planner": "minimal_spanning",
+                "pre_equilibrate_complex": False,
+                "pre_equilibrate_nvt_ps": 100.0,
+                "pre_equilibrate_min_steps": 5000,
             }
         )
     return result
