@@ -48,6 +48,7 @@ dependencies:
   - rdkit
   - numpy
   - scipy
+  - pyarrow        # pandas parquet engine
 
   - pip:
       # - --extra-index-url https://download.pytorch.org/whl/cu126

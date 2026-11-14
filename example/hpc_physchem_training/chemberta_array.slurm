@@ -20,12 +20,12 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 
 # Override these values at submission time when needed:
-#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/physchem \
-#   PHYSCHEM_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_multitask.csv \
-#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_test.csv \
-#   CHEMBERTA_MODEL_NAME=/data/liuy48/models/ChemBERTa-77M-MLM \
+#   PHYSCHEM_JOB_DIR=/data/$USER/model_training/adme/physchem \
+#   PHYSCHEM_DATA_FILE=/data/$USER/model_training/adme/physchem/dataset/physchem_multitask.csv \
+#   PHYSCHEM_TEST_DATA_FILE=/data/$USER/model_training/adme/physchem/dataset/physchem_test.csv \
+#   CHEMBERTA_MODEL_NAME=/data/$USER/models/ChemBERTa-77M-MLM \
 #   sbatch chemberta_array.slurm
-training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
+training_dir="${PHYSCHEM_JOB_DIR:-/data/$USER/model_training/adme/physchem}"
 base_config="${CHEMBERTA_BASE_CONFIG:-$repo_dir/example/chemberta_training/conf.toml}"
 data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
 test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"

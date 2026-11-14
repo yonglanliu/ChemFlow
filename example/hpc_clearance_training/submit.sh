@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-training_dir="/data/liuy48/model_training/adme/clearance"
+training_dir="/data/$USER/model_training/adme/clearance"
 script_dir="$training_dir"
 log_dir="$training_dir/logs"
 

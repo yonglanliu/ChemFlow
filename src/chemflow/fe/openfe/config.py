@@ -33,19 +33,24 @@ OPENFE_LIGAND_FEP_CONFIG: dict[str, dict[str, Any]] = {
         "neutralize": True,
         "ion_concentration": 0.15,
         "membrane_system": False,
+        # Preflight of the solvated input before anything reads it:
+        # "error" (default) refuses a box that disagrees with the file's CRYST1
+        # or atoms already overlapping; "warn" prints and continues; "off" skips.
+        "input_check": "error",
+        # Optional: build + equilibrate the system as part of this run, instead
+        # of pointing protein_pdb at a system built elsewhere. The structure and
+        # its periodic box then come from the same step and cannot disagree.
+        # preparation:
+        #   enabled: true
+        #   build_config: membrane_build.yaml
+        #   relax_config: membrane_relax.yaml
+        #   md_config: null
+        "preparation": None,
         "hydrogen_mass": 3.0,
         "alchemical_network": "all",
         "transformation": "both",
         "mapper": "LomapAtomMapper",
         "planner": "minimal_spanning",
-        # Complex leg only: run minimisation + NVT MD on the hybrid system
-        # before alchemical sampling. openfe's RBFE protocol has no NVT stage
-        # (SepTop/ABFE do), which is where a dense bilayer around a freshly
-        # inserted hybrid ligand tends to diverge at state 0.
-        # Lengths: CHEMFLOW_RFE_PREEQ_NVT_PS / CHEMFLOW_RFE_PREEQ_MIN_STEPS.
-        "pre_equilibrate_complex": False,
-        "pre_equilibrate_nvt_ps": 100.0,
-        "pre_equilibrate_min_steps": 5000,
     },
     "alchemical_network_settings": {
         "replicates": 1,

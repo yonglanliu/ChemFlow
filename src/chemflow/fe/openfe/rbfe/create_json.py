@@ -18,7 +18,7 @@ from openmm.app import Simulation, Topology
 from rdkit import Chem
 from pydantic import ValidationError
 
-from chemflow.fe.openfe.partial_charges import (
+from chemflow.fe.openfe.utils.partial_charges import (
     ensure_partial_charges,
     harmonize_isomorphic_charges,
 )
@@ -493,28 +493,13 @@ def _create_complex_leg_protocol(conf):
             conf.surface_tension * offunit.bar * offunit.nanometer
         )
 
-    # The complex leg is where the membrane has to relax around the hybrid
-    # ligand, and where openfe's RBFE protocol goes straight from minimisation
-    # to NPT equilibration with no NVT stage (SepTop/ABFE have one). Opt in to
-    # our subclass that adds it.
-    from chemflow.fe.openfe.rbfe.equilibrated_protocol import get_protocol_class
-
-    protocol_cls = get_protocol_class(
-        equilibrated=bool(getattr(conf, "pre_equilibrate_complex", False))
-    )
-    if getattr(conf, "pre_equilibrate_complex", False):
-        print(f"Complex leg protocol: {protocol_cls.__name__}\n"
-              "  -> NVT pre-equilibration of the hybrid system is ON "
-              "(pre_equilibrate_complex: true).\n"
-              "  -> Lengths: CHEMFLOW_RFE_PREEQ_NVT_PS (default 100 ps), "
-              "CHEMFLOW_RFE_PREEQ_MIN_STEPS (default 5000).\n"
-              "  -> In the job log, grep for '[chemflow-preeq]' to confirm it ran.",
-              flush=True)
-    else:
-        print(f"Complex leg protocol: {protocol_cls.__name__} (stock openfe; set "
-              "pre_equilibrate_complex: true for the NVT pre-equilibration stage)",
-              flush=True)
-    return protocol_cls(settings=settings)
+    # Stock OpenFE protocol. An earlier ChemFlow subclass equilibrated the
+    # alchemical hybrid at lambda=0 before sampling; it was retired in Nov 2026
+    # because equilibration belongs on the real system, before the hybrid is
+    # built — see `preparation` in the config and prepare_system.py. Relaxing a
+    # hybrid at lambda=0 also lets the unique atoms of the second ligand, which
+    # are decoupled there, drift freely and make the first real window worse.
+    return RelativeHybridTopologyProtocol(settings=settings)
 
 
 def dict_to_namespace(d):
@@ -531,7 +516,32 @@ def dict_to_namespace(d):
 def main() -> None:
     args = parse_args()
 
+    # Which OpenFE is this run using? One line, but it settles "is the code I
+    # think is running actually running" without a detour.
+    import openfe as _openfe
+
+    print(f"OpenFE {getattr(_openfe, '__version__', 'unknown')} "
+          f"({pathlib.Path(_openfe.__file__).resolve().parent})", flush=True)
+
     conf = dict_to_namespace(load_workflow_config(args.conf_file, "rbfe"))
+
+    # ---------------------------------------
+    # Optional system preparation: build + equilibrate the (membrane) system
+    # here, so the structure and its periodic box come from the same step and
+    # cannot disagree. Runs before prepare_project so the result is copied into
+    # the job's inputs/ folder like any other input.
+    # ---------------------------------------
+    from chemflow.fe.openfe.utils.prepare_system import prepare_system
+
+    prepared = prepare_system(conf, pathlib.Path(args.conf_file).expanduser().resolve().parent)
+    if prepared:
+        conf.protein_pdb = prepared
+        # The box now comes from the prepared structure; drop any stale value.
+        for key in ("complex_box_vectors", "complex_box_size"):
+            if getattr(conf, key, None):
+                print(f"preparation: ignoring the configured {key}; using the box "
+                      "from the prepared system", flush=True)
+                setattr(conf, key, None)
 
     # ---------------------------------------
     # Project layout: <workdir>/<jobname>/{inputs,json,results}.
@@ -553,6 +563,30 @@ def main() -> None:
             ("complex_box_size", "PBC file"),
         ],
     )
+
+    # ---------------------------------------
+    # Preflight the solvated input BEFORE anything else reads it. A periodic box
+    # that disagrees with the file, or atoms already overlapping in the input,
+    # both survive into the alchemical hybrid system and surface an hour later
+    # as a NaN in a lambda window, with nothing pointing back to the cause.
+    # When membrane_system is set and no box is configured, the box is taken
+    # from the file's CRYST1 record so the two cannot disagree.
+    # ---------------------------------------
+    from chemflow.fe.openfe.utils.system_preflight import preflight
+
+    checked_box = preflight(
+        str(conf.protein_pdb),
+        configured_box=(getattr(conf, "complex_box_vectors", None)
+                        or getattr(conf, "complex_box_size", None)),
+        mode=str(getattr(conf, "input_check", "error")),
+        require_box=bool(getattr(conf, "membrane_system", False)),
+    )
+    if getattr(conf, "membrane_system", False) and checked_box is not None:
+        if not (getattr(conf, "complex_box_vectors", None)
+                or getattr(conf, "complex_box_size", None)):
+            conf.complex_box_vectors = [float(v) for v in checked_box]
+            print(f"complex_box_vectors taken from the input file: "
+                  f"{conf.complex_box_vectors} nm", flush=True)
 
     # ---------------------------------------
     #           Create protocol
@@ -621,7 +655,7 @@ def main() -> None:
     if cof_template and cof_resnames:
         import pathlib as _pl
 
-        from chemflow.fe.openfe.cofactor_from_pdb import (
+        from chemflow.fe.openfe.utils.cofactor_from_pdb import (
             build_cofactors_from_pdb,
             strip_residues,
         )
@@ -637,7 +671,9 @@ def main() -> None:
 
     if conf.membrane_system:
         # Accept either complex_box_vectors or complex_box_size, matching
-        # _create_complex_leg_protocol (so a config that sets only one still works).
+        # _create_complex_leg_protocol. One of them is always set by now: the
+        # preflight in main() fills complex_box_vectors from the file's CRYST1
+        # when the config leaves it out.
         box = getattr(conf, "complex_box_vectors", None) or getattr(conf, "complex_box_size", None)
         if box is None:
             raise ValueError(

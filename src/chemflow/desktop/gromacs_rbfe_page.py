@@ -368,7 +368,7 @@ class GromacsRbfePage(QTabWidget):
             self.charge_status.setText(f"Ligand SDF not found: {src}")
             return
         try:
-            from chemflow.fe.openfe.charge_report import formal_charges
+            from chemflow.fe.openfe.utils.charge_report import formal_charges
             before = formal_charges(src)
         except Exception as exc:
             self.charge_status.setText(f"Could not read ligands: {exc}")
@@ -411,7 +411,7 @@ class GromacsRbfePage(QTabWidget):
         if item is None or not src:
             return
         try:
-            from chemflow.fe.openfe.charge_report import molecule_svg
+            from chemflow.fe.openfe.utils.charge_report import molecule_svg
             svg = molecule_svg(src, item.text())
         except Exception as exc:
             self.charge_status.setText(f"Could not draw {item.text()}: {exc}")
@@ -557,7 +557,7 @@ class GromacsRbfePage(QTabWidget):
     def _show_graph(self) -> None:
         directory = self.network_dir.text() or self._default_network_dir()
         try:
-            from chemflow.fe.openfe.network_view import render_network_html
+            from chemflow.fe.openfe.utils.network_view import render_network_html
             html = render_network_html(directory)
         except Exception as exc:
             self.network_status.setText(f"Could not draw network: {exc}")
@@ -610,7 +610,7 @@ class GromacsRbfePage(QTabWidget):
     def _on_edge_clicked(self, a: str, b: str) -> None:
         directory = self.network_dir.text() or self._default_network_dir()
         try:
-            from chemflow.fe.openfe.network_view import render_atom_mapping_html
+            from chemflow.fe.openfe.utils.network_view import render_atom_mapping_html
             html = render_atom_mapping_html(directory, a, b)
         except Exception as exc:
             self.network_status.setText(f"Mapping unavailable for {a}–{b}: {exc}")

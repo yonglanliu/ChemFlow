@@ -17,10 +17,10 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 
 # These paths can be overridden when submitting the job, for example:
-#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/physchem \
-#   PHYSCHEM_DATA_FILE=/data/liuy48/datasets/physchem_multitask.csv \
+#   PHYSCHEM_JOB_DIR=/data/$USER/model_training/adme/physchem \
+#   PHYSCHEM_DATA_FILE=/data/$USER/datasets/physchem_multitask.csv \
 #   sbatch ml_array.slurm
-training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
+training_dir="${PHYSCHEM_JOB_DIR:-/data/$USER/model_training/adme/physchem}"
 base_config="${ML_BASE_CONFIG:-$repo_dir/example/ml_training/conf.yaml}"
 data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
 data_split_method="${PHYSCHEM_SPLIT_METHOD:-scaffold}"

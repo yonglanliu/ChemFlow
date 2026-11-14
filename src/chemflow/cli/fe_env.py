@@ -15,7 +15,7 @@ free-energy workflow through one interpreter:
 
 The package pins here mirror ``env/environment-alchemforge.yaml`` (a test keeps them in
 sync), so this installer and ``mamba env create -f`` give the same environment.
-Stack: openfe 1.12 (+ openmm 8.4), rdkit, openbabel, acpype, ambertools, gromacs,
+Stack: OpenFE 1.12, openmm 8.4, rdkit, openbabel, acpype, ambertools, gromacs,
 and PMX (installed from the bundled ``pmx/`` checkout; only needed for GROMACS
 hybrid topologies). Afterwards the desktop auto-detects the env (name
 alchemforge, then openfe/fep) or set $CHEMFLOW_FE_PYTHON.
@@ -37,12 +37,23 @@ _PMX_SPEC = "pmx"
 # a GPU install uses the CUDA build string instead (see _install).
 _DEFAULT_GROMACS_SPEC = "gromacs"
 _CUDA_GROMACS_SPEC = "gromacs=*=nompi_cuda*"
-# Compute stack, pinned to the same versions as env/environment-alchemforge.yaml (the
-# OpenFE 1.12 / AmberTools line needs NumPy 1.x and pre-2026.03 RDKit; an unpinned
-# `openfe` can resolve to an old release that breaks under pydantic 2). GUI-only
-# libraries (Qt, VTK, ...) are intentionally left to the full yaml.
+# Compute stack, pinned to the same versions as env/environment-alchemforge.yaml.
+# NumPy 2.x: the validated env runs 2.4.6 against the MKL BLAS build. RDKit is
+# still capped below 2026.03 for AmberTools.
+# GUI-only libraries (Qt, VTK, ...) are intentionally left to the full yaml.
+#
+# openfe pulls gufe, openmmtools, openmmforcefields, lomap2, kartograf,
+# konnektor, cinnabar, pymbar, plugcli and the openff-* stack transitively.
+# Those were listed explicitly while openfe was vendored in-repo; the fork was
+# reverted on 2026-11-13 (its membrane hook was unreachable, because
+# ProteinMembraneComponent subclasses SolvatedPDBComponent and OpenFE therefore
+# never solvates — nor enters that branch for — a membrane system).
 FE_CONDA_SPECS = (
     "openfe=1.12",
+    # Needed for `partial_charge_method: nagl`; an extra, not a hard dependency.
+    "openff-nagl",
+    "openff-nagl-models",
+    "openfe-analysis",
     "openmm=8.4.0",
     "openff-toolkit",
     "openbabel",
@@ -55,7 +66,7 @@ FE_CONDA_SPECS = (
     "mpi4py",
     "pyyaml",
     "scipy",
-    "numpy>=1.26,<2",
+    "numpy>=2.0,<3",
     "pandas>=2.1,<3",
     "rdkit>=2024.03,<2026.03",
     "pip",

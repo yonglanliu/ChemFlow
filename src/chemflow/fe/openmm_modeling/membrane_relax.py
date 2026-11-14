@@ -805,9 +805,16 @@ def make_protein_restraint_force():
 
 
 def make_membrane_z_restraint_force(force_constant):
-    """Bilayer Z-only positional restraint, matching CHARMM-GUI."""
+    """Bilayer Z-only positional restraint, matching CHARMM-GUI.
+
+    ``k`` is per-particle, not global. OpenMM requires a global parameter of a
+    given name to carry the same default in every Force, so two restraint
+    forces each declaring a global ``k`` at different strengths abort context
+    creation with "Two Forces define different default values for the
+    parameter 'k'". The protein restraints already do it this way.
+    """
     force = CustomExternalForce("k*periodicdistance(0, 0, z, 0, 0, z0)^2;")
-    force.addGlobalParameter("k", float(force_constant))
+    force.addPerParticleParameter("k")
     force.addPerParticleParameter("z0")
     return force
 
@@ -879,7 +886,9 @@ def add_ligand_restraints(system, topology, reference_positions, restraint_spec)
         return system
 
     force = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2;")
-    force.addGlobalParameter("k", k)
+    # Per-particle k: a global one would clash with the membrane-Z restraint,
+    # which declares the same name at a different strength.
+    force.addPerParticleParameter("k")
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")
@@ -896,7 +905,7 @@ def add_ligand_restraints(system, topology, reference_positions, restraint_spec)
         if resname in WATER_ION_RESNAMES:
             continue
         pos = reference_positions[atom.index]
-        force.addParticle(atom.index, [pos.x, pos.y, pos.z])
+        force.addParticle(atom.index, [k, pos.x, pos.y, pos.z])
         count += 1
 
     if count > 0:
@@ -923,7 +932,7 @@ def add_membrane_z_restraint(system, topology, reference_positions, restraint_sp
         if not is_membrane_head_atom(atom):
             continue
         pos = reference_positions[atom.index]
-        force.addParticle(atom.index, [pos.z])
+        force.addParticle(atom.index, [k, pos.z])
         count += 1
 
     if count > 0:

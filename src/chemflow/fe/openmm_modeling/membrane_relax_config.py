@@ -85,6 +85,11 @@ DEFAULTS: dict[str, Any] = {
     #                   equilibrated membrane that just needs to re-settle, e.g. after
     #                   re-solvation or wrapping). Uses the equil_nvt / equil_nprt blocks.
     "protocol": "full",
+    # Keep backbone/sidechain/ligand restrained through stage 6 and production,
+    # instead of releasing them. Default OFF for plain membrane MD; the OpenFE
+    # system prep turns it ON, because a free-energy starting structure must
+    # keep the pocket and the docked pose where the ligand SDF expects them.
+    "preserve_binding_pose": False,
     "forcefields": list(DEFAULT_FORCEFIELDS),
     # Optional: "ligand_sdf" and "small_molecule_forcefield" (e.g. "gaff-2.11"
     # or "openff-2.1.0") to parameterize ligand atoms present in the complex.
@@ -306,6 +311,45 @@ def _resolve(base_dir: Path, value: Any) -> Any:
     return str(candidate)
 
 
+def _apply_preserve_binding_pose(merged: dict) -> dict:
+    """Keep the solute restrained to the end, for a free-energy starting structure.
+
+    The CHARMM-GUI ladder releases all restraints by stage 6 so the protein
+    equilibrates. That is right for plain membrane MD and wrong when the output
+    is the starting structure for a binding free-energy calculation: the
+    protein drifts, the pocket moves, and the docked ligand poses in the SDF no
+    longer match it. They would then have to be re-aligned, and for SepTop the
+    starting pose also defines the restraint reference geometry the free energy
+    is measured against — so pose error goes straight into the result.
+
+    With this on, the last two stages keep backbone, sidechain and ligand
+    restrained. The run becomes "equilibrate lipids and water around a fixed
+    solute", which is what a starting structure needs. Production values are
+    deliberately weak: restraints reference absolute coordinates while the
+    membrane barostat rescales the box, and stiff restraints fight it.
+
+    Only stage 6 and production are touched; the earlier restrained stages
+    already hold the solute.
+    """
+    import copy
+
+    out = copy.deepcopy(merged)
+    pose_restraints = {
+        "stage6": {"backbone": {"force_constants": 209.2},
+                   "sidechain": {"force_constants": 104.6},
+                   "ligand": {"force_constants": 209.2}},
+        # 0.1 / 0.05 / 0.1 kcal/mol/A^2
+        "simulation": {"backbone": {"force_constants": 41.84},
+                       "sidechain": {"force_constants": 20.92},
+                       "ligand": {"force_constants": 41.84}},
+    }
+    for stage, restraints in pose_restraints.items():
+        if stage in out and isinstance(out[stage], dict):
+            out[stage] = dict(out[stage])
+            out[stage]["restraints"] = restraints
+    return out
+
+
 def load_config(path: str | Path) -> SimpleNamespace:
     """Load a membrane-relax YAML, merged over the CHARMM-GUI defaults.
 
@@ -315,6 +359,8 @@ def load_config(path: str | Path) -> SimpleNamespace:
     config_path = Path(path).expanduser().resolve()
     user = _load_yaml(config_path)
     merged = _deep_merge(DEFAULTS, user)
+    if merged.get("preserve_binding_pose"):
+        merged = _apply_preserve_binding_pose(merged)
     conf = _to_namespace(merged)
 
     base_dir = config_path.parent

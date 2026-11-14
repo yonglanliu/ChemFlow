@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-training_dir="${1:-/data/liuy48/model_training/adme/physchem}"
+training_dir="${1:-/data/$USER/model_training/adme/physchem}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 log_dir="$training_dir/logs"
 devices="${HF_GRAPHORMER_DEVICES:-1}"

@@ -11,4 +11,4 @@
 
 set -euo pipefail
 model_kind="graphormer"
-source "/data/liuy48/model_training/adme/adsorption/caco2/slurm/run_caco2_array.sh"
+source "/data/$USER/model_training/adme/adsorption/caco2/slurm/run_caco2_array.sh"

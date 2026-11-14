@@ -12,17 +12,17 @@
 
 set -euo pipefail
 
-source "/home/liuy48/bin/myconda"
+source "/home/$USER/bin/myconda"
 conda activate chemflow
 
-training_dir="/data/liuy48/model_training/adme/adsorption/caco2"
-config_dir="/data/liuy48/model_training/adme/adsorption/caco2/conf"
-generated_config_dir="/data/liuy48/model_training/adme/adsorption/caco2/generated_configs"
-data_file="/data/liuy48/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_train.csv"
-test_data_file="/data/liuy48/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_test.csv"
-base_config="/data/liuy48/model_training/adme/adsorption/caco2/conf/graphormer_conf.toml"
-official_checkpoint="/data/liuy48/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
-public3_best_model="/data/liuy48/model_training/adme/adsorption/caco2/graphormer_S1_public3_scaffold_val_0.2_seed42/best_model"
+training_dir="/data/$USER/model_training/adme/adsorption/caco2"
+config_dir="/data/$USER/model_training/adme/adsorption/caco2/conf"
+generated_config_dir="/data/$USER/model_training/adme/adsorption/caco2/generated_configs"
+data_file="/data/$USER/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_train.csv"
+test_data_file="/data/$USER/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_test.csv"
+base_config="/data/$USER/model_training/adme/adsorption/caco2/conf/graphormer_conf.toml"
+official_checkpoint="/data/$USER/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
+public3_best_model="/data/$USER/model_training/adme/adsorption/caco2/graphormer_S1_public3_scaffold_val_0.2_seed42/best_model"
 
 run_names=(
     "S4_transfer_single_scaffold_val_0.2_seed42"

@@ -16,7 +16,7 @@ from openmm.app import Simulation, Topology
 from rdkit import Chem
 from pydantic import ValidationError
 
-from chemflow.fe.openfe.partial_charges import (
+from chemflow.fe.openfe.utils.partial_charges import (
     ensure_partial_charges,
     harmonize_isomorphic_charges,
 )
@@ -535,7 +535,7 @@ def main() -> None:
     if cof_template and cof_resnames:
         import pathlib as _pl
 
-        from chemflow.fe.openfe.cofactor_from_pdb import (
+        from chemflow.fe.openfe.utils.cofactor_from_pdb import (
             build_cofactors_from_pdb,
             strip_residues,
         )

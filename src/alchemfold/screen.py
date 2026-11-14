@@ -182,7 +182,7 @@ def _shard_dock_yaml(conf, shard_smi: Path, shard_workdir: Path,
         **({"diffdock_trajectory": True,
             "trajectories_dir": str(poses_dir.parent / "trajectories") if poses_dir else None}
            if getattr(conf, "diffdock_trajectory", False) else {}),
-        "no_kernels": bool(getattr(conf, "no_kernels", True)),
+        "no_kernels": bool(getattr(conf, "no_kernels", False)),
         **({"cache_dir": str(conf.cache_dir)} if getattr(conf, "cache_dir", None) else {}),
         "output_format": getattr(conf, "output_format", "pdb"),
         "use_msa_server": bool(getattr(conf, "use_msa_server", True)),

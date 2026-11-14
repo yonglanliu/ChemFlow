@@ -12,13 +12,13 @@ copies in both end states (leaving the alchemical ligand / protein / solvent
 untouched, so the atom mapping stays valid), and rewrites the JSON.
 
     # one edge, in place (keeps a .bak)
-    python -m chemflow.fe.openfe.repair_json edge.json
+    python -m chemflow.fe.openfe.utils.repair_json edge.json
 
     # one edge, to a new file
-    python -m chemflow.fe.openfe.repair_json edge.json -o edge.fixed.json
+    python -m chemflow.fe.openfe.utils.repair_json edge.json -o edge.fixed.json
 
     # every *_complex.json under a json/ directory, in place
-    python -m chemflow.fe.openfe.repair_json /path/to/job/json --glob '*_complex.json'
+    python -m chemflow.fe.openfe.utils.repair_json /path/to/job/json --glob '*_complex.json'
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import pathlib
 import shutil
 import sys
 
-from chemflow.fe.openfe.partial_charges import harmonize_isomorphic_charges
+from chemflow.fe.openfe.utils.partial_charges import harmonize_isomorphic_charges
 
 
 def _is_cofactor_key(key: str) -> bool:
@@ -95,7 +95,7 @@ def repair_transformation(in_path, out_path=None, *, backup: bool = True) -> boo
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="chemflow.fe.openfe.repair_json",
+        prog="chemflow.fe.openfe.utils.repair_json",
         description="Harmonize isomorphic cofactor partial charges in OpenFE edge JSON(s).",
     )
     parser.add_argument("path", type=pathlib.Path,

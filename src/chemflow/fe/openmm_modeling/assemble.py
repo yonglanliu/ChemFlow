@@ -18,8 +18,10 @@ heavy OpenMM work lives in ``membrane_build`` / ``membrane_relax`` / ``md_run``.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -37,13 +39,22 @@ def _write_yaml(data: dict, path: Path) -> Path:
 
 
 def _run_module(module: str, config_path: Path, *, dry_run: bool, extra=None) -> None:
-    cmd = [sys.executable, "-m", module, "--config", str(config_path)]
+    # -u and PYTHONUNBUFFERED: each step logs progress as it goes (stage banners,
+    # OpenMM's StateDataReporter every few thousand steps), but Python block-
+    # buffers stdout when it is not a terminal, so in a batch job none of it
+    # appears until the step finishes — or at all, if the step dies.
+    cmd = [sys.executable, "-u", "-m", module, "--config", str(config_path)]
     if extra:
         cmd += list(extra)
-    print("$ " + " ".join(cmd))
+    print("$ " + " ".join(cmd), flush=True)
     if dry_run:
         return
-    rc = subprocess.run(cmd, check=False).returncode
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    started = time.time()
+    rc = subprocess.run(cmd, check=False, env=env).returncode
+    elapsed = time.time() - started
+    print(f"--- {module.rsplit('.', 1)[-1]} finished in "
+          f"{elapsed / 60:.1f} min (exit {rc}) ---", flush=True)
     if rc != 0:
         raise RuntimeError(f"assembly step failed (exit {rc}): {module}")
 
@@ -113,23 +124,32 @@ def assemble(build_cfg, relax_cfg, md_cfg=None, *, dry_run: bool = False) -> Pat
         md_cfg_path = Path(md_cfg).expanduser().resolve()
         _soft_validate(mc.validate_config, mc.load_config(md_cfg_path))
 
+    steps = 3 if md_cfg_path else 2
+    started = time.time()
+
+    def header(index: int, label: str) -> None:
+        print(f"\n=== [{index}/{steps}] {label} === "
+              f"{time.strftime('%Y-%m-%d %H:%M:%S')} "
+              f"(+{(time.time() - started) / 60:.1f} min)", flush=True)
+
     # 1) build the membrane
-    print("=== [1/%d] build-membrane ===" % (3 if md_cfg_path else 2))
+    header(1, "build-membrane")
     _run_module("chemflow.fe.openmm_modeling.membrane_build", build_cfg, dry_run=dry_run)
 
     # 2) relax, with input chained to the build output
-    print("=== [2/%d] relax-membrane ===" % (3 if md_cfg_path else 2))
+    header(2, "relax-membrane")
     relax_run_cfg = relax_cfg if dry_run else _chained_config(relax_cfg, build_out)
     _run_module("chemflow.fe.openmm_modeling.membrane_relax", relax_run_cfg, dry_run=dry_run)
 
     final = relax_out
     # 3) optional MD, chained to the relaxed output
     if md_cfg_path:
-        print("=== [3/3] md ===")
+        header(3, "md")
         md_run_cfg = md_cfg_path if dry_run else _chained_config(md_cfg_path, relax_out)
         _run_module("chemflow.fe.openmm_modeling.md_run", md_run_cfg, dry_run=dry_run)
 
-    print(f"\nAssembled membrane system → {final}  (+ {final.with_suffix('.cif')})")
+    print(f"\nAssembled membrane system → {final}  (+ {final.with_suffix('.cif')})"
+          f"\nTotal wall time: {(time.time() - started) / 60:.1f} min", flush=True)
     if not md_cfg_path:
         print("Feed the .cif into OpenFE:  chemflow openfe rbfe ... (protein_pdb: <...>.cif)")
     return final

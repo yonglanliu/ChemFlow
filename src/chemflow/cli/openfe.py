@@ -128,7 +128,10 @@ def _validate_conf(workflow: str, conf_path: Path) -> dict:
 
 def _create_json_cmd(workflow: str, conf_path: Path) -> list[str]:
     module = f"chemflow.fe.openfe.{workflow}.create_json"
-    return [sys.executable, "-m", module, "--conf_file", str(conf_path)]
+    # -u: setup can take a long time (system preparation, charge assignment,
+    # network planning) and prints progress throughout. Without unbuffered
+    # output none of it reaches a batch job's log until the process exits.
+    return [sys.executable, "-u", "-m", module, "--conf_file", str(conf_path)]
 
 
 def _execution_config(conf: dict, conf_path: Path) -> Path:
@@ -214,7 +217,7 @@ def _write_charge_settings(path: Path, method: str, backend: str, n_conformers) 
 def _report_net_charges(input_sdf: Path, output_sdf: Path) -> None:
     """Print a per-ligand before/after net-charge table (formal vs sum of partials)."""
     try:
-        from chemflow.fe.openfe.charge_report import formal_charges, partial_charge_sums
+        from chemflow.fe.openfe.utils.charge_report import formal_charges, partial_charge_sums
     except ImportError:
         return
     before = dict(formal_charges(input_sdf))
@@ -228,7 +231,7 @@ def _report_net_charges(input_sdf: Path, output_sdf: Path) -> None:
 
 def _charge(args: argparse.Namespace) -> int:
     """Directly calculate partial charges for the ligand (and/or cofactor) SDF."""
-    from chemflow.fe.openfe.charge import ChargeMoleculesConfig
+    from chemflow.fe.openfe.utils.charge import ChargeMoleculesConfig
 
     inp = Path(args.ligands).expanduser().resolve()
     out = Path(args.out).expanduser().resolve() if args.out else inp.with_name(inp.stem + "_charged.sdf")

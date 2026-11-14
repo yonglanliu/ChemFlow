@@ -118,10 +118,13 @@ def run_from_config(config_path, *, dry_run: bool = False) -> int:
     conf = load_config(config_path)
     validate_config(conf)
     input_yaml, out_dir = write_inputs(conf)
-    from alchemfold._exec import prefer_envs_for, resolve_command
+    from alchemfold._exec import (
+        ensure_kernels_or_fallback, prefer_envs_for, resolve_command,
+    )
 
     command = resolve_command(build_command(conf, input_yaml, out_dir),
                               prefer_envs_for(conf))
+    command = ensure_kernels_or_fallback(command, conf)
 
     if dry_run:
         print(" ".join(shlex.quote(part) for part in command))

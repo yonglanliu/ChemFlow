@@ -11,7 +11,7 @@ CheMeleon, Graphormer, and ChemBERTa write TensorBoard events to the
 histories. Start TensorBoard on the HPC host with, for example:
 
 ```bash
-tensorboard --logdir /data/liuy48/model_training/adme/physchem \
+tensorboard --logdir /data/$USER/model_training/adme/physchem \
   --host 127.0.0.1 --port 6006
 ```
 
@@ -39,7 +39,7 @@ python -m pip install \
     "transformers==4.50.3" \
     "tokenizers==0.21.4" \
     "huggingface_hub==0.36.2"
-python -m pip install -e /vf/users/liuy48/ChemFlow --no-deps
+python -m pip install -e /path/to/ChemFlow --no-deps
 ```
 
 This keeps CheMeleon, traditional ML, and Hugging Face Graphormer in the same
@@ -49,7 +49,7 @@ This keeps CheMeleon, traditional ML, and Hugging Face Graphormer in the same
 The default job expects:
 
 ```text
-/data/liuy48/model_training/adme/physchem/dataset/physchem_multitask.csv
+/data/$USER/model_training/adme/physchem/dataset/physchem_multitask.csv
 $HOME/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt
 ```
 
@@ -106,8 +106,8 @@ bash example/hpc_physchem_training/submit_hf_graphormer.sh
 Override locations or training settings before submission when necessary:
 
 ```bash
-export PHYSCHEM_DATA_FILE=/data/liuy48/datasets/physchem_multitask.csv
-export HF_GRAPHORMER_CHECKPOINT=/data/liuy48/checkpoints/graphormer-base-pcqm4mv1.pt
+export PHYSCHEM_DATA_FILE=/data/$USER/datasets/physchem_multitask.csv
+export HF_GRAPHORMER_CHECKPOINT=/data/$USER/checkpoints/graphormer-base-pcqm4mv1.pt
 export HF_GRAPHORMER_BATCH_SIZE=8
 export HF_GRAPHORMER_NUM_WORKERS=4
 export HF_GRAPHORMER_EPOCHS=30
@@ -188,7 +188,7 @@ The task mapping is identical to the Graphormer array. To use a downloaded
 model directory instead of the Hugging Face cache:
 
 ```bash
-export CHEMBERTA_MODEL_NAME=/data/liuy48/models/ChemBERTa-77M-MLM
+export CHEMBERTA_MODEL_NAME=/data/$USER/models/ChemBERTa-77M-MLM
 sbatch example/hpc_physchem_training/chemberta_array.slurm
 ```
 

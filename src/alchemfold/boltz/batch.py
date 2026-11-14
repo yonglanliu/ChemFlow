@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from alchemfold.boltz.run import build_boltz_input, build_command
-from alchemfold.boltz.engine import _pocket_constraint
+from alchemfold.boltz.engine import _template_entries, constraints as _constraints
 
 SCORE_COLUMNS = [
     "confidence_score", "ptm", "iptm", "ligand_iptm", "protein_iptm",
@@ -38,9 +38,13 @@ def _write_yaml(conf, lig: dict, inputs_dir: Path, chain_id: str) -> Path:
 
     conf_i = _clone_for_ligand(conf, lig, chain_id)
     data = build_boltz_input(conf_i)
-    constraint = _pocket_constraint(conf_i)
-    if constraint is not None:
-        data["constraints"] = [constraint]
+    constraint_list = _constraints(conf_i)
+    if constraint_list is not None:
+        data["constraints"] = constraint_list
+    # Same receptor for every ligand in the batch, so the template applies to all.
+    templates = _template_entries(conf_i)
+    if templates is not None:
+        data["templates"] = templates
     path = inputs_dir / f"{lig['id']}.yaml"
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return path
@@ -149,10 +153,15 @@ def _load_done(results_csv: Path) -> dict[str, dict]:
 
 
 def _resolved(cmd, devices: int = 1, conf=None):
-    from alchemfold._exec import prefer_envs_for, resolve_command, wrap_srun
+    from alchemfold._exec import (
+        ensure_kernels_or_fallback, prefer_envs_for, resolve_command, wrap_srun,
+    )
 
     prefer = prefer_envs_for(conf) if conf is not None else ("alchemfold",)
-    return wrap_srun(resolve_command(cmd, prefer), devices)
+    resolved = resolve_command(cmd, prefer)
+    if conf is not None:
+        resolved = ensure_kernels_or_fallback(resolved, conf)
+    return wrap_srun(resolved, devices)
 
 
 def run_boltz_library(conf, library: list[dict], *, dry_run: bool = False) -> int:

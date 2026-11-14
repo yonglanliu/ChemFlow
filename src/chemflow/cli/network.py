@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 def _list(args: argparse.Namespace) -> int:
-    from chemflow.fe.openfe.network_edit import read_network_edges
+    from chemflow.fe.openfe.utils.network_edit import read_network_edges
 
     edges = read_network_edges(args.directory)
     print(f"{len(edges)} edges in {args.directory}:")
@@ -28,7 +28,7 @@ def _list(args: argparse.Namespace) -> int:
 
 
 def _plan(args: argparse.Namespace) -> int:
-    from chemflow.fe.openfe.network_edit import plan_network
+    from chemflow.fe.openfe.utils.network_edit import plan_network
 
     n = plan_network(args.ligands, args.out, mapper=args.mapper, planner=args.planner,
                      max3d=args.max3d, element_change=args.element_change)
@@ -55,7 +55,7 @@ def _add(args: argparse.Namespace) -> int:
 
 
 def _remove(args: argparse.Namespace) -> int:
-    from chemflow.fe.openfe.network_edit import drop_edges
+    from chemflow.fe.openfe.utils.network_edit import drop_edges
 
     pairs = []
     for spec in args.drop:

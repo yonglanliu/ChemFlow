@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from chemflow.desktop import pose_scene
+from chemflow.desktop.cofold_constraints_dialog import ConstraintsDialog
 from chemflow.desktop.widgets.forms import (
     NoScrollComboBox,
     NoScrollSpinBox,
@@ -334,36 +335,25 @@ class CofoldScreeningPage(QWidget):
         hint.setWordWrap(True)
         dock_layout.addWidget(hint)
 
-        # --- Optional binding-site pocket constraint (Boltz-2 / Chai-1) ---
-        self.use_pocket = QCheckBox("Constrain binding pocket (steer the ligand to a known site)")
-        self.use_pocket.setToolTip(
-            "Bias the model to dock the ligand against specific receptor residues "
-            "(Boltz-2 pocket constraint / Chai-1 contact restraints). Leave off to let the "
-            "model place the ligand freely.")
-        dock_layout.addWidget(self.use_pocket)
-        self._pocket_box = QWidget()
-        pk_row = QHBoxLayout(self._pocket_box)
-        pk_row.setContentsMargins(18, 0, 0, 0)
-        pk_row.addWidget(QLabel("Binder:"))
-        self.pocket_binder = QLineEdit("L")
-        self.pocket_binder.setFixedWidth(48)
-        self.pocket_binder.setToolTip("Ligand id (chain) that binds the pocket.")
-        pk_row.addWidget(self.pocket_binder)
-        pk_row.addWidget(QLabel("Contacts:"))
-        self.pocket_contacts = QLineEdit()
-        self.pocket_contacts.setPlaceholderText("pocket residues, e.g. A:123, A:145")
-        self.pocket_contacts.setToolTip(
-            "Receptor residues lining the pocket as CHAIN:RES, comma-separated "
-            "(bare numbers use the first protein chain). Numbering must match the sequence.")
-        pk_row.addWidget(self.pocket_contacts, 1)
-        pk_row.addWidget(QLabel("Max dist (Å):"))
-        self.pocket_max_distance = QLineEdit("6.0")
-        self.pocket_max_distance.setFixedWidth(52)
-        self.pocket_max_distance.setToolTip("Pocket contact max distance in Angstrom (Boltz-2).")
-        pk_row.addWidget(self.pocket_max_distance)
-        dock_layout.addWidget(self._pocket_box)
-        self._pocket_box.setVisible(False)
-        self.use_pocket.toggled.connect(self._pocket_box.setVisible)
+        # --- Constraints & templates (own window — the page is dense enough) ---
+        # Binding pocket, receptor template, contact restraints and covalent
+        # bonds all live in ConstraintsDialog; the page shows only a button and
+        # a one-line summary of what is switched on.
+        self._constraints_box = QWidget()
+        cons_row = QHBoxLayout(self._constraints_box)
+        cons_row.setContentsMargins(0, 0, 0, 0)
+        self._constraints = ConstraintsDialog(self)
+        self.constraints_button = action_button("Constraints & templates…")
+        self.constraints_button.setToolTip(
+            "Optional ways to steer the prediction: binding pocket, receptor template, "
+            "pairwise contact restraints and covalent bonds.")
+        self.constraints_button.clicked.connect(self._open_constraints)
+        cons_row.addWidget(self.constraints_button)
+        self.constraints_summary = QLabel("none set")
+        self.constraints_summary.setObjectName("Muted")
+        self.constraints_summary.setWordWrap(True)
+        cons_row.addWidget(self.constraints_summary, 1)
+        dock_layout.addWidget(self._constraints_box)
 
         # Engine parameters (Boltz-2 / Chai-1).
         self._param_box = QWidget()   # Boltz / Chai: poses, recycles, sampling steps
@@ -443,7 +433,7 @@ class CofoldScreeningPage(QWidget):
                                        "uncheck on offline compute nodes).")
         opts_row.addWidget(self.use_msa_server)
         self.use_kernels = QCheckBox("Use Boltz-2 GPU kernels")
-        self.use_kernels.setChecked(False)
+        self.use_kernels.setChecked(True)
         self.use_kernels.setToolTip(
             "Boltz-2 only: use the optimized cuequivariance/trifast triangle kernels. "
             "Faster and lighter on memory for big complexes (triangle attention is the "
@@ -888,6 +878,19 @@ class CofoldScreeningPage(QWidget):
             self.screen_affinity.setEnabled(is_boltz)
             if not is_boltz:
                 self.screen_affinity.setChecked(False)
+        # Pocket / template / contact / bond settings live in their own window;
+        # it knows which of them each engine supports.
+        if hasattr(self, "_constraints"):
+            self._constraints.set_engine(self._engine(), self.engine.currentText())
+            self._refresh_constraints_summary()
+        # Chai-1's CLI takes --num-diffn-samples and --num-trunk-recycles but has
+        # no equivalent of Boltz's sampling_steps, so that box does nothing for it
+        # (see alchemfold/chai/engine.py build_command).
+        if hasattr(self, "sampling_steps"):
+            self.sampling_steps.setEnabled(is_boltz)
+            self.sampling_steps.setToolTip(
+                "sampling_steps (Boltz-2 only)" if is_boltz else
+                "Boltz-2 only — Chai-1 has no equivalent flag, so this is ignored.")
         # DiffDock-L: structure-based blind docking in its own env.
         dd = self._engine() == "diffdock"
         if hasattr(self, "_dd_status"):
@@ -905,20 +908,28 @@ class CofoldScreeningPage(QWidget):
             self.sequence.setVisible(not dd)
             self._seqfile_label.setVisible(not dd)
             self.sequence_file.setVisible(not dd)
-            # Boltz/Chai-only controls are HIDDEN (not just disabled) for DiffDock: pocket
-            # constraint, MSA server / kernels / affinity, recycles / sampling steps, model cache.
-            for w in (self.use_pocket, self._opts_box, self._cache_box, self._param_box):
+            # Boltz/Chai-only controls are HIDDEN (not just disabled) for DiffDock:
+            # MSA server / kernels / affinity, recycles / sampling steps, model cache.
+            # The constraints window stays reachable (DiffDock supports none of it,
+            # and the dialog says so) but is hidden too, to keep the page short.
+            for w in (self._constraints_box, self._opts_box,
+                      self._cache_box, self._param_box):
                 w.setVisible(not dd)
             self._dd_params_box.setVisible(dd)
-            self._pocket_box.setVisible((not dd) and self.use_pocket.isChecked())
-            if dd:
-                self.use_pocket.setChecked(False)  # blind docking: no pocket constraint
         if hasattr(self, "_dd_samples_box"):
             self._dd_samples_box.setVisible(dd)
             self.screen_affinity.setVisible(not dd)   # Boltz-2 affinity head
-            self.screen_gpus.setEnabled(not dd)
+            # >1 GPU per shard only means something for Boltz (DDP). Chai-1 takes
+            # a single --device and DiffDock-L is single-GPU, so pin both to 1.
+            multi_gpu_ok = is_boltz
+            self.screen_gpus.setEnabled(multi_gpu_ok)
+            if not multi_gpu_ok:
+                self.screen_gpus.setValue(1)
+            self.screen_gpus.setToolTip(
+                "GPUs per shard task. >1 makes Boltz-2 use DDP inside a shard."
+                if multi_gpu_ok else
+                f"{self.engine.currentText()} runs on a single GPU per shard.")
             if dd:
-                self.screen_gpus.setValue(1)  # DiffDock uses 1 GPU per shard
                 self.rank_metric.setCurrentText("confidence")
             elif self.rank_metric.currentText() == "confidence":
                 self.rank_metric.setCurrentText("auto")
@@ -1064,6 +1075,16 @@ class CofoldScreeningPage(QWidget):
     def _noun(self) -> str:
         return "dock" if self._is_dock() else "screen"
 
+    def _open_constraints(self) -> None:
+        """Show the constraints window, then refresh the one-line summary."""
+        self._constraints.set_engine(self._engine(), self.engine.currentText())
+        self._constraints.exec()
+        self._refresh_constraints_summary()
+
+    def _refresh_constraints_summary(self) -> None:
+        if hasattr(self, "constraints_summary"):
+            self.constraints_summary.setText(self._constraints.summary())
+
     # -- actions ----------------------------------------------------------
     def _generate(self) -> None:
         cfg = self._cfg()
@@ -1106,19 +1127,11 @@ class CofoldScreeningPage(QWidget):
             argv += self._engine_env_argv()
             if self.predict_affinity.isChecked() and self._engine() == "boltz":
                 argv.append("--predict-affinity")
-            if self.use_pocket.isChecked():
-                contacts = self.pocket_contacts.text().strip()
-                if contacts:
-                    argv += ["--pocket-contacts", contacts]
-                    binder = self.pocket_binder.text().strip()
-                    if binder:
-                        argv += ["--pocket-binder", binder]
-                    md = self.pocket_max_distance.text().strip()
-                    if md:
-                        argv += ["--pocket-max-distance", md]
-                else:
-                    # No residues given yet — emit a placeholder block to edit by hand.
-                    argv.append("--pocket")
+            try:
+                argv += self._constraints.argv(self._engine())
+            except ValueError as exc:   # incomplete row / missing template file
+                self.status.setText(str(exc))
+                return
             cache = self.cache_dir.text().strip()
             if cache:
                 argv += ["--cache-dir", cache]

@@ -21,6 +21,8 @@ import sys
 _DEFAULT_ENV = "chai"
 _PACKAGES = ("chai_lab",)
 _CONDA_EXTRAS = ("pyyaml", "rdkit>=2024.03", "numpy", "scipy",
+                 # pandas needs a parquet engine: chai_lab reads parquet data files (pandas needs a parquet engine)
+                 "pyarrow",
                  "setuptools>=80", "wheel")
 _LINUX_RUNTIME = ("libgcc-ng>=12", "libstdcxx-ng>=12")
 

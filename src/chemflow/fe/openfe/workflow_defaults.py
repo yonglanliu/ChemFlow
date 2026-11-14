@@ -212,6 +212,8 @@ def _common(settings: dict[str, Any]) -> dict[str, Any]:
         "partial_charge_method": charge["partial_charge_method"],
         "off_toolkit_backend": charge["off_toolkit_backend"],
         "membrane_system": False,
+        "input_check": "error",   # error | warn | off — preflight the solvated input
+        "preparation": None,      # build + equilibrate the system in this run (see prepare_system.py)
         "complex_box_vectors": None,
         "surface_tension": 0.0,
         "ligand_network_graphml": None,
@@ -273,9 +275,6 @@ def _rbfe_defaults() -> dict[str, Any]:
             "transformation": "both",
             "mapper": "LomapAtomMapper",
             "planner": "minimal_spanning",
-            "pre_equilibrate_complex": False,
-            "pre_equilibrate_nvt_ps": 100.0,
-            "pre_equilibrate_min_steps": 5000,
         }
     )
     return result
@@ -390,9 +389,6 @@ def _absolute_defaults(workflow: str) -> dict[str, Any]:
                 ),
                 "mapper": "LomapAtomMapper",
                 "planner": "minimal_spanning",
-                "pre_equilibrate_complex": False,
-                "pre_equilibrate_nvt_ps": 100.0,
-                "pre_equilibrate_min_steps": 5000,
             }
         )
     return result

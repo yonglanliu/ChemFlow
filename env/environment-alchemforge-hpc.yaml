@@ -24,8 +24,21 @@ dependencies:
   - python=3.12
   - pip
 
-  # Alchemical and molecular-simulation stack
+  # Alchemical and molecular-simulation stack.
+  #
+  # openfe brings gufe, openmmtools, openmmforcefields, lomap2, kartograf,
+  # konnektor, cinnabar, pymbar, plugcli and the openff-* stack transitively.
+  # These were briefly listed explicitly while openfe was vendored in-repo;
+  # that fork was reverted on 2026-11-13 (its membrane hook turned out to be
+  # unreachable — ProteinMembraneComponent subclasses SolvatedPDBComponent, so
+  # OpenFE never solvates a membrane system and never enters that branch).
+  # Keep this block in sync with env/environment-alchemforge.yaml.
   - openfe=1.12
+  # openff-nagl is needed for `partial_charge_method: nagl`; pinned explicitly
+  # because it is an extra rather than a hard dependency of openfe.
+  - openff-nagl
+  - openff-nagl-models
+
   - openfe-analysis
   - openmm=8.4.0
   - openff-toolkit
@@ -45,7 +58,7 @@ dependencies:
   - cuda-toolkit=12.6
 
   # Scientific stack (same pins as the workstation environment).
-  - "numpy>=1.26,<2"
+  - "numpy>=2.0,<3"
   - "pandas>=2.1,<3"
   - "rdkit>=2024.03,<2026.03"
   - scipy

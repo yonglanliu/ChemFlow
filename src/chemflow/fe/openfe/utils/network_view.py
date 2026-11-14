@@ -20,7 +20,7 @@ import json
 import math
 from pathlib import Path
 
-from chemflow.fe.openfe.network_edit import NetworkEdge, read_network_edges
+from chemflow.fe.openfe.utils.network_edit import NetworkEdge, read_network_edges
 
 _PALETTE = [
     (0.90, 0.22, 0.21), (0.12, 0.47, 0.71), (0.20, 0.63, 0.17), (1.00, 0.50, 0.05),

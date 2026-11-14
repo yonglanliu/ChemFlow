@@ -153,6 +153,28 @@ def _dock_run(args: argparse.Namespace) -> int:
 _ENGINE_EXECUTABLES = {"boltz": "boltz", "chai": "chai-lab"}
 
 
+def _apply_copies(proteins, copies: int, first_id: str = "A"):
+    """Repeat a single protein record N times as chains A, B, C ...
+
+    Homo-oligomers (an ion channel tetramer, say) otherwise need the same
+    sequence pasted N times into the FASTA. Only meaningful for a single
+    record; with several, the file already defines the chains.
+    """
+    copies = int(copies or 1)
+    if copies <= 1 or not proteins:
+        return proteins
+    if len(proteins) > 1:
+        print(f"--copies {copies} ignored: the input already defines "
+              f"{len(proteins)} chains", file=sys.stderr)
+        return proteins
+    sequence = proteins[0][1]
+    start = ord(str(first_id or "A")[0].upper())
+    repeated = [(chr(start + i), sequence) for i in range(copies)]
+    print(f"Homo-{copies}mer: chains {', '.join(c for c, _ in repeated)} "
+          f"({len(sequence)} residues each, {len(sequence) * copies} total)")
+    return repeated
+
+
 def _resolve_engine_command(args, engine: str) -> str | None:
     """Turn --<engine>-command / --<engine>-env into an absolute path (or None).
 
@@ -187,6 +209,8 @@ def _resolve_engine_command(args, engine: str) -> str | None:
 
 def _dock_generate(args: argparse.Namespace) -> int:
     from alchemfold.dock_config import (
+        _parse_constraints,
+        _parse_templates,
         default_cache_dir,
         default_yaml_text,
         parse_fasta,
@@ -209,6 +233,53 @@ def _dock_generate(args: argparse.Namespace) -> int:
         elif len(parsed) == 1:
             args.sequence = parsed[0][1]  # cleaned single sequence (drop header/wrapping)
 
+    if getattr(args, "copies", 1) and int(getattr(args, "copies", 1)) > 1:
+        if proteins is None and args.sequence:
+            proteins = [(args.protein_id, args.sequence)]
+        proteins = _apply_copies(proteins, args.copies, args.protein_id)
+
+    templates = _parse_templates(
+        getattr(args, "template", None),
+        chains=getattr(args, "template_chains", None),
+        template_chains=getattr(args, "template_ids", None),
+        force=bool(getattr(args, "template_force", False)),
+        threshold=getattr(args, "template_threshold", None),
+    )
+    if templates:
+        if args.engine != "boltz":
+            print(f"--template is a Boltz-2 feature; engine '{args.engine}' does not "
+                  "support structural templates", file=sys.stderr)
+            return 1
+        missing = [t["cif"] for t in templates if not Path(t["cif"]).is_file()]
+        if missing:
+            print("template file(s) not found: " + ", ".join(missing), file=sys.stderr)
+            return 1
+        forced = " (forced, threshold " + f"{templates[0]['threshold']:g} A)" if templates[0].get("force") else ""
+        print(f"Templating on {len(templates)} structure(s){forced}: "
+              + ", ".join(Path(t["cif"]).name for t in templates))
+
+    try:
+        constraints = _parse_constraints(
+            bonds=getattr(args, "bond", None),
+            contacts=getattr(args, "contact", None),
+            contact_max_distance=getattr(args, "contact_max_distance", 5.0),
+            contact_force=bool(getattr(args, "contact_force", False)),
+            default_chain=args.protein_id,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if constraints:
+        if args.engine != "boltz":
+            print(f"--bond/--contact are Boltz-2 features; engine '{args.engine}' does "
+                  "not support them", file=sys.stderr)
+            return 1
+        bonds = sum(1 for c in constraints if "bond" in c)
+        contacts = len(constraints) - bonds
+        parts = [f"{bonds} covalent bond(s)" if bonds else "",
+                 f"{contacts} contact restraint(s)" if contacts else ""]
+        print("Constraints: " + ", ".join(p for p in parts if p))
+
     text = default_yaml_text(
         engine=args.engine,
         protein_id=args.protein_id,
@@ -222,6 +293,7 @@ def _dock_generate(args: argparse.Namespace) -> int:
         pocket_binder=args.pocket_binder,
         pocket_max_distance=args.pocket_max_distance,
         pocket_contacts=args.pocket_contacts,
+        pocket_force=bool(getattr(args, "pocket_force", False)),
         # absolute: the config may live in a job subfolder, and paths resolve from the config's folder
         ligand_file=(str(Path(args.ligand_file).expanduser().resolve()) if args.ligand_file else None),
         ligand_file_format=args.ligand_file_format,
@@ -240,6 +312,8 @@ def _dock_generate(args: argparse.Namespace) -> int:
         diffdock_steps=args.diffdock_steps if args.engine == "diffdock" else None,
         diffdock_trajectory=bool(args.diffdock_trajectory and args.engine == "diffdock"),
         diffdock_batch_size=args.diffdock_batch_size if args.engine == "diffdock" else None,
+        templates=templates,
+        constraints=constraints,
     )
     if args.output:
         output = Path(args.output)
@@ -450,6 +524,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Co-folding / docking model (default: boltz)")
     dgen.add_argument("-o", "--output", type=Path,
                       help="Output YAML path (default: docking.yaml)")
+    dgen.add_argument("--copies", type=int, default=1,
+                      help="repeat a single sequence N times as chains A, B, C … "
+                           "(e.g. 4 for a homotetrameric ion channel)")
     dgen.add_argument("--protein-id", default="A", help="Protein chain id")
     dgen.add_argument("--jobname", default=None,
                       help="Job name: EVERYTHING (config, engine inputs, scripts, logs, predictions) is "
@@ -490,6 +567,40 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Ligand id that binds the pocket (default: the ligand id)")
     dgen.add_argument("--pocket-max-distance", type=float, default=6.0,
                       help="Pocket contact max distance in Angstrom (default: 6.0)")
+    dgen.add_argument("--pocket-force", action="store_true",
+                      help="Enforce the pocket with a steering potential during diffusion "
+                           "instead of using it as a soft feature (Boltz-2)")
+    dgen.add_argument("--contact", action="append", default=None, metavar="TOK,TOK[,DIST]",
+                      help="Pairwise distance restraint between two tokens, each "
+                           "CHAIN:RESIDUE (or CHAIN:ATOM_NAME on a ligand chain), e.g. "
+                           "'A:123,L:1' or 'A:123,L:1,4.5'. Repeatable. Boltz-2 only.")
+    dgen.add_argument("--contact-max-distance", type=float, default=5.0, metavar="ANGSTROM",
+                      help="Default max distance for --contact entries without their own "
+                           "third field (default: 5.0)")
+    dgen.add_argument("--contact-force", action="store_true",
+                      help="Enforce the --contact restraints with a steering potential")
+    dgen.add_argument("--bond", action="append", default=None,
+                      metavar="CHAIN:RES:ATOM,CHAIN:RES:ATOM",
+                      help="Explicit covalent bond between two atoms, e.g. "
+                           "'A:123:SG,L:1:C12'. Repeatable. Boltz-2 only.")
+    dgen.add_argument("--template", action="append", default=None, metavar="CIF",
+                      help="Structural template for the receptor (Boltz-2 only; protein "
+                           "chains only). Biases the fold towards a known conformation — "
+                           "e.g. an open/active state the model would not sample on its "
+                           "own. Repeatable. The ligand pose is still predicted.")
+    dgen.add_argument("--template-chains", default=None, metavar="IDS",
+                      help="Chains of THIS config to template, e.g. 'A,B,C,D' "
+                           "(default: Boltz picks the best matches)")
+    dgen.add_argument("--template-ids", default=None, metavar="IDS",
+                      help="Matching chain ids inside the template file, one per "
+                           "--template-chains entry (default: best match)")
+    dgen.add_argument("--template-force", action="store_true",
+                      help="Enforce the template with a steering potential during "
+                           "diffusion instead of using it as a soft input feature. Needed "
+                           "when the model disprefers the templated conformation.")
+    dgen.add_argument("--template-threshold", type=float, default=None, metavar="ANGSTROM",
+                      help="How far the backbone may deviate from the template before the "
+                           "potential pulls back (default with --template-force: 2.0)")
     dgen.add_argument("--cache-dir", default=None,
                       help="Model/CCD weights cache (boltz --cache / chai CHAI_DOWNLOADS_DIR). "
                            "Point at /data or scratch to avoid the HOME disk quota.")
@@ -498,7 +609,7 @@ def build_parser() -> argparse.ArgumentParser:
     dgen.add_argument("--recycling-steps", type=int, default=3,
                       help="boltz --recycling_steps / chai --num-trunk-recycles")
     dgen.add_argument("--sampling-steps", type=int, default=200, help="boltz only")
-    dgen.add_argument("--kernels", action=argparse.BooleanOptionalAction, default=False,
+    dgen.add_argument("--kernels", action=argparse.BooleanOptionalAction, default=True,
                       help="Enable Boltz-2's cuequivariance/trifast GPU kernels (default: off "
                            "→ pure-PyTorch). They live in their own env — install it with "
                            "`chemflow boltz-env install` — because they conflict with chai's "
@@ -589,7 +700,7 @@ def build_parser() -> argparse.ArgumentParser:
     sgen.add_argument("--predict-affinity", action=argparse.BooleanOptionalAction, default=False,
                       help="Boltz-2 only: predict binding affinity for every ligand "
                            "(adds affinity_pred_value + affinity_probability_binary)")
-    sgen.add_argument("--kernels", action=argparse.BooleanOptionalAction, default=False,
+    sgen.add_argument("--kernels", action=argparse.BooleanOptionalAction, default=True,
                       help="Boltz-2 only: enable the cuequivariance/trifast GPU kernels "
                            "(default: off → pure-PyTorch). Needs the separate env from "
                            "`chemflow boltz-env install`; pass --boltz-env so the SLURM "

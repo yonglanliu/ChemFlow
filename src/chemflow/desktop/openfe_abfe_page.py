@@ -226,7 +226,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         if not source:
             return
         try:
-            from chemflow.fe.openfe.charge_report import molecule_svg
+            from chemflow.fe.openfe.utils.charge_report import molecule_svg
             svg = molecule_svg(source, name)
         except Exception as exc:
             self.charge_status.setText(f"Could not draw {name}: {exc}")
@@ -291,7 +291,7 @@ class OpenFEAbfeWorkflowPage(QTabWidget):
         if not src or not Path(src).expanduser().is_file():
             return
         try:
-            from chemflow.fe.openfe.charge_report import formal_charges, partial_charge_sums
+            from chemflow.fe.openfe.utils.charge_report import formal_charges, partial_charge_sums
             before = formal_charges(src)
             charged = self.charged_out.text()
             after = (partial_charge_sums(charged)

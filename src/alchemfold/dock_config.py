@@ -37,7 +37,8 @@ DEFAULTS: dict[str, Any] = {
     "diffusion_samples": 1,       # boltz --diffusion_samples / chai --num-diffn-samples
     "recycling_steps": 3,         # boltz --recycling_steps / chai --num-trunk-recycles
     "sampling_steps": 200,        # boltz only
-    "no_kernels": True,           # boltz only: default on — pure-PyTorch path works
+    "no_kernels": False,          # boltz only: kernels ON by default (needs the
+                                  # boltz env from `chemflow boltz-env install`)
                                   # without the cuequivariance/trifast kernels (which
                                   # conflict with chai's torch<2.7). Set false in a
                                   # boltz-only env that has the kernels installed.
@@ -91,8 +92,31 @@ DEFAULTS: dict[str, Any] = {
     # pocket:
     #   binder: L
     #   max_distance: 6.0
+    #   force: false        # true = steering potential, not just a soft feature
     #   contacts: [{chain: A, residue: 123}, {chain: A, residue: 145}]
     "pocket": None,
+    # --- other Boltz constraints, passed through in Boltz's own shape ---
+    # constraints:
+    #   - bond:                       # explicit covalent bond (e.g. a covalent ligand)
+    #       atom1: [A, 123, SG]       # [chain, residue index, atom name]
+    #       atom2: [L, 1, C12]
+    #   - contact:                    # pairwise distance restraint
+    #       token1: [A, 123]          # [chain, residue index] or [chain, atom name]
+    #       token2: [L, 1]
+    #       max_distance: 5.0
+    #       force: false
+    "constraints": [],
+    # --- optional structural templates (Boltz-2 only; PROTEIN chains only) ---
+    # Bias the receptor towards a known conformation (e.g. an activated/open
+    # state the model would not otherwise sample). The ligand is never
+    # templated, so its pose is still predicted.
+    # templates:
+    #   - cif: 7lpe.cif        # .cif (or .pdb on builds that accept it)
+    #     chain_id: [A, B]     # chains of THIS config to template (default: best match)
+    #     template_id: [A, B]  # matching chains inside the file (default: best match)
+    #     force: true          # steering potential during diffusion, not just an input feature
+    #     threshold: 2.0       # max backbone deviation in Angstrom; REQUIRED with force
+    "templates": [],
 }
 
 
@@ -139,6 +163,12 @@ def load_config(path: str | Path) -> SimpleNamespace:
         msa = getattr(protein, "msa", None)
         if msa and str(msa) not in {"empty", "server"}:
             protein.msa = _resolve(base_dir, msa)
+    # Template structures resolve relative to the config, like every other input
+    # file — the staged job runs from a different cwd.
+    for template in getattr(conf, "templates", []) or []:
+        cif = getattr(template, "cif", None)
+        if cif:
+            template.cif = _resolve(base_dir, cif)
     return conf
 
 
@@ -400,6 +430,8 @@ def validate_config(conf: SimpleNamespace) -> None:
             raise ValueError(f"{key} must be >= 1")
 
     _validate_pocket(conf)
+    _validate_constraints(conf)
+    _validate_templates(conf)
 
     # Engine-specific checks (affinity support, etc.).
     from alchemfold.engines import get_engine
@@ -423,14 +455,179 @@ def _validate_pocket(conf) -> None:
     contacts = getattr(pocket, "contacts", None) or []
     if not contacts:
         raise ValueError("pocket needs at least one contact {chain, residue}")
-    protein_ids = {str(p.id).strip() for p in (getattr(conf, "proteins", []) or [])}
+    chain_ids = _chain_ids(conf)
     for contact in contacts:
         chain = str(getattr(contact, "chain", "")).strip()
-        if chain not in protein_ids:
-            raise ValueError(f"pocket contact chain '{chain}' is not a protein chain id")
+        if chain not in chain_ids:
+            raise ValueError(
+                f"pocket contact chain '{chain}' is not a declared chain id {sorted(chain_ids)}"
+            )
         residue = getattr(contact, "residue", None)
-        if residue is None or int(residue) < 1:
-            raise ValueError("each pocket contact needs a positive integer 'residue'")
+        if residue is None or str(residue).strip() == "":
+            raise ValueError(
+                "each pocket contact needs a 'residue': a positive index for a protein "
+                "chain, or an atom name for a ligand chain"
+            )
+        # A residue INDEX must be positive; anything non-numeric is taken as an
+        # atom name, which Boltz accepts when the chain is a ligand.
+        try:
+            index = int(str(residue).strip())
+        except (TypeError, ValueError):
+            continue
+        if index < 1:
+            raise ValueError(f"pocket contact residue index must be >= 1 (got {index})")
+
+
+def _token_text(token) -> str:
+    return ", ".join(str(part) for part in token)
+
+
+def _validate_token(token, label: str, chain_ids: set[str], *, want_atom: bool) -> None:
+    """Check one Boltz token: ``[chain, residue]`` or ``[chain, residue, atom]``."""
+    if not isinstance(token, (list, tuple)):
+        raise ValueError(
+            f"{label} must be a list — "
+            + ("[chain, residue, atom_name]" if want_atom else "[chain, residue_or_atom]")
+        )
+    expected = 3 if want_atom else 2
+    if len(token) != expected:
+        raise ValueError(
+            f"{label} needs {expected} entries "
+            + ("[chain, residue, atom_name]" if want_atom else "[chain, residue_or_atom]")
+            + f", got {len(token)}: [{_token_text(token)}]"
+        )
+    chain = str(token[0]).strip()
+    if chain not in chain_ids:
+        raise ValueError(
+            f"{label} chain '{chain}' is not a declared chain id {sorted(chain_ids)}"
+        )
+    residue = str(token[1]).strip()
+    if not residue:
+        raise ValueError(f"{label} needs a residue index (or atom name)")
+    if want_atom:
+        try:
+            if int(residue) < 1:
+                raise ValueError(f"{label} residue index must be >= 1 (got {residue})")
+        except ValueError as exc:
+            if "must be >= 1" in str(exc):
+                raise
+            raise ValueError(
+                f"{label} residue must be an integer index for a bond, got '{residue}' "
+                "(atom names go in the third position)"
+            ) from None
+        if not str(token[2]).strip():
+            raise ValueError(f"{label} needs an atom name as its third entry")
+
+
+def _validate_constraints(conf) -> None:
+    """Check the pass-through ``constraints`` list (Boltz bond / contact / pocket)."""
+    constraints = getattr(conf, "constraints", None) or []
+    if not constraints:
+        return
+    engine = str(getattr(conf, "engine", "boltz")).strip().lower()
+    if engine != "boltz":
+        raise ValueError(
+            f"bond/contact constraints are a Boltz-2 feature; engine '{engine}' does not "
+            "support them (drop the 'constraints' block or set engine: boltz)"
+        )
+    chain_ids = _chain_ids(conf)
+    known = {"bond", "contact", "pocket"}
+    for index, entry in enumerate(constraints):
+        where = f"constraints[{index}]"
+        kinds = [k for k in known if getattr(entry, k, None) is not None]
+        if not kinds:
+            present = sorted(vars(entry)) if hasattr(entry, "__dict__") else []
+            raise ValueError(
+                f"{where} must be one of {sorted(known)} "
+                f"(got {present or 'an empty entry'})"
+            )
+        if len(kinds) > 1:
+            raise ValueError(f"{where} sets several constraint types at once: {kinds}")
+        kind = kinds[0]
+        body = getattr(entry, kind)
+
+        if kind == "bond":
+            for field in ("atom1", "atom2"):
+                token = getattr(body, field, None)
+                if token is None:
+                    raise ValueError(f"{where} bond needs '{field}' [chain, residue, atom_name]")
+                _validate_token(token, f"{where} bond.{field}", chain_ids, want_atom=True)
+        elif kind == "contact":
+            for field in ("token1", "token2"):
+                token = getattr(body, field, None)
+                if token is None:
+                    raise ValueError(
+                        f"{where} contact needs '{field}' [chain, residue_or_atom]")
+                _validate_token(token, f"{where} contact.{field}", chain_ids, want_atom=False)
+            max_distance = getattr(body, "max_distance", None)
+            if max_distance is None:
+                raise ValueError(f"{where} contact needs a 'max_distance' in Angstrom")
+            if float(max_distance) <= 0:
+                raise ValueError(f"{where} contact max_distance must be > 0 Angstrom")
+        else:  # pocket written inline in Boltz's own shape
+            if not str(getattr(body, "binder", "") or "").strip():
+                raise ValueError(f"{where} pocket needs a 'binder' chain id")
+            if not (getattr(body, "contacts", None) or []):
+                raise ValueError(f"{where} pocket needs at least one contact")
+
+
+def _as_id_list(value) -> list[str]:
+    """Normalise a chain-id field: ``"A"`` / ``"A,B"`` / ``["A", "B"]`` -> list."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [tok.strip() for tok in value.replace(";", ",").split(",") if tok.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [str(value).strip()]
+
+
+def _validate_templates(conf) -> None:
+    """Check the optional ``templates`` block (Boltz-2 only, protein chains only)."""
+    templates = getattr(conf, "templates", None) or []
+    if not templates:
+        return
+    engine = str(getattr(conf, "engine", "boltz")).strip().lower()
+    if engine != "boltz":
+        raise ValueError(
+            f"structural templates are a Boltz-2 feature; engine '{engine}' does not "
+            "support them (drop the 'templates' block or set engine: boltz)"
+        )
+    protein_ids = {str(p.id).strip() for p in (getattr(conf, "proteins", []) or [])}
+    for index, template in enumerate(templates):
+        where = f"templates[{index}]"
+        cif = str(getattr(template, "cif", "") or "").strip()
+        if not cif:
+            raise ValueError(f"{where} needs a 'cif' path to the template structure")
+        if not Path(cif).is_file():
+            raise ValueError(f"{where} template file not found: {cif}")
+
+        chain_ids = _as_id_list(getattr(template, "chain_id", None))
+        for chain in chain_ids:
+            if chain not in protein_ids:
+                raise ValueError(
+                    f"{where} chain_id '{chain}' is not a protein chain id "
+                    f"{sorted(protein_ids)} — only protein chains can be templated"
+                )
+        template_ids = _as_id_list(getattr(template, "template_id", None))
+        if template_ids and len(template_ids) != len(chain_ids):
+            raise ValueError(
+                f"{where} template_id has {len(template_ids)} entries but chain_id has "
+                f"{len(chain_ids)} — they map one-to-one, so give both or neither"
+            )
+
+        force = bool(getattr(template, "force", False))
+        threshold = getattr(template, "threshold", None)
+        if force:
+            if threshold is None:
+                raise ValueError(
+                    f"{where} sets force: true, which needs a 'threshold' (max backbone "
+                    "deviation in Angstrom, e.g. 2.0)"
+                )
+            if float(threshold) <= 0:
+                raise ValueError(f"{where} threshold must be > 0 Angstrom")
+        elif threshold is not None and float(threshold) <= 0:
+            raise ValueError(f"{where} threshold must be > 0 Angstrom")
 
 
 def stage(config_path: str | Path, task_directory: str | Path) -> tuple[Path, Path]:
@@ -552,11 +749,13 @@ def stage_slurm(
 
 
 def _parse_pocket_contacts(contacts, default_chain: str = "A"):
-    """Normalise pocket contacts into ``[(chain, residue:int), ...]``.
+    """Normalise pocket contacts into ``[(chain, residue), ...]``.
 
     Accepts a list/tuple of ``(chain, residue)`` pairs, or strings in the forms
     ``"A:123"``, ``"A 123"``, or just ``"123"`` (uses ``default_chain``). A single
     comma/space/semicolon-separated string (e.g. ``"A:123, A:145"``) is also accepted.
+    A numeric residue becomes an ``int`` (a residue index); anything else is kept
+    as a string, which Boltz reads as an **atom name** on a ligand chain.
     Returns ``[]`` when nothing usable is given.
     """
     if not contacts:
@@ -578,12 +777,137 @@ def _parse_pocket_contacts(contacts, default_chain: str = "A"):
             else:
                 chain, residue = default_chain, s
         chain = str(chain).strip() or default_chain
-        try:
-            residue_i = int(str(residue).strip())
-        except (TypeError, ValueError):
+        residue = str(residue).strip()
+        if not residue:
             continue
-        out.append((chain, residue_i))
+        try:
+            out.append((chain, int(residue)))
+        except (TypeError, ValueError):
+            out.append((chain, residue))   # atom name (ligand chain)
     return out
+
+
+def _parse_token(text, *, want_atom: bool, default_chain: str = "A") -> list:
+    """Parse ``"A:123"`` / ``"A:C12"`` / ``"A:123:SG"`` into a Boltz token list.
+
+    With ``want_atom`` the token is a bond atom and must be
+    ``chain:residue:atom_name``; otherwise it is a contact token,
+    ``chain:residue_or_atom``. A bare value uses ``default_chain``.
+    """
+    parts = [p.strip() for p in str(text).replace("/", ":").split(":") if p.strip()]
+    if not parts:
+        raise ValueError(f"empty token: {text!r}")
+    if want_atom:
+        if len(parts) != 3:
+            raise ValueError(
+                f"bond atom must be CHAIN:RESIDUE:ATOM_NAME (got {text!r})")
+        chain, residue, atom = parts
+        try:
+            return [chain, int(residue), atom]
+        except ValueError:
+            raise ValueError(
+                f"bond atom residue must be an integer index (got {residue!r} in {text!r})"
+            ) from None
+    if len(parts) == 1:
+        parts = [default_chain, parts[0]]
+    if len(parts) != 2:
+        raise ValueError(f"contact token must be CHAIN:RESIDUE_OR_ATOM (got {text!r})")
+    chain, residue = parts
+    try:
+        return [chain, int(residue)]
+    except ValueError:
+        return [chain, residue]    # atom name
+
+
+def _split_pair(text: str) -> list[str]:
+    """Split ``"A:123,L:1"`` (or whitespace/semicolon separated) into two tokens."""
+    parts = [p.strip() for p in str(text).replace(";", ",").replace(" ", ",").split(",")
+             if p.strip()]
+    if len(parts) != 2:
+        raise ValueError(
+            f"expected two tokens separated by a comma (got {len(parts)} in {text!r})")
+    return parts
+
+
+def _parse_constraints(
+    bonds=None,
+    contacts=None,
+    *,
+    contact_max_distance: float = 5.0,
+    contact_force: bool = False,
+    default_chain: str = "A",
+) -> list[dict]:
+    """Build ``constraints`` entries from CLI-style ``"A:123:SG,L:1:C12"`` strings.
+
+    A contact may carry its own distance as a third field
+    (``"A:123,L:1,4.5"``); otherwise ``contact_max_distance`` applies.
+    """
+    out: list[dict] = []
+    for spec in (bonds or []):
+        atom1, atom2 = _split_pair(spec)
+        out.append({"bond": {
+            "atom1": _parse_token(atom1, want_atom=True, default_chain=default_chain),
+            "atom2": _parse_token(atom2, want_atom=True, default_chain=default_chain),
+        }})
+    for spec in (contacts or []):
+        fields = [p.strip() for p in str(spec).replace(";", ",").split(",") if p.strip()]
+        distance = contact_max_distance
+        if len(fields) == 3:
+            *fields, tail = fields
+            try:
+                distance = float(tail)
+            except ValueError:
+                raise ValueError(
+                    f"third field of --contact must be a distance in Angstrom "
+                    f"(got {tail!r} in {spec!r})") from None
+        if len(fields) != 2:
+            raise ValueError(
+                f"--contact takes TOKEN,TOKEN[,DISTANCE] (got {spec!r})")
+        entry = {
+            "token1": _parse_token(fields[0], want_atom=False, default_chain=default_chain),
+            "token2": _parse_token(fields[1], want_atom=False, default_chain=default_chain),
+            "max_distance": float(distance),
+        }
+        if contact_force:
+            entry["force"] = True
+        out.append({"contact": entry})
+    return out
+
+
+def _format_constraints_block(constraints: list[dict] | None) -> str:
+    """Render the pass-through ``constraints:`` YAML block (or a commented example)."""
+    if not constraints:
+        return (
+            "# --- other Boltz constraints (Boltz-2 only) -------------------------\n"
+            "# constraints:\n"
+            "#   - bond:                     # explicit covalent bond\n"
+            "#       atom1: [A, 123, SG]     # [chain, residue index, atom name]\n"
+            "#       atom2: [L, 1, C12]\n"
+            "#   - contact:                  # pairwise distance restraint\n"
+            "#       token1: [A, 123]        # [chain, residue index] or [chain, atom name]\n"
+            "#       token2: [L, 1]\n"
+            "#       max_distance: 5.0\n"
+            "#       force: false            # true = steering potential\n"
+        )
+    lines = ["# Boltz constraints: covalent bonds and pairwise distance restraints.\n",
+             "constraints:\n"]
+    for entry in constraints:
+        if "bond" in entry:
+            bond = entry["bond"]
+            lines.append("  - bond:\n")
+            lines.append(f"      atom1: [{_token_text(bond['atom1'])}]"
+                         "       # [chain, residue, atom name]\n")
+            lines.append(f"      atom2: [{_token_text(bond['atom2'])}]\n")
+        elif "contact" in entry:
+            contact = entry["contact"]
+            lines.append("  - contact:\n")
+            lines.append(f"      token1: [{_token_text(contact['token1'])}]\n")
+            lines.append(f"      token2: [{_token_text(contact['token2'])}]\n")
+            lines.append(f"      max_distance: {float(contact['max_distance']):g}"
+                         "          # Angstrom\n")
+            lines.append(f"      force: {'true' if contact.get('force') else 'false'}"
+                         "              # true = steering potential, not just a feature\n")
+    return "".join(lines)
 
 
 def parse_fasta(path, *, first_id: str = "A"):
@@ -670,6 +994,92 @@ def _format_proteins_block(proteins) -> str:
     return "".join(lines)
 
 
+def _parse_templates(
+    paths,
+    *,
+    chains=None,
+    template_chains=None,
+    force: bool = False,
+    threshold: float | None = None,
+) -> list[dict]:
+    """Build ``templates`` entries from CLI-style arguments.
+
+    ``paths`` is one path or a list of them; ``chains`` / ``template_chains``
+    accept ``"A,B"`` or a list and apply to every template. ``force`` without an
+    explicit ``threshold`` defaults to 2.0 A, which is tight enough to hold a
+    conformational state the model would otherwise not sample.
+    """
+    if not paths:
+        return []
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    chain_ids = _as_id_list(chains)
+    template_ids = _as_id_list(template_chains)
+    out: list[dict] = []
+    for path in paths:
+        if not str(path).strip():
+            continue
+        entry: dict[str, Any] = {"cif": str(Path(str(path)).expanduser().resolve())}
+        if chain_ids:
+            entry["chain_id"] = list(chain_ids)
+        if template_ids:
+            entry["template_id"] = list(template_ids)
+        if force:
+            entry["force"] = True
+            entry["threshold"] = float(threshold if threshold is not None else 2.0)
+        elif threshold is not None:
+            entry["threshold"] = float(threshold)
+        out.append(entry)
+    return out
+
+
+def _format_templates_block(templates: list[dict] | None) -> str:
+    """Render the ``templates:`` YAML block (or a commented placeholder)."""
+    if not templates:
+        return (
+            "# --- structural templates (Boltz-2 only; PROTEIN chains only) -------\n"
+            "# Bias the receptor towards a known conformation — e.g. an open/active\n"
+            "# state the model does not sample on its own. Without `force` the\n"
+            "# template is only an input feature the model may overrule; with it, a\n"
+            "# potential steers the backbone during diffusion and `threshold` sets\n"
+            "# how far (in Angstrom) it may drift. The ligand is never templated.\n"
+            "# templates:\n"
+            '#   - cif: "reference.cif"      # .cif (or .pdb where your build accepts it)\n'
+            "#     chain_id: [A]             # chains of THIS config to template\n"
+            "#     template_id: [A]          # matching chains in the file (default: best match)\n"
+            "#     force: true               # steering potential, not just a feature\n"
+            "#     threshold: 2.0            # max backbone deviation (A); REQUIRED with force\n"
+        )
+    lines = [
+        "# Structural templates (Boltz-2 only; protein chains only). `force` turns\n",
+        "# the template from an input feature into a steering potential during\n",
+        "# diffusion; `threshold` is how far (A) the backbone may drift from it.\n",
+        "templates:\n",
+    ]
+    for entry in templates:
+        lines.append(f'  - cif: "{entry["cif"]}"\n')
+        if entry.get("chain_id"):
+            lines.append(f"    chain_id: [{', '.join(entry['chain_id'])}]"
+                         "          # chains of THIS config to template\n")
+        if entry.get("template_id"):
+            lines.append(f"    template_id: [{', '.join(entry['template_id'])}]"
+                         "       # matching chains inside the file\n")
+        else:
+            lines.append("    # template_id: [A]           # matching chains in the file "
+                         "(default: best match)\n")
+        if entry.get("force"):
+            lines.append("    force: true                  # steering potential, not just a feature\n")
+            lines.append(f"    threshold: {float(entry['threshold']):.1f}"
+                         "               # max backbone deviation (A)\n")
+        elif entry.get("threshold") is not None:
+            lines.append(f"    threshold: {float(entry['threshold']):.1f}\n")
+        else:
+            lines.append("    # force: true                # add a steering potential "
+                         "(then threshold is required)\n")
+            lines.append("    # threshold: 2.0             # max backbone deviation (A)\n")
+    return "".join(lines)
+
+
 def default_yaml_text(
     *,
     engine: str = "boltz",
@@ -683,13 +1093,14 @@ def default_yaml_text(
     pocket_binder: str | None = None,
     pocket_max_distance: float = 6.0,
     pocket_contacts: list | None = None,
+    pocket_force: bool = False,
     ligand_file: str | None = None,
     ligand_file_format: str = "auto",
     cache_dir: str | None = None,
     diffusion_samples: int = 1,
     recycling_steps: int = 3,
     sampling_steps: int = 200,
-    no_kernels: bool = True,
+    no_kernels: bool = False,
     boltz_command: str | None = None,
     chai_command: str | None = None,
     use_msa_server: bool = True,
@@ -701,6 +1112,8 @@ def default_yaml_text(
     jobname: str = "",
     diffdock_trajectory: bool = False,
     diffdock_batch_size: int | None = None,
+    templates: list | None = None,
+    constraints: list | None = None,
 ) -> str:
     """Return a commented example docking config for the chosen engine.
 
@@ -720,6 +1133,11 @@ def default_yaml_text(
             '# affinity_binder: "L"          # ligand id to score when predict_affinity: true\n'
         )
     parsed_contacts = _parse_pocket_contacts(pocket_contacts, protein_id)
+    force_line = (
+        f"  force: {'true' if pocket_force else 'false'}"
+        "                   # true = steering potential during diffusion, "
+        "not just a soft feature\n"
+    )
     if parsed_contacts:
         # Real pocket constraint built from caller-supplied residues.
         binder = str(pocket_binder or ligand_id).strip() or ligand_id
@@ -728,6 +1146,7 @@ def default_yaml_text(
             f'  binder: "{binder}"                  # which ligand binds the pocket\n',
             f"  max_distance: {float(pocket_max_distance):g}             "
             "# Angstrom (Boltz pocket constraint)\n",
+            force_line,
             "  contacts:                     # residues lining the pocket\n",
         ]
         lines += [f"    - {{chain: {ch}, residue: {res}}}\n" for ch, res in parsed_contacts]
@@ -737,7 +1156,8 @@ def default_yaml_text(
             "pocket:                         # optional binding-site constraint\n"
             f'  binder: "{ligand_id}"                  # which ligand binds the pocket\n'
             "  max_distance: 6.0             # Angstrom (Boltz pocket constraint)\n"
-            "  contacts:                     # residues lining the pocket\n"
+            + force_line
+            + "  contacts:                     # residues lining the pocket\n"
             f"    - {{chain: {protein_id}, residue: 123}}\n"
             f"    - {{chain: {protein_id}, residue: 145}}\n"
         )
@@ -746,6 +1166,7 @@ def default_yaml_text(
             "# pocket:                       # optional binding-site constraint\n"
             f'#   binder: "{ligand_id}"\n'
             "#   max_distance: 6.0\n"
+            "#   force: false                # true = steering potential\n"
             "#   contacts:\n"
             f"#     - {{chain: {protein_id}, residue: 123}}\n"
         )
@@ -846,4 +1267,8 @@ def default_yaml_text(
         f"{ligand_block}"
         "\n"
         f"{pocket_block}"
+        "\n"
+        + _format_constraints_block(constraints)
+        + "\n"
+        + _format_templates_block(templates)
     )

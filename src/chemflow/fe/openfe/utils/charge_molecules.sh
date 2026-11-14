@@ -46,7 +46,7 @@ QC_DIR="$(dirname "${OUTPUT_SDF}")"
 QC_STEM="$(basename "${OUTPUT_SDF}" .sdf)"
 QC_HTML="${QC_DIR}/${QC_STEM}_charge_qc.html"
 QC_CSV="${QC_DIR}/${QC_STEM}_charge_qc.csv"
-python -m chemflow.fe.openfe.charge_qc \
+python -m chemflow.fe.openfe.utils.charge_qc \
     "${INPUT_SDF}" "${OUTPUT_SDF}" --html "${QC_HTML}" --csv "${QC_CSV}"
 echo "Charge QC report: ${QC_HTML}"
 echo "Charge QC table:  ${QC_CSV}"

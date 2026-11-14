@@ -977,11 +977,95 @@ class MembraneModeller(Modeller):
 
         context.setPositions(mergedPositions)
 
-        LocalEnergyMinimizer.minimize(
-            context,
-            10.0,
-            30
-        )
+        # Coincident atoms give infinite forces, and no amount of minimisation
+        # recovers from that — the whole system goes NaN on the first step with
+        # nothing to point at. Find them before integrating anything.
+        try:
+            import numpy as _np
+
+            _pos = _np.asarray([[v.x, v.y, v.z] for v in mergedPositions], dtype=float)
+            _cut = 0.05
+            _grid = {}
+            for _i, _c in enumerate(map(tuple, _np.floor(_pos / _cut).astype(_np.int64))):
+                _grid.setdefault(_c, []).append(_i)
+            _bad = []
+            for _c, _members in _grid.items():
+                _near = []
+                for _dx in (-1, 0, 1):
+                    for _dy in (-1, 0, 1):
+                        for _dz in (-1, 0, 1):
+                            _near.extend(_grid.get((_c[0] + _dx, _c[1] + _dy, _c[2] + _dz), ()))
+                for _a in _members:
+                    for _b in _near:
+                        if _b <= _a:
+                            continue
+                        _d = float(_np.linalg.norm(_pos[_a] - _pos[_b]))
+                        if _d < _cut:
+                            _bad.append((_d, _a, _b))
+            if _bad:
+                _bad.sort()
+
+                def _what(_k):
+                    return ("membrane" if _k < numMembraneParticles
+                            else f"solute atom {_k - numMembraneParticles}")
+
+                _lines = "\n".join(
+                    f"    {_d * 10:5.3f} A   particle {_a} ({_what(_a)})   <->   "
+                    f"particle {_b} ({_what(_b)})" for _d, _a, _b in _bad[:15])
+                raise ValueError(
+                    f"{len(_bad)} pair(s) of atoms are closer than "
+                    f"{_cut * 10:.1f} A in the packed system, before any dynamics:\n"
+                    + _lines
+                    + "\n  Infinite forces follow, so minimisation cannot recover and "
+                      "the packing goes NaN immediately. If both partners are solute, "
+                      "the input structure already contains them — check it with "
+                      "chemflow.fe.openfe.utils.system_preflight. If one is membrane, "
+                      "the lipid-overlap cutoff did not catch it."
+                )
+            print(f"  packed system: {len(_pos)} particles "
+                  f"({numMembraneParticles} membrane + "
+                  f"{len(_pos) - numMembraneParticles} solute), no coincident atoms",
+                  flush=True)
+        except ImportError:
+            pass
+
+        # The protein is packed at `scale_factor` size and then grown back over
+        # `steps` iterations. Upstream minimises 30 iterations once; that is far
+        # too few here (211k particles, most of them a freshly tiled lipid
+        # patch), and whatever strain is left gets integrated in the loop below
+        # and goes NaN. Minimise in reported rounds until the energy settles.
+        _rounds = 12
+        _per_round = 1000
+        _previous = None
+        for _r in range(_rounds):
+            LocalEnergyMinimizer.minimize(context, 10.0, _per_round)
+            _e = (context.getState(energy=True).getPotentialEnergy()
+                  .value_in_unit(unit.kilojoule_per_mole))
+            print(f"  minimising packed system: round {_r + 1}/{_rounds} "
+                  f"({(_r + 1) * _per_round} iterations) E = {_e:,.1f} kJ/mol",
+                  flush=True)
+            if _e != _e:
+                raise ValueError(
+                    "the packed system went NaN during minimisation, with no "
+                    "coincident atoms. That points at the force field rather than "
+                    "the geometry — a residue typed against the wrong template, or "
+                    "a ligand whose SDF does not match the PDB residue."
+                )
+            # Stop once it is relaxed, or once further rounds stop paying.
+            if _e < 0 and _previous is not None and abs(_previous - _e) < 0.01 * abs(_e):
+                break
+            _previous = _e
+
+        if _e > 0:
+            raise ValueError(
+                f"after {(_r + 1) * _per_round} minimisation iterations the packed "
+                f"system is still at {_e:,.1f} kJ/mol (positive = badly strained), so "
+                "integrating it would go NaN.\n  The lipid patch is too tightly packed "
+                "against the solute. Raise build.scale_factor (less shrinking to undo) "
+                "or x_padding / y_padding (more room for lipids), and check that the "
+                "protein really is OPM-oriented — a solute lying across the bilayer "
+                "plane leaves the lipids nowhere to go."
+            )
 
         try:
             import numpy as np
@@ -1037,7 +1121,40 @@ class MembraneModeller(Modeller):
                 mergedPositions
             )
 
+            # Each iteration teleports the protein a little larger, which can
+            # push a lipid into it. Relieve that before integrating — without
+            # this the 20 fs below turn the overlap into "Particle coordinate
+            # is NaN", with no indication of where or why.
+            LocalEnergyMinimizer.minimize(
+                context,
+                10.0,
+                100
+            )
+
             integrator.step(20)
+
+            if i % 20 == 0 or i == steps - 1:
+                energy = (
+                    context
+                    .getState(energy=True)
+                    .getPotentialEnergy()
+                    .value_in_unit(unit.kilojoule_per_mole)
+                )
+                print(
+                    f"  packing lipids: {i + 1}/{steps} "
+                    f"(protein at {100 * weight1:.0f}% size) "
+                    f"E = {energy:,.1f} kJ/mol",
+                    flush=True,
+                )
+                if energy != energy or abs(energy) == float("inf"):
+                    raise ValueError(
+                        f"the membrane packing diverged at iteration {i + 1}/{steps}, "
+                        f"with the protein expanded to {100 * weight1:.0f}% of full "
+                        "size.\n  The lipid patch cannot get out of the solute's way "
+                        "fast enough. Try a larger build.scale_factor (less shrinking, "
+                        "so less to undo), or more x_padding / y_padding so there is "
+                        "room for the lipids to move into."
+                    )
 
         # ------------------------------------------------------------
         # 17. Add membrane to protein

@@ -6,10 +6,10 @@ traditional ECFP4/LightGBM baseline on the curated clearance datasets.
 The paths are intentionally fixed for the NIH HPC setup:
 
 ```text
-Repository:     /vf/users/liuy48/ChemFlow
-Slurm bundle:   /data/liuy48/model_training/adme/clearance
-Datasets:       /data/liuy48/model_training/adme/clearance/dataset
-Outputs:        /data/liuy48/model_training/adme/clearance
+Repository:     /path/to/ChemFlow
+Slurm bundle:   /data/$USER/model_training/adme/clearance
+Datasets:       /data/$USER/model_training/adme/clearance/dataset
+Outputs:        /data/$USER/model_training/adme/clearance
 ```
 
 The four deep-learning arrays each run six multitask experiments:
@@ -29,7 +29,7 @@ and the LightGBM model defined in `example/ml_training/conf.yaml`.
 From the HPC login node:
 
 ```bash
-cd /data/liuy48/model_training/adme/clearance
+cd /data/$USER/model_training/adme/clearance
 bash submit.sh
 ```
 
@@ -49,11 +49,11 @@ Do not run or source a `.slurm` file directly. `sbatch` supplies
 Generated configurations are written to:
 
 ```text
-/data/liuy48/model_training/adme/clearance/generated_configs
+/data/$USER/model_training/adme/clearance/generated_configs
 ```
 
 When submitted through `submit.sh`, standard output and error logs are written
-below `/data/liuy48/model_training/adme/clearance/logs`. Each run has its own
+below `/data/$USER/model_training/adme/clearance/logs`. Each run has its own
 work directory named with model, dataset, validation fraction, and seed.
 
 KERMT uses the cached official checkpoint and accelerated

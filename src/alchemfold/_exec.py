@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 
 
@@ -138,7 +139,7 @@ def boltz_kernels_enabled(conf) -> bool:
     """
     if os.environ.get("ALCHEMFOLD_BOLTZ_NO_KERNELS"):
         return False
-    return not bool(getattr(conf, "no_kernels", True))
+    return not bool(getattr(conf, "no_kernels", False))
 
 
 def prefer_envs_for(conf) -> tuple[str, ...]:
@@ -158,6 +159,42 @@ def prefer_envs_for(conf) -> tuple[str, ...]:
     if engine == "diffdock":
         return ("diffdock", "alchemfold")
     return ("alchemfold",)
+
+
+def kernels_available(boltz_command: str, timeout: int = 60) -> bool:
+    """Can the env holding this ``boltz`` import the GPU kernels?
+
+    Kernels are now ON by default, so a setup without them must degrade to the
+    pure-PyTorch path rather than die mid-predict with
+    ``ModuleNotFoundError: cuequivariance_torch`` after the MSA has been built.
+    Probes the interpreter that sits beside the boltz executable.
+    """
+    python = os.path.join(os.path.dirname(os.path.abspath(boltz_command)), "python")
+    if not os.path.isfile(python):
+        return True            # can't tell — assume the user knows, don't nag
+    try:
+        return subprocess.run([python, "-c", "import cuequivariance_torch"],
+                              capture_output=True, timeout=timeout).returncode == 0
+    except Exception:
+        return True
+
+
+def ensure_kernels_or_fallback(command: list[str], conf) -> list[str]:
+    """Append ``--no_kernels`` if the resolved env cannot actually provide them.
+
+    Returns the command unchanged when kernels were not requested, or when the
+    env has them.
+    """
+    if not command or not boltz_kernels_enabled(conf) or "--no_kernels" in command:
+        return command
+    if kernels_available(command[0]):
+        return command
+    print(f"WARNING: {command[0]} cannot import cuequivariance_torch, so the GPU "
+          "kernels are unavailable in that environment. Falling back to the "
+          "pure-PyTorch path for this run.\n"
+          "         Install them with `chemflow boltz-env install`, or set "
+          "no_kernels: true to silence this.", flush=True)
+    return [*command, "--no_kernels"]
 
 
 def wrap_srun(command: list[str], devices: int = 1) -> list[str]:

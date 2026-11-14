@@ -3,21 +3,21 @@
 # This file is sourced by the model-specific Slurm submission scripts.
 
 set -euo pipefail
-source "/home/liuy48/bin/myconda"
+source "/home/$USER/bin/myconda"
 conda activate chemflow
 
-training_dir="/data/liuy48/model_training/adme/adsorption/caco2"
-dataset_dir="/data/liuy48/model_training/adme/adsorption/caco2/dataset"
-config_dir="/data/liuy48/model_training/adme/adsorption/caco2/conf"
-generated_config_dir="/data/liuy48/model_training/adme/adsorption/caco2/generated_configs"
-test_data_file="/data/liuy48/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_test.csv"
+training_dir="/data/$USER/model_training/adme/adsorption/caco2"
+dataset_dir="/data/$USER/model_training/adme/adsorption/caco2/dataset"
+config_dir="/data/$USER/model_training/adme/adsorption/caco2/conf"
+generated_config_dir="/data/$USER/model_training/adme/adsorption/caco2/generated_configs"
+test_data_file="/data/$USER/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_test.csv"
 target_spec="Log10_Caco_Papp_AB_cm_s"
 
 strategies=("S1_public3" "S2_expansionrx" "S3_joint")
 data_files=(
-    "/data/liuy48/model_training/adme/adsorption/caco2/dataset/caco2_public_3source_training.csv"
-    "/data/liuy48/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_train.csv"
-    "/data/liuy48/model_training/adme/adsorption/caco2/dataset/caco2_public3_expansionrx_train.csv"
+    "/data/$USER/model_training/adme/adsorption/caco2/dataset/caco2_public_3source_training.csv"
+    "/data/$USER/model_training/adme/adsorption/caco2/dataset/caco2_expansionrx_train.csv"
+    "/data/$USER/model_training/adme/adsorption/caco2/dataset/caco2_public3_expansionrx_train.csv"
 )
 split_types=("scaffold_balanced" "scaffold_balanced" "random" "random")
 split_labels=("scaffold" "scaffold" "random" "random")
@@ -56,7 +56,7 @@ case "$model_kind" in
         batch_size=8
         epochs=30
         freeze_epochs=0
-        checkpoint="/data/liuy48/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
+        checkpoint="/data/$USER/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
         run_name="${strategy}_${split_label}_val_${val_fraction}_seed${seed}"
         command_name="hf-graphormer"
         ;;

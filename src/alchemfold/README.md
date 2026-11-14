@@ -13,6 +13,11 @@ Two entry points:
   an optional binding-site **pocket** constraint. One config, `engine:` picks the model.
 - `alchemfold boltz …` — the Boltz-2-only path (incl. affinity prediction).
 
+Everything is also reachable from the main command — `chemflow dock …` and
+`chemflow screen …` are exact aliases for `alchemfold dock …` / `alchemfold
+screen …` (and `chemflow alchemfold …` forwards anything else, e.g. `gpu-test`).
+Same flags, same configs; the alias only saves you from activating an env.
+
 The predicted complex (PDB/mmCIF) drops straight into the OpenMM modeling →
 free-energy pipeline:
 
@@ -93,6 +98,79 @@ You can also dock from a **ligand file** instead of a single SMILES — a CSV
 ligand_file: "ligands.smi"
 ligand_file_format: "auto"     # auto | csv | smiles | cxsmiles
 ```
+
+### Constraints (Boltz-2)
+
+Beyond the pocket, Boltz takes two more constraint types, written in its own
+shape under a `constraints:` list:
+
+```yaml
+pocket:                     # binding site (its own key, kept for convenience)
+  binder: "L"
+  max_distance: 6.0
+  force: false              # true = steering potential, not just a soft feature
+  contacts:
+    - {chain: A, residue: 123}
+    - {chain: L, residue: C12}   # an ATOM NAME is allowed on a ligand chain
+
+constraints:
+  - bond:                   # explicit covalent bond (covalent docking)
+      atom1: [A, 123, SG]   # [chain, residue index, atom name]
+      atom2: [L, 1, C12]
+  - contact:                # one pairwise distance restraint
+      token1: [A, 123]      # [chain, residue index] or [chain, atom name]
+      token2: [L, 1]
+      max_distance: 5.0
+      force: false
+```
+
+`force` means the same thing everywhere: off, the constraint is a soft feature
+the model may ignore; on, a potential enforces it during diffusion.
+
+```bash
+alchemfold dock generate --engine boltz --sequence-file target.fasta --smiles "..." \
+    --pocket-contacts "A:511,A:512,A:550" --pocket-force \
+    --contact "A:570,L:1,4.5" --contact-force \
+    --bond "A:123:SG,L:1:C12" -o docking.yaml
+```
+
+A contact may carry its own distance as a third field; otherwise
+`--contact-max-distance` applies to all of them.
+
+### Structural templates (Boltz-2 only)
+
+Co-folding models return the conformational state they saw most often in the
+PDB, and they do not model ligand-induced allostery — an agonist will not open a
+channel that the model has mostly seen closed. A **template** biases the
+receptor towards a known conformation:
+
+```yaml
+templates:
+  - cif: "7lpe.cif"       # .cif (or .pdb where your Boltz build accepts it)
+    chain_id: [A, B, C, D]  # chains of THIS config to template
+    template_id: [A, B, C, D]  # matching chains in the file (default: best match)
+    force: true             # steering potential during diffusion
+    threshold: 2.0          # max backbone deviation in A; REQUIRED with force
+```
+
+Only **protein** chains can be templated — the ligand pose is still predicted,
+which is the point: you fix the receptor state and let the ligand find its site.
+Without `force` the template is an input feature the model may overrule; with it
+a potential holds the backbone within `threshold` angstrom during diffusion.
+Use `force` when the model disprefers the state you want (~2 A pins it, 4-6 A
+keeps the fold but allows shifts). The same block applies to every ligand of a
+batched Boltz library screen.
+
+From the CLI, or the **Template the receptor on a known structure** box on the
+desktop docking page:
+```bash
+alchemfold dock generate --engine boltz --sequence-file target.fasta --copies 4 \
+    --smiles "CC(C)..." --template 7lpe.cif --template-chains A,B,C,D \
+    --template-force --template-threshold 2.0 -o docking.yaml
+```
+
+Templating *imposes* the conformation, so the result is a starting structure for
+MD/FEP — not evidence that the ligand induces that state.
 
 ---
 

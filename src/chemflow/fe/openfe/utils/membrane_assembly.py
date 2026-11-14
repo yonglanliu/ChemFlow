@@ -27,7 +27,7 @@ See ``MEMBRANE_PREP.md`` in this directory for the full tutorial.
 
 CLI::
 
-    python -m chemflow.fe.openfe.membrane_assembly \
+    python -m chemflow.fe.openfe.utils.membrane_assembly \
         --protein protein.pdb --membrane membrane.pdb --solvent sol_noh.pdb \
         --output complex.pdb [--fixed-solvent fixed_sol.pdb] [--ph 7.0] \
         [--solvent-has-hydrogens]
@@ -49,7 +49,7 @@ def _imports():
         raise RuntimeError(
             "OpenMM/PDBFixer are required and were not importable. Run this inside "
             "the 'alchemforge' environment, e.g.:\n"
-            "  conda run -n alchemforge python -m chemflow.fe.openfe.membrane_assembly ...\n"
+            "  conda run -n alchemforge python -m chemflow.fe.openfe.utils.membrane_assembly ...\n"
             "or install them with:  conda install -c conda-forge openmm pdbfixer\n"
             f"(original import error: {exc})"
         ) from exc

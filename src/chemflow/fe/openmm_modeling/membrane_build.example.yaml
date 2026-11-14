@@ -33,10 +33,17 @@ forcefields:
 build:                          # used when mode == build
   lipid_type: "POPC"        # POPC POPE DLPC DLPE DMPC DOPC DPPC
   scale_factor: 0.6             # XY shrink of solute while packing lipids
-  membrane_center_z: 0.0        # nm; 0 = OPM bilayer midplane (keep at 0 for OPM input)
+  membrane_center_z: 0.0        # nm; the BILAYER MIDPLANE in the input's own frame.
+                                # 0 is correct only for an OPM-oriented structure.
+                                # If the protein came out of an existing membrane
+                                # system, measure it: midpoint between the two lipid
+                                # phosphate planes (NOT the mean of all phosphates,
+                                # and not the protein centre — neither is symmetric
+                                # about the bilayer).
   x_padding: 1.0                # nm beyond protein in X (each side)
   y_padding: 1.0                # nm, Y
-  z_padding: 1.0                # nm, water above/below the bilayer
+  z_padding: 1.0                # nm beyond the PROTEIN's z extent (each side),
+                                # i.e. the box is protein_z + 2*z_padding
 
 existing:                       # used when mode == existing
   padding: 1.0                  # nm, Z box padding if not set otherwise

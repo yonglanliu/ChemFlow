@@ -178,6 +178,46 @@ class OpenMMModelingPage(QTabWidget):
         w.setToolTip("One OpenMM force-field XML per line (protein, water, lipids, ions).")
         return w
 
+    def _measure_membrane_center(self) -> None:
+        """Read the bilayer midplane out of a structure that still has lipids.
+
+        0 is only right for an OPM-oriented input. A protein lifted out of an
+        existing membrane system keeps that system's frame, and building at 0
+        puts the lipid patch below the protein instead of through it.
+        """
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        start = self.b_input.text().strip() or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Structure containing the bilayer", start,
+            "Structures (*.pdb *.cif *.mmcif);;All files (*)")
+        if not path:
+            return
+        try:
+            from chemflow.utils.structure import bilayer_midplane, load_structure
+
+            topology, positions = load_structure(path)
+            result = bilayer_midplane(topology, positions)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Could not measure the midplane",
+                f"{Path(path).name}\n\n{exc}")
+            return
+
+        self.mem_center_z.setValue(round(result["midplane"], 3))
+        QMessageBox.information(
+            self, "Bilayer midplane",
+            f"{Path(path).name}\n\n"
+            f"midplane  {result['midplane']:.3f} nm   (set as Membrane center Z)\n"
+            f"leaflets  {result['n_lower']} / {result['n_upper']} lipids at "
+            f"{result['lower']:.3f} / {result['upper']:.3f} nm\n"
+            f"separation {result['separation']:.2f} nm "
+            f"(POPC is ~3.8 nm)\n"
+            f"core gap  {result['core_gap']:.2f} nm\n\n"
+            f"The mean of all phosphates would have said "
+            f"{result['phosphate_mean']:.3f} nm — biased when the leaflets are "
+            f"unequal, as here.")
+
     def _exec_row(self, writer, step, status: QLabel) -> QHBoxLayout:
         row = QHBoxLayout()
         for label, slot in [
@@ -317,15 +357,38 @@ class OpenMMModelingPage(QTabWidget):
         # Membrane build
         self.mem_lipid = _ecombo(_LIPID_TYPES, "POPC", "Lipid type for the tiled patch")
         self.mem_scale = _dspin(0.6, 0.1, 1.0, 0.05, 2)
-        self.mem_center_z = _dspin(0.0, -10.0, 10.0, 0.5, 2)
+        self.mem_center_z = _dspin(0.0, -100.0, 100.0, 0.1, 3)
+        self.mem_center_z.setToolTip(
+            "Z of the BILAYER MIDPLANE, in the input structure's own frame.\n\n"
+            "0 is correct only for an OPM-oriented structure. If the protein came "
+            "out of an existing membrane system its coordinates are usually all "
+            "positive, and leaving this at 0 packs the lipid patch below the "
+            "protein instead of through it — the build then fails with a NaN.\n\n"
+            "Use Measure… on a structure that still has its lipids. The midplane "
+            "is the midpoint between the two phosphate planes; neither the mean of "
+            "all phosphates nor the protein centre is right when the system is "
+            "asymmetric.")
+        self.mem_center_measure = action_button("Measure…")
+        self.mem_center_measure.setToolTip(
+            "Pick a PDB/mmCIF that still contains the bilayer and read the midplane "
+            "out of its lipid phosphate positions.")
+        self.mem_center_measure.clicked.connect(self._measure_membrane_center)
+        self._mem_center_row = QWidget()
+        _mcz = QHBoxLayout(self._mem_center_row)
+        _mcz.setContentsMargins(0, 0, 0, 0)
+        _mcz.addWidget(self.mem_center_z, 1)
+        _mcz.addWidget(self.mem_center_measure)
         self.mem_xpad = _dspin(1.0, 0.0, 5.0, 0.1, 2)
         self.mem_ypad = _dspin(1.0, 0.0, 5.0, 0.1, 2)
         self.mem_zpad = _dspin(1.0, 0.0, 5.0, 0.1, 2)
+        self.mem_zpad.setToolTip(
+            "Water beyond the PROTEIN's z extent on each side — the box becomes "
+            "protein_z + 2 x this, not bilayer + 2 x this.")
         self.mem_group = QGroupBox("Membrane build (tile + trim a patch)")
         mf = _form(self.mem_group)
         mf.addRow("Lipid type:", self.mem_lipid)
         mf.addRow("Scale factor:", self.mem_scale)
-        mf.addRow("Membrane center Z (nm):", self.mem_center_z)
+        mf.addRow("Membrane center Z (nm):", self._mem_center_row)
         mf.addRow("X padding (nm):", self.mem_xpad)
         mf.addRow("Y padding (nm):", self.mem_ypad)
         mf.addRow("Z padding (nm):", self.mem_zpad)

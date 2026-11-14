@@ -12,7 +12,7 @@ conda activate chemflow
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/../.." && pwd)"
-training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
+training_dir="${PHYSCHEM_JOB_DIR:-/data/$USER/model_training/adme/physchem}"
 mode="${HF_GRAPHORMER_MODE:-single}"
 case "$mode" in
     single)

@@ -75,7 +75,9 @@ def graphormer_config(args: argparse.Namespace) -> dict:
     model = config.setdefault("ModelConfig", {})
     model.update(
         {
-            "checkpoint_path": "/vf/users/liuy48/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt",
+            "checkpoint_path": str(
+                Path.home() / ".cache/chemflow/graphormer"
+                / "graphormer-base-pcqm4mv1.pt"),
             "local_files_only": True,
             "freeze_encoder": False,
         }
@@ -169,7 +171,9 @@ def kermt_config(args: argparse.Namespace) -> dict:
     model = config.setdefault("KERMTConfig", {})
     model.update(
         {
-            "checkpoint_path": "/vf/users/liuy48/.cache/chemflow/kermt/NV-KERMT-70M-v2/kermt_contrastive_v2.0.pt",
+            "checkpoint_path": str(
+                Path.home() / ".cache/chemflow/kermt/NV-KERMT-70M-v2"
+                / "kermt_contrastive_v2.0.pt"),
             "local_files_only": True,
             "use_cuikmolmaker_featurization": True,
             "features_generator": "rdkit_2d_normalized_cuik_molmaker",

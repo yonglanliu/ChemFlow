@@ -20,8 +20,8 @@ The viewer looks for `3Dmol-min.js` in this order: `CHEMFLOW_3DMOL_PATH` →
 If none exists and there's no internet, the 3D panel shows
 *"3Dmol.js not found. Run `chemflow vendor-3dmol` …"* instead of a structure.
 
-Fetch it once on a node that **has internet** (on Biowulf, a login or
-data-transfer node):
+Fetch it once on a node that **has internet** (on an HPC cluster, typically a
+login or data-transfer node rather than a compute node):
 
 ```bash
 conda run -n chemflow chemflow vendor-3dmol

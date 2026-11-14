@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -293,7 +294,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("/data/liuy48/model_training/adme/adsorption/caco2"),
+        default=Path(f"/data/{os.environ.get('USER', '')}"
+                     "/model_training/adme/adsorption/caco2"),
     )
     parser.add_argument("--target", default=TARGET)
     parser.add_argument("--n-bootstrap", type=int, default=2000)

@@ -30,6 +30,8 @@ _DEFAULT_ENV = "boltz"
 # has tested together — more reliable than choosing them independently.
 _PACKAGES = ("boltz[cuda]",)
 _CONDA_EXTRAS = ("pyyaml", "rdkit>=2024.03", "numpy", "scipy",
+                 # pandas needs a parquet engine: parquet engine for pandas; the retired shared env shipped it
+                 "pyarrow",
                  "setuptools>=80", "wheel")
 _LINUX_RUNTIME = ("libgcc-ng>=12", "libstdcxx-ng>=12")
 

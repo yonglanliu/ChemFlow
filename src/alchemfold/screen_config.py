@@ -270,7 +270,7 @@ def default_yaml_text(
     jobname: str = "",
     cleanup: bool = True,
     predict_affinity: bool = False,
-    no_kernels: bool = True,
+    no_kernels: bool = False,
     boltz_command: str | None = None,
     chai_command: str | None = None,
     rank_metric: str = "auto",

@@ -19,11 +19,11 @@ repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 
 # Override paths when submitting if the dataset or output directory is stored
 # elsewhere on the HPC filesystem:
-#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/physchem \
-#   PHYSCHEM_DATA_FILE=/data/liuy48/datasets/physchem_multitask.csv \
-#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/datasets/physchem_test.csv \
+#   PHYSCHEM_JOB_DIR=/data/$USER/model_training/adme/physchem \
+#   PHYSCHEM_DATA_FILE=/data/$USER/datasets/physchem_multitask.csv \
+#   PHYSCHEM_TEST_DATA_FILE=/data/$USER/datasets/physchem_test.csv \
 #   sbatch chemeleon_array.slurm
-training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
+training_dir="${PHYSCHEM_JOB_DIR:-/data/$USER/model_training/adme/physchem}"
 base_config="${CHEMELEON_BASE_CONFIG:-$repo_dir/example/chemeleon_training/conf.toml}"
 data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
 test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"

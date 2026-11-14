@@ -88,13 +88,6 @@ ENVIRONMENTS = [
         "Used for PROTAC ternary docking and KIC loop building.",
         default_env="rosetta", gpu=False, recreate=False, status_env=False),
     _EnvSpec(
-        "alchemfold-env", "AlchemFold — Boltz-2 + Chai-1  (DEPRECATED)",
-        "The old SHARED engine env. Superseded by one env per engine: Boltz-2, Chai-1 and "
-        "DiffDock-L above. AlchemFold itself now runs from the chemflow env and calls each "
-        "engine in its own env, so you no longer need this. Kept so existing installs keep "
-        "working — do not create it for a new setup.",
-        default_env="alchemfold", gpu=True, recreate=True),
-    _EnvSpec(
         "reinvent-env", "REINVENT4 — generative design",
         "REINVENT4 for generative molecule / linker design.",
         default_env="reinvent", gpu=False, recreate=False, status_env=False),

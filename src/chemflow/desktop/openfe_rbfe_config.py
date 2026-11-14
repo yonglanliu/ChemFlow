@@ -39,12 +39,11 @@ DEFAULTS: dict[str, Any] = {
     "membrane_system": False,
     "complex_box_size": None,             # [x, y, z] nm, required for membrane PBC
     # --- Complex-leg pre-equilibration (chemflow addition) ---
-    # openfe's RBFE protocol goes straight from minimisation to NPT; SepTop/ABFE
-    # run an NVT stage first. On a dense bilayer that gap shows up as a step-0
-    # NaN. True swaps in chemflow's EquilibratedRelativeHybridTopologyProtocol.
-    "pre_equilibrate_complex": False,
-    "pre_equilibrate_nvt_ps": 100.0,      # NVT length, ps (0 = skip the MD part)
-    "pre_equilibrate_min_steps": 5000,    # minimisation steps before the NVT
+    # Preflight the solvated input before OpenFE reads it: error | warn | off.
+    "input_check": "error",
+    # Build + equilibrate the system as part of the run instead of pointing
+    # protein_pdb at one built elsewhere. None = use protein_pdb as given.
+    "preparation": None,
     # --- General ---
     "solvent_protocol_repeats": 1,
     "complex_protocol_repeats": 1,
@@ -408,18 +407,6 @@ def slurm_script(config_path: str | Path, hpc: dict[str, Any] | None = None,
     n_rep = int(hpc.get("replicates", 3))
     gpus = int(hpc.get("gpus", 0))
     gpu_type = str(hpc.get("gpu_type", "")).strip()
-    # chemflow's complex-leg NVT pre-equilibration reads its lengths from the
-    # environment at RUN time (they are not part of gufe's serialised settings),
-    # so the config's values have to be exported here.
-    if conf.get("pre_equilibrate_complex"):
-        preeq_exports = (
-            "\n# chemflow complex-leg NVT pre-equilibration "
-            "(pre_equilibrate_complex: true)\n"
-            f"export CHEMFLOW_RFE_PREEQ_NVT_PS={float(conf.get('pre_equilibrate_nvt_ps', 100.0)):g}\n"
-            f"export CHEMFLOW_RFE_PREEQ_MIN_STEPS={int(conf.get('pre_equilibrate_min_steps', 5000))}\n"
-        )
-    else:
-        preeq_exports = ""
     # OpenFE `quickrun` runs the whole DAG in ONE process on ONE GPU — it is NOT
     # MPI-parallel, so we never wrap it in srun/mpirun (that would just launch N
     # redundant copies of the same edge). Parallelism is across edges/replicates
@@ -481,7 +468,7 @@ for ((i=0; i<N_REP; i++)); do mkdir -p "${{OUT_ROOT}}/replicate_${{i}}"; done
 
 export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 export CUDA_VISIBLE_DEVICES="${{SLURM_LOCALID:-0}}"
-{preeq_exports}
+
 echo "=== GPU check (before quickrun) ==="
 echo "host=$(hostname)  CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-unset}}  SLURM_JOB_GPUS=${{SLURM_JOB_GPUS:-unset}}"
 nvidia-smi -L 2>/dev/null || echo "nvidia-smi: not available on this node"

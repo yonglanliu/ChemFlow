@@ -12,15 +12,15 @@
 
 set -euo pipefail
 
-source "/home/liuy48/bin/myconda"
+source "/home/$USER/bin/myconda"
 conda activate chemflow
 
-training_dir="/data/liuy48/model_training/adme/adsorption/caco2"
+training_dir="/data/$USER/model_training/adme/adsorption/caco2"
 generated_config_dir="$training_dir/generated_configs"
 base_config="$training_dir/conf/graphormer_conf.toml"
 data_file="$training_dir/dataset/caco2_expansionrx_train.csv"
 test_data_file="$training_dir/dataset/caco2_expansionrx_test.csv"
-official_checkpoint="/data/liuy48/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
+official_checkpoint="/data/$USER/.cache/chemflow/graphormer/graphormer-base-pcqm4mv1.pt"
 public3_best_model="$training_dir/graphormer_S1_public3_scaffold_val_0.2_seed42/best_model"
 target="Log10_Caco_Papp_AB_cm_s"
 

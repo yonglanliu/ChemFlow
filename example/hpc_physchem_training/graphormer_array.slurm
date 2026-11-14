@@ -20,11 +20,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/../.." && pwd)"
 
 # These locations can be overridden at submission time, for example:
-#   PHYSCHEM_JOB_DIR=/data/liuy48/model_training/adme/physchem \
-#   PHYSCHEM_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_multitask.csv \
-#   PHYSCHEM_TEST_DATA_FILE=/data/liuy48/model_training/adme/physchem/dataset/physchem_test.csv \
+#   PHYSCHEM_JOB_DIR=/data/$USER/model_training/adme/physchem \
+#   PHYSCHEM_DATA_FILE=/data/$USER/model_training/adme/physchem/dataset/physchem_multitask.csv \
+#   PHYSCHEM_TEST_DATA_FILE=/data/$USER/model_training/adme/physchem/dataset/physchem_test.csv \
 #   sbatch graphormer_array.slurm
-training_dir="${PHYSCHEM_JOB_DIR:-/data/liuy48/model_training/adme/physchem}"
+training_dir="${PHYSCHEM_JOB_DIR:-/data/$USER/model_training/adme/physchem}"
 base_config="${HF_GRAPHORMER_BASE_CONFIG:-$repo_dir/example/hf_graphormer_training/conf.toml}"
 data_file="${PHYSCHEM_DATA_FILE:-$training_dir/dataset/physchem_multitask.csv}"
 test_data_file="${PHYSCHEM_TEST_DATA_FILE:-}"

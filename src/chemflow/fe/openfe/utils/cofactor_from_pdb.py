@@ -112,7 +112,7 @@ def _load_template_rdkit(template_sdf, charge_settings=None):
     import openfe  # noqa: PLC0415
 
     smc = openfe.SmallMoleculeComponent.from_sdf_file(str(template_sdf))
-    from chemflow.fe.openfe.partial_charges import (  # noqa: PLC0415
+    from chemflow.fe.openfe.utils.partial_charges import (  # noqa: PLC0415
         ensure_partial_charges,
         has_complete_partial_charges,
     )

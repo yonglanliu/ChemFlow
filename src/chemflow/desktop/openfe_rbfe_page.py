@@ -222,7 +222,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         if not source:
             return
         try:
-            from chemflow.fe.openfe.charge_report import molecule_svg
+            from chemflow.fe.openfe.utils.charge_report import molecule_svg
             svg = molecule_svg(source, name)
         except Exception as exc:
             self.charge_status.setText(f"Could not draw {name}: {exc}")
@@ -274,7 +274,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         if not src or not Path(src).expanduser().is_file():
             return
         try:
-            from chemflow.fe.openfe.charge_report import formal_charges, partial_charge_sums
+            from chemflow.fe.openfe.utils.charge_report import formal_charges, partial_charge_sums
             before = formal_charges(src)
             charged = self.charged_out.text()
             after = (partial_charge_sums(charged)
@@ -393,7 +393,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
             self.network_status.setText("Choose the network bundle directory first.")
             return
         try:
-            from chemflow.fe.openfe.network_view import render_network_html
+            from chemflow.fe.openfe.utils.network_view import render_network_html
             html = render_network_html(directory)
         except Exception as exc:
             self.network_status.setText(f"Could not draw network: {exc}")
@@ -448,7 +448,7 @@ class OpenFERbfeWorkflowPage(QTabWidget):
     def _on_edge_clicked(self, a: str, b: str) -> None:
         directory = self.network_dir.text()
         try:
-            from chemflow.fe.openfe.network_view import render_atom_mapping_html
+            from chemflow.fe.openfe.utils.network_view import render_atom_mapping_html
             html = render_atom_mapping_html(directory, a, b)
         except Exception as exc:
             self.network_status.setText(f"Mapping unavailable for {a}–{b}: {exc}")
@@ -517,7 +517,25 @@ class OpenFERbfeWorkflowPage(QTabWidget):
 
     def _system_tab(self):
         form = QWidget()
-        f = QFormLayout(form)
+        # Two columns: what goes in and how it is built on the left, how the box
+        # is solvated on the right. Twenty-six rows in a single form is unusable.
+        columns = QHBoxLayout(form)
+        columns.setSpacing(18)
+        inputs_box = QGroupBox("Inputs && preparation")
+        solvation_box = QGroupBox("Box, solvent && ions")
+        f = QFormLayout(inputs_box)
+        g = QFormLayout(solvation_box)
+        for layout in (f, g):
+            layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        left = QVBoxLayout()
+        right = QVBoxLayout()
+        left.addWidget(inputs_box)
+        left.addStretch(1)
+        right.addWidget(solvation_box)
+        right.addStretch(1)
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
         self.protein_pdb = PathField("protein.pdb (receptor / complex)")
         self.system_ligand_sdf = PathField("charged_ligands.sdf (defaults to Ligand Prep output)")
         self.cofactor_sdf = PathField("cofactor.sdf (optional)")
@@ -533,28 +551,30 @@ class OpenFERbfeWorkflowPage(QTabWidget):
             "and stripped from the protein before parameterization.")
         self.membrane = QCheckBox("Membrane system (membrane + solvent + ions)")
         self.membrane.toggled.connect(self._on_membrane_toggle)
-        # Complex-leg NVT pre-equilibration (chemflow's protocol subclass).
-        self.pre_equilibrate = QCheckBox("NVT pre-equilibration of the complex leg")
-        self.pre_equilibrate.setToolTip(
-            "openfe's RBFE protocol goes straight from minimisation to NPT "
-            "equilibration; SepTop and ABFE run an NVT stage first. On a dense "
-            "bilayer that gap shows up as a NaN at state 0 before sampling "
-            "starts.\n\nWith this on, chemflow relaxes the hybrid system "
-            "(minimise + NVT at lambda=0) once per repeat and all lambda windows "
-            "start from the result. Look for '[chemflow-preeq]' in the job log.")
-        self.preeq_nvt_ps = QDoubleSpinBox()
-        self.preeq_nvt_ps.setRange(0.0, 10000.0)
-        self.preeq_nvt_ps.setDecimals(0)
-        self.preeq_nvt_ps.setValue(100.0)
-        self.preeq_nvt_ps.setSuffix(" ps")
-        self.preeq_nvt_ps.setToolTip("NVT length. 0 = minimise only.")
-        self.preeq_min_steps = QSpinBox()
-        self.preeq_min_steps.setRange(0, 1000000)
-        self.preeq_min_steps.setSingleStep(1000)
-        self.preeq_min_steps.setValue(5000)
-        self.preeq_min_steps.setToolTip(
-            "Minimisation steps before the NVT stage. 0 = skip.")
-        self.pre_equilibrate.toggled.connect(self._on_pre_equilibrate_toggle)
+        # System preparation: build + equilibrate here, so the structure and its
+        # periodic box come from the same step and cannot disagree.
+        self.prepare_system = QCheckBox("Build Membrane")
+        self.prepare_system.setToolTip(
+            "Instead of pointing Protein PDB at a system built elsewhere, run the "
+            "membrane build and relaxation as part of this job. The periodic box "
+            "is then taken from the prepared structure, so it cannot disagree with "
+            "the file — a mismatch there maps molecules into the wrong cell and "
+            "shows up much later as a NaN in a lambda window.\n\n"
+            "Needs the membrane-build and membrane-relax YAML configs you already "
+            "use with `chemflow openmm modeling assemble`.")
+        self.prep_build_config = PathField(
+            "leave blank to generate one — membrane-build YAML", mode="file")
+        self.prep_relax_config = PathField(
+            "leave blank to generate one — membrane-relax YAML (full staged protocol)",
+            mode="file")
+        self.prep_md_config = PathField(
+            "optional production-MD YAML — leave blank to stop after relaxation",
+            mode="file")
+        # strip_resnames, input_check and the reference resname are not shown:
+        # the reference ligand's resname is appended to the strip list for you,
+        # LIG is a fine name for it, and the preflight should be on. All three
+        # stay editable in the YAML for the rare case that matters.
+        self.prepare_system.toggled.connect(self._on_prepare_system_toggle)
         self.solvent_box_shape = _combo(["cube", "dodecahedron", "octahedron"], "dodecahedron")
         self.complex_box_shape = _combo(["cube", "dodecahedron", "octahedron"], "dodecahedron")
         self.box_size = PathField(
@@ -579,28 +599,57 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         f.addRow("Cofactor template SDF (optional):", self.cofactor_template_sdf)
         f.addRow("Cofactor resname(s):", self.cofactor_resnames)
         f.addRow("", self.membrane)
-        f.addRow("", self.pre_equilibrate)
-        preeq_row = QWidget()
-        preeq_layout = QHBoxLayout(preeq_row)
-        preeq_layout.setContentsMargins(0, 0, 0, 0)
-        preeq_layout.addWidget(QLabel("NVT:"))
-        preeq_layout.addWidget(self.preeq_nvt_ps)
-        preeq_layout.addWidget(QLabel("minimisation steps:"))
-        preeq_layout.addWidget(self.preeq_min_steps)
-        preeq_layout.addStretch()
-        f.addRow("Pre-equilibration:", preeq_row)
-        self._on_pre_equilibrate_toggle(self.pre_equilibrate.isChecked())
-        f.addRow("Solvent-leg box shape:", self.solvent_box_shape)
-        f.addRow("Complex-leg box shape:", self.complex_box_shape)
-        f.addRow("Complex box size (membrane):", self.box_size)
-        f.addRow("Complex solvation padding (nm):", self.complex_pad)
-        f.addRow("Solvent solvation padding (nm):", self.solvent_pad)
-        f.addRow("Solvent model:", self.solvent_model)
-        f.addRow("Ionic strength (M):", self.ion_conc)
-        f.addRow("Positive ion:", self.pos_ion)
-        f.addRow("Negative ion:", self.neg_ion)
-        f.addRow("", self.neutralize)
-        f.addRow("", self.pbc_note)
+        f.addRow("", self.prepare_system)
+        f.addRow("  build config:", self.prep_build_config)
+        f.addRow("  relax config:", self.prep_relax_config)
+        self.prep_reference_ligand = QCheckBox(
+            "Put a reference ligand in the pocket before packing lipids")
+        self.prep_reference_ligand.setChecked(True)
+        self.prep_reference_ligand.setToolTip(
+            "Lipid packing has no reason to avoid an empty binding site, and for a "
+            "site that opens onto the bilayer it will fill it. Whatever gets packed "
+            "in there survives the relaxation and OpenFE then inserts its ligands on "
+            "top of it.\n\nThe pose is the LARGEST ligand in the network (so the "
+            "pocket is carved for the whole transformation, not just one end of it), "
+            "taken from the charged ligands SDF and already in the receptor frame. "
+            "It is removed again before OpenFE sees the system.")
+        self.prep_preserve_pose = QCheckBox(
+            "Keep the binding pose restrained to the end of the relaxation")
+        self.prep_preserve_pose.setChecked(True)
+        self.prep_preserve_pose.setToolTip(
+            "The stock relaxation ladder releases every restraint at stage 6 and "
+            "runs the last two stages free. That is right for equilibrating a "
+            "membrane, but a free-energy run starts from the pose in the ligand "
+            "SDF and the atom mapping is built against that geometry — if the "
+            "protein and ligand drift at the end, the poses no longer match the "
+            "SDF and the ligands have to be re-aligned before the network can be "
+            "planned.\n\n"
+            "With this on, backbone, sidechain and ligand stay restrained through "
+            "stage 6 and production, so the run becomes 'equilibrate the lipids "
+            "and water around a fixed solute'. The restraints are deliberately "
+            "weak there, because positional restraints reference absolute "
+            "coordinates while the membrane barostat rescales the box.\n\n"
+            "This is also what SepTop needs: a drifted pose would invalidate the "
+            "binding-pose assumption.")
+        self.prep_dry_run = QCheckBox("Dry run (print the build/relax steps and stop)")
+        self.prep_dry_run.setToolTip(
+            "Check the paths and the generated configs without spending GPU time.")
+        f.addRow("  MD config (optional):", self.prep_md_config)
+        f.addRow("", self.prep_reference_ligand)
+        f.addRow("", self.prep_preserve_pose)
+        f.addRow("", self.prep_dry_run)
+        self._on_prepare_system_toggle(self.prepare_system.isChecked())
+        g.addRow("Solvent-leg box shape:", self.solvent_box_shape)
+        g.addRow("Complex-leg box shape:", self.complex_box_shape)
+        g.addRow("Complex box size (membrane):", self.box_size)
+        g.addRow("Complex solvation padding (nm):", self.complex_pad)
+        g.addRow("Solvent solvation padding (nm):", self.solvent_pad)
+        g.addRow("Solvent model:", self.solvent_model)
+        g.addRow("Ionic strength (M):", self.ion_conc)
+        g.addRow("Positive ion:", self.pos_ion)
+        g.addRow("Negative ion:", self.neg_ion)
+        g.addRow("", self.neutralize)
+        g.addRow("", self.pbc_note)
         return self._wrap(PageHeader("OpenFE RBFE", "3 · System",
                                      "Build the protein (or protein+membrane) complex with solvent and ions."), form)
 
@@ -711,7 +760,25 @@ class OpenFERbfeWorkflowPage(QTabWidget):
 
     def _job_tab(self):
         form = QWidget()
-        f = QFormLayout(form)
+        # Two columns: where the job writes and what it runs in on the left,
+        # what SLURM is asked for on the right. Seventeen rows in one form is
+        # a scroll-and-hunt exercise.
+        columns = QHBoxLayout(form)
+        columns.setSpacing(18)
+        job_box = QGroupBox("Job && environment")
+        slurm_box = QGroupBox("SLURM resources")
+        f = QFormLayout(job_box)
+        s = QFormLayout(slurm_box)
+        for layout in (f, s):
+            layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        left, right = QVBoxLayout(), QVBoxLayout()
+        left.addWidget(job_box)
+        left.addStretch(1)
+        right.addWidget(slurm_box)
+        right.addStretch(1)
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
         self.config_path = PathField("rbfe.yaml (written into <workdir>/<jobname>/)", mode="save",
                                      save_filter="YAML (*.yaml *.yml)")
         self.config_path.setText("rbfe.yaml")
@@ -761,18 +828,19 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         self.conda_env.setPlaceholderText("alchemforge")
         for label, w in [("Config file name:", self.config_path),
                          ("Work dir (base):", self.workdir), ("Job name:", self.jobname),
-                         ("HPC preset:", self.hpc_preset),
-                         ("SLURM partition:", self.partition),
-                         ("Nodes:", self.nodes), ("Tasks:", self.ntasks),
-                         ("CPUs per task:", self.cpus), ("GPUs:", self.gpus),
-                         ("GPU type (--gres):", self.gpu_type),
                          ("Replicates per edge:", self.replicates),
                          ("Array range (--array):", self.array),
-                         ("Memory:", self.memory), ("Walltime:", self.walltime),
                          ("Modules (module load):", self.modules),
                          ("conda init script:", self.conda_init),
                          ("conda environment:", self.conda_env)]:
             f.addRow(label, w)
+        for label, w in [("HPC preset:", self.hpc_preset),
+                         ("SLURM partition:", self.partition),
+                         ("Nodes:", self.nodes), ("Tasks:", self.ntasks),
+                         ("CPUs per task:", self.cpus), ("GPUs:", self.gpus),
+                         ("GPU type (--gres):", self.gpu_type),
+                         ("Memory:", self.memory), ("Walltime:", self.walltime)]:
+            s.addRow(label, w)
         return self._wrap(PageHeader("OpenFE RBFE", "5 · Job settings (HPC)",
                                      "Output locations and the SLURM parameters for submission."),
                           with_help(form, HPC_JOB_HELP_HTML))
@@ -823,19 +891,36 @@ class OpenFERbfeWorkflowPage(QTabWidget):
         if merged.get("conda_environment"):
             self.conda_env.setText(str(merged["conda_environment"]))
 
-    def _on_pre_equilibrate_toggle(self, on: bool) -> None:
-        """The lengths only matter when the extra stage runs."""
-        self.preeq_nvt_ps.setEnabled(on)
-        self.preeq_min_steps.setEnabled(on)
+    def _on_prepare_system_toggle(self, on: bool) -> None:
+        """The build/relax configs only matter when preparation runs here."""
+        for widget in (self.prep_build_config, self.prep_relax_config,
+                       self.prep_md_config, self.prep_reference_ligand,
+                       self.prep_preserve_pose, self.prep_dry_run):
+            widget.setEnabled(on)
+        # When the system is built here, its box comes from the prepared
+        # structure, so the manual box-size field is not used.
+        if hasattr(self, "box_size"):
+            self.box_size.setEnabled(not on and self.membrane.isChecked())
+        if hasattr(self, "pbc_note"):
+            self._on_membrane_toggle(self.membrane.isChecked())
 
     def _on_membrane_toggle(self, on: bool) -> None:
-        self.box_size.setEnabled(on)
-        # Membrane complex uses explicit box vectors, so the complex box shape is unused.
+        built_here = getattr(self, "prepare_system", None) is not None and \
+            self.prepare_system.isChecked()
+        self.box_size.setEnabled(on and not built_here)
+        # A membrane complex is solvated from explicit box vectors, so OpenFE
+        # ignores both the complex box shape and the complex solvation padding
+        # (create_json sets box_shape = None and solvent_padding = None).
         self.complex_box_shape.setEnabled(not on)
-        self.pbc_note.setText(
-            "Membrane system: set a complex box size x, y, z (nm) so the periodic box is valid. "
-            "Complex box shape is ignored (box vectors are used)."
-            if on else "Soluble system: box is padded automatically.")
+        self.complex_pad.setEnabled(not on)
+        if on:
+            self.pbc_note.setText(
+                "Membrane system: the complex leg uses explicit box vectors, so its "
+                "box shape and solvation padding do not apply. The box comes from the "
+                "prepared system when Build Membrane is on, otherwise from the box "
+                "size above. The solvent leg is unaffected.")
+        else:
+            self.pbc_note.setText("Soluble system: box is padded automatically.")
 
     def _overrides(self) -> dict:
         network = self.network.text().strip()
@@ -860,9 +945,21 @@ class OpenFERbfeWorkflowPage(QTabWidget):
             "skip_charge_assignment": self.skip_charge.isChecked(),
             "protein_pdb": self.protein_pdb.text() or None,
             "membrane_system": self.membrane.isChecked(),
-            "pre_equilibrate_complex": self.pre_equilibrate.isChecked(),
-            "pre_equilibrate_nvt_ps": self.preeq_nvt_ps.value(),
-            "pre_equilibrate_min_steps": self.preeq_min_steps.value(),
+            "input_check": "error",
+            "preparation": (
+                {
+                    "enabled": True,
+                    "build_config": self.prep_build_config.text().strip() or None,
+                    "relax_config": self.prep_relax_config.text().strip() or None,
+                    "md_config": self.prep_md_config.text().strip() or None,
+                    "strip_resnames": None,
+                    "reference_ligand": self.prep_reference_ligand.isChecked(),
+                    "reference_ligand_resname": "LIG",
+                    "preserve_binding_pose": self.prep_preserve_pose.isChecked(),
+                    "dry_run": self.prep_dry_run.isChecked(),
+                }
+                if self.prepare_system.isChecked() else None
+            ),
             "complex_box_size": parse_box_size(self.box_size.text()),
             "solvent_box_shape": self.solvent_box_shape.currentText(),
             "complex_box_shape": self.complex_box_shape.currentText(),

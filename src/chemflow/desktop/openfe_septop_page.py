@@ -228,7 +228,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         if not source:
             return
         try:
-            from chemflow.fe.openfe.charge_report import molecule_svg
+            from chemflow.fe.openfe.utils.charge_report import molecule_svg
             svg = molecule_svg(source, name)
         except Exception as exc:
             self.charge_status.setText(f"Could not draw {name}: {exc}")
@@ -271,7 +271,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         if not src or not Path(src).expanduser().is_file():
             return
         try:
-            from chemflow.fe.openfe.charge_report import formal_charges, partial_charge_sums
+            from chemflow.fe.openfe.utils.charge_report import formal_charges, partial_charge_sums
             before = formal_charges(src)
             charged = self.charged_out.text()
             after = (partial_charge_sums(charged)
@@ -349,7 +349,7 @@ class OpenFESeptopWorkflowPage(QTabWidget):
         bundle = self.network_graphml.text().strip()
         bundle = str(Path(bundle).parent) if bundle else self._json_dir()
         try:
-            from chemflow.fe.openfe.network_view import render_network_html
+            from chemflow.fe.openfe.utils.network_view import render_network_html
             html = render_network_html(bundle)
         except Exception as exc:
             self.network_note.setText(f"Could not draw network: {exc}")
